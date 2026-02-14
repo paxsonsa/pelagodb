@@ -12,7 +12,7 @@
 //! - update_node: Read-modify-write with index diff
 //! - delete_node: Remove data, indexes, cascade edges, emit CDC
 
-use crate::cdc::{CdcEntry, CdcWriter};
+use crate::cdc::CdcWriter;
 use crate::db::PelagoDb;
 use crate::ids::IdAllocator;
 use crate::index::{compute_index_entries, compute_index_removals, IndexEntry, IndexEntryType};
@@ -20,7 +20,7 @@ use crate::schema::SchemaRegistry;
 use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
-use pelago_core::schema::{EntitySchema, ExtrasPolicy};
+use pelago_core::schema::{EntitySchema, ExtrasPolicy, IndexType};
 use pelago_core::{NodeId, PelagoError, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -59,12 +59,8 @@ impl NodeStore {
     }
 
     /// Build the locality key for a node
+    #[allow(dead_code)]
     fn locality_key(subspace: &Subspace, entity_type: &str, site_id: u8, node_id: &[u8]) -> Bytes {
-        let loc_subspace = Subspace::namespace(
-            // We need to extract db/ns from the subspace - for now using markers
-            "",
-            "",
-        );
         // Build using the same subspace base but with loc marker
         subspace
             .pack()
@@ -96,6 +92,24 @@ impl NodeStore {
 
         // Validate properties
         validate_properties(entity_type, &schema, &properties)?;
+
+        // Check unique constraints before creating
+        for (prop_name, prop_def) in &schema.properties {
+            if prop_def.index == IndexType::Unique {
+                if let Some(value) = properties.get(prop_name) {
+                    if let Some(_existing_id) = self
+                        .check_unique_constraint(database, namespace, entity_type, prop_name, value)
+                        .await?
+                    {
+                        return Err(PelagoError::UniqueConstraintViolation {
+                            entity_type: entity_type.to_string(),
+                            field: prop_name.clone(),
+                            value: format!("{:?}", value),
+                        });
+                    }
+                }
+            }
+        }
 
         // Allocate ID
         let (site_id, seq) = self
@@ -227,21 +241,27 @@ impl NodeStore {
         let existing_data: NodeData = decode_cbor(&existing_bytes)?;
         let old_properties = existing_data.properties.clone();
 
-        // Validate new properties
-        validate_properties(entity_type, &schema, &new_properties)?;
+        // Merge: start with old properties, overlay new properties
+        let mut merged_properties = old_properties.clone();
+        for (key, value) in &new_properties {
+            merged_properties.insert(key.clone(), value.clone());
+        }
 
-        // Compute index changes
+        // Validate merged properties (not just new ones)
+        validate_properties(entity_type, &schema, &merged_properties)?;
+
+        // Compute index changes between old and merged
         let removals = compute_index_removals(
             &subspace,
             entity_type,
             &node_id_bytes,
             &schema,
             &old_properties,
-            &new_properties,
+            &merged_properties,
         )?;
 
         let additions =
-            compute_index_entries(&subspace, entity_type, &node_id_bytes, &schema, &new_properties)?;
+            compute_index_entries(&subspace, entity_type, &node_id_bytes, &schema, &merged_properties)?;
 
         // Update timestamp
         let now = std::time::SystemTime::now()
@@ -249,9 +269,9 @@ impl NodeStore {
             .unwrap()
             .as_micros() as i64;
 
-        // Encode new data
+        // Encode merged data
         let updated_data = NodeData {
-            properties: new_properties.clone(),
+            properties: merged_properties.clone(),
             locality: existing_data.locality,
             created_at: existing_data.created_at,
             updated_at: now,
@@ -286,14 +306,14 @@ impl NodeStore {
                 entity_type,
                 node_id,
                 &old_properties,
-                &new_properties,
+                &merged_properties,
             )
             .await?;
 
         Ok(StoredNode {
             id: node_id.to_string(),
             entity_type: entity_type.to_string(),
-            properties: new_properties,
+            properties: merged_properties,
             locality: existing_data.locality,
             created_at: existing_data.created_at,
             updated_at: now,

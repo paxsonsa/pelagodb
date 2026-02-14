@@ -12,7 +12,7 @@
 //! - delete_edge: Remove all paired entries
 //! - list_edges: Range scan with optional label filter
 
-use crate::cdc::CdcWriter;
+// CdcWriter will be used when CDC is integrated into edge operations
 use crate::db::PelagoDb;
 use crate::ids::IdAllocator;
 use crate::node::NodeStore;
@@ -121,7 +121,7 @@ impl EdgeStore {
         properties: HashMap<String, Value>,
     ) -> Result<StoredEdge, PelagoError> {
         // Verify source node exists
-        let source_node = self
+        let _source_node = self
             .node_store
             .get_node(&source.database, &source.namespace, &source.entity_type, &source.node_id)
             .await?
@@ -301,13 +301,16 @@ impl EdgeStore {
 
         let mut edges = Vec::new();
 
+        // The marker position is right after the edge subspace prefix
+        let marker_pos = subspace.prefix().len();
+
         // For each forward key, fetch the corresponding metadata
         for (key, _) in results {
             // Convert forward key to metadata key (change marker from 'f' to 'm')
             let mut meta_key = key.clone();
-            // Find and replace the forward marker with metadata marker
-            if let Some(pos) = meta_key.iter().position(|&b| b == edge_markers::FORWARD) {
-                meta_key[pos] = edge_markers::FORWARD_META;
+            // Replace the marker at the known position (not searching - 'f' may appear in strings!)
+            if meta_key.len() > marker_pos {
+                meta_key[marker_pos] = edge_markers::FORWARD_META;
             }
 
             if let Some(meta_bytes) = self.db.get(&meta_key).await? {
