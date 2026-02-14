@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  fdb:
+    image: foundationdb/foundationdb:7.3.70
+    environment:
+      FDB_NETWORKING_MODE: container
+    volumes:
+      - fdb-data:/var/fdb/data
+    ports:
+      - 4500:4500
+
+  pelago:
+    build: .
+    depends_on:
+      - fdb
+    environment:
+      PELAGO_FDB_CLUSTER: fdb:4500
+      PELAGO_SITE_ID: 1
+      PELAGO_LISTEN_ADDR: "[::]:50051"
+      RUST_LOG: info
+    ports:
+      - "50051:50051"
+
+volumes:
+  fdb-data:

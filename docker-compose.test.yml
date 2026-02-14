@@ -1,0 +1,45 @@
+# Docker Compose for running FDB in test/development mode
+#
+# USAGE:
+# - Linux: docker-compose -f docker-compose.test.yml up -d
+# - macOS: Install FDB locally (see below), Docker networking doesn't work well
+#
+# macOS SETUP (recommended):
+#   1. Download FDB pkg from https://github.com/apple/foundationdb/releases
+#   2. Install: sudo installer -pkg FoundationDB-7.3.x.pkg -target /
+#   3. Configure: fdbcli --exec "configure new single memory"
+#   4. Run tests: FDB_CLUSTER_FILE=/usr/local/etc/foundationdb/fdb.cluster \
+#                 LIBRARY_PATH=/usr/local/lib cargo test --test fdb_integration -- --ignored
+#
+# Linux SETUP:
+#   1. docker-compose -f docker-compose.test.yml up -d
+#   2. Wait for healthy: docker-compose -f docker-compose.test.yml ps
+#   3. Configure: docker exec pelago-fdb-test fdbcli --exec "configure new single memory"
+#   4. Copy cluster file: docker cp pelago-fdb-test:/var/fdb/fdb.cluster ./fdb.cluster
+#   5. Run tests: FDB_CLUSTER_FILE=./fdb.cluster cargo test --test fdb_integration -- --ignored
+
+services:
+  fdb:
+    image: foundationdb/foundationdb:7.3.70
+    container_name: pelago-fdb-test
+    platform: linux/amd64
+    # Use host networking on Linux for best compatibility
+    # On macOS Docker Desktop, host networking doesn't work - use native FDB instead
+    network_mode: host
+    environment:
+      FDB_NETWORKING_MODE: host
+      FDB_PORT: 4500
+      # Enable trace logging for debugging
+      FDB_TRACE_FORMAT: json
+      FDB_TRACE_LOG_GROUP: pelago-test
+    volumes:
+      - fdb-test-data:/var/fdb/data
+    healthcheck:
+      test: ["CMD", "fdbcli", "--exec", "status minimal"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  fdb-test-data:

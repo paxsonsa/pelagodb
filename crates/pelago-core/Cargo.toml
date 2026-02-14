@@ -1,0 +1,11 @@
+[package]
+name = "pelago-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+ciborium.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+clap.workspace = true

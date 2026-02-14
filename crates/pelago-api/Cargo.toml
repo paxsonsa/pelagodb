@@ -1,0 +1,16 @@
+[package]
+name = "pelago-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pelago-core.workspace = true
+pelago-proto.workspace = true
+pelago-storage.workspace = true
+pelago-query.workspace = true
+tokio.workspace = true
+tokio-stream = "0.1"
+tonic.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

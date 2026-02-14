@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pelago-core",
+    "crates/pelago-proto",
+    "crates/pelago-storage",
+    "crates/pelago-query",
+    "crates/pelago-api",
+    "crates/pelago-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["PelagoDB Team"]
+license = "Apache-2.0"
+repository = "https://github.com/pelagodb/pelagodb"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"
+
+# FDB
+foundationdb = { version = "0.10", features = ["embedded-fdb-include", "fdb-7_3"] }
+
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# CEL
+cel-interpreter = "0.9"
+
+# Utilities
+uuid = { version = "1", features = ["v7"] }
+bytes = "1"
+
+# Internal crates
+pelago-core = { path = "crates/pelago-core" }
+pelago-proto = { path = "crates/pelago-proto" }
+pelago-storage = { path = "crates/pelago-storage" }
+pelago-query = { path = "crates/pelago-query" }
+pelago-api = { path = "crates/pelago-api" }

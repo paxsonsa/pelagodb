@@ -1,0 +1,13 @@
+[package]
+name = "pelago-query"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pelago-core.workspace = true
+pelago-proto.workspace = true
+pelago-storage.workspace = true
+tokio.workspace = true
+cel-interpreter.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

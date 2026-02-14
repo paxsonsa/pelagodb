@@ -1,0 +1,21 @@
+[package]
+name = "pelago-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "pelago-server"
+path = "src/main.rs"
+
+[dependencies]
+pelago-core.workspace = true
+pelago-proto.workspace = true
+pelago-storage.workspace = true
+pelago-query.workspace = true
+pelago-api.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

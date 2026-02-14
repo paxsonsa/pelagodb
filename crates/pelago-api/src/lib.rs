@@ -1,0 +1,25 @@
+//! PelagoDB gRPC API Layer
+//!
+//! This crate wires storage and query operations into tonic service handlers:
+//! - SchemaService: Schema registration and retrieval
+//! - NodeService: Node CRUD operations
+//! - EdgeService: Edge operations
+//! - QueryService: CEL-based queries and graph traversals
+//! - AdminService: Administrative operations
+//! - HealthService: Health check endpoints
+
+pub mod admin_service;
+pub mod edge_service;
+pub mod error;
+pub mod health_service;
+pub mod node_service;
+pub mod query_service;
+pub mod schema_service;
+
+pub use admin_service::AdminServiceImpl;
+pub use edge_service::EdgeServiceImpl;
+pub use error::{to_status, IntoStatus};
+pub use health_service::HealthServiceImpl;
+pub use node_service::NodeServiceImpl;
+pub use query_service::QueryServiceImpl;
+pub use schema_service::SchemaServiceImpl;

@@ -1,0 +1,491 @@
+syntax = "proto3";
+package pelago.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMMON TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
+message RequestContext {
+  string database = 1;
+  string namespace = 2;
+  string site_id = 3;
+  string request_id = 4;
+}
+
+message NodeRef {
+  string entity_type = 1;
+  string node_id = 2;
+  string database = 3;   // For cross-namespace edges
+  string namespace = 4;  // For cross-namespace edges
+}
+
+message EdgeRef {
+  NodeRef source = 1;
+  NodeRef target = 2;
+  string label = 3;
+  string edge_id = 4;
+}
+
+message Value {
+  oneof kind {
+    string string_value = 1;
+    int64 int_value = 2;
+    double float_value = 3;
+    bool bool_value = 4;
+    int64 timestamp_value = 5;  // Unix microseconds
+    bytes bytes_value = 6;
+    bool null_value = 7;        // If true, value is null
+  }
+}
+
+enum ReadConsistency {
+  READ_CONSISTENCY_UNSPECIFIED = 0;
+  READ_CONSISTENCY_STRONG = 1;    // Direct FDB read
+  READ_CONSISTENCY_SESSION = 2;   // Verified cache
+  READ_CONSISTENCY_EVENTUAL = 3;  // Cache only
+}
+
+enum EdgeDirection {
+  EDGE_DIRECTION_UNSPECIFIED = 0;
+  EDGE_DIRECTION_OUTGOING = 1;
+  EDGE_DIRECTION_INCOMING = 2;
+  EDGE_DIRECTION_BOTH = 3;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCHEMA SERVICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+service SchemaService {
+  rpc RegisterSchema(RegisterSchemaRequest) returns (RegisterSchemaResponse);
+  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
+  rpc ListSchemas(ListSchemasRequest) returns (ListSchemasResponse);
+}
+
+message RegisterSchemaRequest {
+  RequestContext context = 1;
+  EntitySchema schema = 2;
+}
+
+message RegisterSchemaResponse {
+  uint32 version = 1;
+  bool created = 2;  // true if new type, false if update
+}
+
+message GetSchemaRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  uint32 version = 3;  // 0 = latest
+}
+
+message GetSchemaResponse {
+  EntitySchema schema = 1;
+}
+
+message ListSchemasRequest {
+  RequestContext context = 1;
+}
+
+message ListSchemasResponse {
+  repeated EntitySchema schemas = 1;
+}
+
+message EntitySchema {
+  string name = 1;
+  uint32 version = 2;
+  map<string, PropertyDef> properties = 3;
+  map<string, EdgeDef> edges = 4;
+  SchemaMeta meta = 5;
+  int64 created_at = 6;
+  string created_by = 7;
+}
+
+message PropertyDef {
+  PropertyType type = 1;
+  bool required = 2;
+  IndexType index = 3;
+  Value default_value = 4;
+}
+
+enum PropertyType {
+  PROPERTY_TYPE_UNSPECIFIED = 0;
+  PROPERTY_TYPE_STRING = 1;
+  PROPERTY_TYPE_INT = 2;
+  PROPERTY_TYPE_FLOAT = 3;
+  PROPERTY_TYPE_BOOL = 4;
+  PROPERTY_TYPE_TIMESTAMP = 5;
+  PROPERTY_TYPE_BYTES = 6;
+}
+
+enum IndexType {
+  INDEX_TYPE_NONE = 0;
+  INDEX_TYPE_UNIQUE = 1;
+  INDEX_TYPE_EQUALITY = 2;
+  INDEX_TYPE_RANGE = 3;
+}
+
+message EdgeDef {
+  EdgeTarget target = 1;
+  EdgeDirectionDef direction = 2;
+  map<string, PropertyDef> properties = 3;
+  string sort_key = 4;
+  OwnershipMode ownership = 5;
+}
+
+message EdgeTarget {
+  oneof kind {
+    string specific_type = 1;  // e.g., "Company"
+    bool polymorphic = 2;      // true = any type (*)
+  }
+}
+
+enum EdgeDirectionDef {
+  EDGE_DIRECTION_DEF_UNSPECIFIED = 0;
+  EDGE_DIRECTION_DEF_OUTGOING = 1;
+  EDGE_DIRECTION_DEF_BIDIRECTIONAL = 2;
+}
+
+enum OwnershipMode {
+  OWNERSHIP_MODE_UNSPECIFIED = 0;
+  OWNERSHIP_MODE_SOURCE_SITE = 1;
+  OWNERSHIP_MODE_INDEPENDENT = 2;
+}
+
+message SchemaMeta {
+  bool allow_undeclared_edges = 1;
+  ExtrasPolicy extras_policy = 2;
+}
+
+enum ExtrasPolicy {
+  EXTRAS_POLICY_UNSPECIFIED = 0;
+  EXTRAS_POLICY_REJECT = 1;
+  EXTRAS_POLICY_ALLOW = 2;
+  EXTRAS_POLICY_WARN = 3;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NODE SERVICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+service NodeService {
+  rpc CreateNode(CreateNodeRequest) returns (CreateNodeResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc UpdateNode(UpdateNodeRequest) returns (UpdateNodeResponse);
+  rpc DeleteNode(DeleteNodeRequest) returns (DeleteNodeResponse);
+}
+
+message CreateNodeRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  map<string, Value> properties = 3;
+}
+
+message CreateNodeResponse {
+  Node node = 1;
+}
+
+message GetNodeRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string node_id = 3;
+  ReadConsistency consistency = 4;
+  repeated string fields = 5;  // Empty = all fields
+}
+
+message GetNodeResponse {
+  Node node = 1;
+}
+
+message UpdateNodeRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string node_id = 3;
+  map<string, Value> properties = 4;  // Merged with existing
+}
+
+message UpdateNodeResponse {
+  Node node = 1;
+}
+
+message DeleteNodeRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string node_id = 3;
+}
+
+message DeleteNodeResponse {
+  bool deleted = 1;
+}
+
+message Node {
+  string id = 1;
+  string entity_type = 2;
+  map<string, Value> properties = 3;
+  string locality = 4;
+  int64 created_at = 5;
+  int64 updated_at = 6;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EDGE SERVICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+service EdgeService {
+  rpc CreateEdge(CreateEdgeRequest) returns (CreateEdgeResponse);
+  rpc DeleteEdge(DeleteEdgeRequest) returns (DeleteEdgeResponse);
+  rpc ListEdges(ListEdgesRequest) returns (stream EdgeResult);
+}
+
+message CreateEdgeRequest {
+  RequestContext context = 1;
+  NodeRef source = 2;
+  NodeRef target = 3;
+  string label = 4;
+  map<string, Value> properties = 5;
+}
+
+message CreateEdgeResponse {
+  Edge edge = 1;
+}
+
+message DeleteEdgeRequest {
+  RequestContext context = 1;
+  NodeRef source = 2;
+  NodeRef target = 3;
+  string label = 4;
+}
+
+message DeleteEdgeResponse {
+  bool deleted = 1;
+}
+
+message ListEdgesRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string node_id = 3;
+  string label = 4;           // Empty = all labels
+  EdgeDirection direction = 5;
+  ReadConsistency consistency = 6;
+  uint32 limit = 7;
+  bytes cursor = 8;
+}
+
+message EdgeResult {
+  Edge edge = 1;
+  bytes next_cursor = 2;      // Set on last message if more results
+}
+
+message Edge {
+  string edge_id = 1;
+  NodeRef source = 2;
+  NodeRef target = 3;
+  string label = 4;
+  map<string, Value> properties = 5;
+  int64 created_at = 6;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QUERY SERVICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+service QueryService {
+  rpc FindNodes(FindNodesRequest) returns (stream NodeResult);
+  rpc Traverse(TraverseRequest) returns (stream TraverseResult);
+  rpc Explain(ExplainRequest) returns (ExplainResponse);
+}
+
+message FindNodesRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string cel_expression = 3;  // e.g., "age >= 30 && active"
+  ReadConsistency consistency = 4;
+  repeated string fields = 5;
+  uint32 limit = 6;
+  bytes cursor = 7;
+}
+
+message NodeResult {
+  Node node = 1;
+  bytes next_cursor = 2;
+}
+
+message TraverseRequest {
+  RequestContext context = 1;
+  NodeRef start = 2;
+  repeated TraversalStep steps = 3;
+  uint32 max_depth = 4;       // Default: 4, max: 10
+  uint32 timeout_ms = 5;      // Default: 5000, max: 30000
+  uint32 max_results = 6;     // Default: 10000
+  ReadConsistency consistency = 7;
+  bool cascade = 8;           // Require all nested paths exist
+}
+
+message TraversalStep {
+  string edge_type = 1;
+  EdgeDirection direction = 2;
+  string edge_filter = 3;     // CEL on edge properties
+  string node_filter = 4;     // CEL on target node properties
+  repeated string fields = 5; // Node field projection
+  uint32 per_node_limit = 6;  // Fan-out control per source node
+  repeated string edge_fields = 7; // Edge property projection (@facets)
+  SortSpec sort = 8;
+}
+
+message SortSpec {
+  string field = 1;
+  bool descending = 2;
+  bool on_edge = 3;           // true = sort by edge property
+}
+
+message TraverseResult {
+  int32 depth = 1;
+  repeated NodeRef path = 2;
+  Node node = 3;
+  Edge edge = 4;
+  bytes next_cursor = 5;
+}
+
+message ExplainRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string cel_expression = 3;
+}
+
+message ExplainResponse {
+  QueryPlan plan = 1;
+  repeated string explanation = 2;  // Human-readable steps
+  double estimated_cost = 3;
+  double estimated_rows = 4;
+}
+
+message QueryPlan {
+  string strategy = 1;              // "point_lookup", "range_scan", "full_scan"
+  repeated IndexOperation indexes = 2;
+  string residual_filter = 3;
+}
+
+message IndexOperation {
+  string field = 1;
+  string operator = 2;              // "==", ">=", ">", "<", "<="
+  string value = 3;
+  double estimated_rows = 4;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADMIN SERVICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+service AdminService {
+  rpc DropIndex(DropIndexRequest) returns (DropIndexResponse);
+  rpc StripProperty(StripPropertyRequest) returns (StripPropertyResponse);
+  rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
+  rpc DropEntityType(DropEntityTypeRequest) returns (DropEntityTypeResponse);
+  rpc DropNamespace(DropNamespaceRequest) returns (DropNamespaceResponse);
+}
+
+message DropIndexRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string property_name = 3;
+}
+
+message DropIndexResponse {
+  int64 entries_deleted = 1;
+}
+
+message StripPropertyRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string property_name = 3;
+}
+
+message StripPropertyResponse {
+  string job_id = 1;
+}
+
+message GetJobStatusRequest {
+  RequestContext context = 1;
+  string job_id = 2;
+}
+
+message GetJobStatusResponse {
+  Job job = 1;
+}
+
+message Job {
+  string job_id = 1;
+  string job_type = 2;
+  JobStatus status = 3;
+  int64 created_at = 4;
+  int64 updated_at = 5;
+  double progress = 6;        // 0.0 to 1.0
+  string error = 7;
+}
+
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_PENDING = 1;
+  JOB_STATUS_RUNNING = 2;
+  JOB_STATUS_COMPLETED = 3;
+  JOB_STATUS_FAILED = 4;
+}
+
+message DropEntityTypeRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+}
+
+message DropEntityTypeResponse {
+  string cleanup_job_id = 1;  // Job for orphaned edge cleanup
+}
+
+message DropNamespaceRequest {
+  RequestContext context = 1;
+}
+
+message DropNamespaceResponse {
+  bool dropped = 1;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HEALTH SERVICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+service HealthService {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  ServingStatus status = 1;
+}
+
+enum ServingStatus {
+  SERVING_STATUS_UNKNOWN = 0;
+  SERVING_STATUS_SERVING = 1;
+  SERVING_STATUS_NOT_SERVING = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ERROR DETAILS
+// ═══════════════════════════════════════════════════════════════════════════
+
+message ErrorDetail {
+  string error_code = 1;      // e.g., "ERR_UNREGISTERED_TYPE"
+  string message = 2;
+  string category = 3;        // "VALIDATION", "REFERENTIAL", "OWNERSHIP"
+  map<string, string> metadata = 4;
+  repeated FieldError field_errors = 5;
+}
+
+message FieldError {
+  string field_name = 1;
+  string error_code = 2;
+  string message = 3;
+}

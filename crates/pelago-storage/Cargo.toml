@@ -1,0 +1,15 @@
+[package]
+name = "pelago-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pelago-core.workspace = true
+pelago-proto.workspace = true
+tokio.workspace = true
+foundationdb.workspace = true
+serde.workspace = true
+ciborium.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+tracing.workspace = true
