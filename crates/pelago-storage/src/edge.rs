@@ -12,14 +12,20 @@
 //! - delete_edge: Remove all paired entries
 //! - list_edges: Range scan with optional label filter
 
+use crate::cdc::CdcWriter;
+use crate::db::PelagoDb;
+use crate::ids::IdAllocator;
+use crate::node::NodeStore;
+use crate::schema::SchemaRegistry;
 use crate::subspace::edge_markers;
 use crate::Subspace;
 use bytes::Bytes;
-use pelago_core::encoding::encode_value_for_index;
+use pelago_core::encoding::{decode_cbor, encode_cbor, encode_value_for_index};
 use pelago_core::schema::{EdgeDirection, EntitySchema};
-use pelago_core::{PelagoError, Value};
+use pelago_core::{EdgeId, PelagoError, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Reference to a node (for edge endpoints)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +85,257 @@ impl StoredEdge {
             created_at: now,
         }
     }
+}
+
+/// Edge storage operations
+pub struct EdgeStore {
+    db: PelagoDb,
+    schema_registry: Arc<SchemaRegistry>,
+    id_allocator: Arc<IdAllocator>,
+    node_store: Arc<NodeStore>,
+}
+
+impl EdgeStore {
+    pub fn new(
+        db: PelagoDb,
+        schema_registry: Arc<SchemaRegistry>,
+        id_allocator: Arc<IdAllocator>,
+        node_store: Arc<NodeStore>,
+    ) -> Self {
+        Self {
+            db,
+            schema_registry,
+            id_allocator,
+            node_store,
+        }
+    }
+
+    /// Create a new edge
+    pub async fn create_edge(
+        &self,
+        database: &str,
+        namespace: &str,
+        source: NodeRef,
+        target: NodeRef,
+        label: &str,
+        properties: HashMap<String, Value>,
+    ) -> Result<StoredEdge, PelagoError> {
+        // Verify source node exists
+        let source_node = self
+            .node_store
+            .get_node(&source.database, &source.namespace, &source.entity_type, &source.node_id)
+            .await?
+            .ok_or_else(|| PelagoError::SourceNotFound {
+                entity_type: source.entity_type.clone(),
+                node_id: source.node_id.clone(),
+            })?;
+
+        // Verify target node exists
+        let _target_node = self
+            .node_store
+            .get_node(&target.database, &target.namespace, &target.entity_type, &target.node_id)
+            .await?
+            .ok_or_else(|| PelagoError::TargetNotFound {
+                entity_type: target.entity_type.clone(),
+                node_id: target.node_id.clone(),
+            })?;
+
+        // Get source schema and validate edge type
+        let schema = self
+            .schema_registry
+            .get_schema(&source.database, &source.namespace, &source.entity_type)
+            .await?
+            .ok_or_else(|| PelagoError::UnregisteredType {
+                entity_type: source.entity_type.clone(),
+            })?;
+
+        let direction = validate_edge_type(&schema, label, &target.entity_type)?;
+        let is_bidirectional = direction == EdgeDirection::Bidirectional;
+
+        // Get sort key value if defined
+        let sort_key_value = if let Some(edge_def) = schema.edges.get(label) {
+            edge_def
+                .sort_key
+                .as_ref()
+                .and_then(|sk| properties.get(sk))
+        } else {
+            None
+        };
+
+        // Allocate edge ID
+        let (site_id, seq) = self
+            .id_allocator
+            .allocate(database, namespace, &format!("edge_{}", label))
+            .await?;
+        let edge_id = EdgeId::new(site_id, seq);
+
+        // Compute keys
+        let subspace = Subspace::namespace(database, namespace);
+        let keys = compute_edge_keys(&subspace, &source, &target, label, sort_key_value, is_bidirectional)?;
+
+        // Encode edge data for metadata
+        let edge_data = EdgeData {
+            edge_id: edge_id.to_string(),
+            properties: properties.clone(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64,
+        };
+        let edge_bytes = encode_cbor(&edge_data)?;
+
+        // Write in transaction
+        let trx = self.db.create_transaction()?;
+
+        // Write forward key (empty value - just existence)
+        trx.set(keys.forward_key.as_ref(), &[]);
+
+        // Write metadata key (edge properties)
+        trx.set(keys.meta_key.as_ref(), &edge_bytes);
+
+        // Write reverse key (empty value)
+        trx.set(keys.reverse_key.as_ref(), &[]);
+
+        // Write bidirectional keys if needed
+        if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
+            trx.set(rev_forward.as_ref(), &[]);
+            trx.set(rev_reverse.as_ref(), &[]);
+        }
+
+        trx.commit()
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Failed to create edge: {}", e)))?;
+
+        Ok(StoredEdge::new(
+            edge_id.to_string(),
+            source,
+            target,
+            label.to_string(),
+            properties,
+        ))
+    }
+
+    /// Delete an edge
+    pub async fn delete_edge(
+        &self,
+        database: &str,
+        namespace: &str,
+        source: NodeRef,
+        target: NodeRef,
+        label: &str,
+    ) -> Result<bool, PelagoError> {
+        // Get source schema for bidirectional check
+        let schema = self
+            .schema_registry
+            .get_schema(&source.database, &source.namespace, &source.entity_type)
+            .await?;
+
+        let is_bidirectional = schema
+            .as_ref()
+            .and_then(|s| s.edges.get(label))
+            .map(|e| e.direction == EdgeDirection::Bidirectional)
+            .unwrap_or(false);
+
+        let subspace = Subspace::namespace(database, namespace);
+        let keys = compute_edge_keys(&subspace, &source, &target, label, None, is_bidirectional)?;
+
+        // Check if edge exists
+        let exists = self.db.get(keys.forward_key.as_ref()).await?.is_some();
+        if !exists {
+            return Ok(false);
+        }
+
+        // Delete in transaction
+        let trx = self.db.create_transaction()?;
+
+        trx.clear(keys.forward_key.as_ref());
+        trx.clear(keys.meta_key.as_ref());
+        trx.clear(keys.reverse_key.as_ref());
+
+        if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
+            trx.clear(rev_forward.as_ref());
+            trx.clear(rev_reverse.as_ref());
+        }
+
+        trx.commit()
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Failed to delete edge: {}", e)))?;
+
+        Ok(true)
+    }
+
+    /// List outgoing edges from a node
+    pub async fn list_edges(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        label_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StoredEdge>, PelagoError> {
+        let subspace = Subspace::namespace(database, namespace).edge();
+
+        // Build range prefix for forward edges
+        let mut prefix_builder = subspace
+            .pack()
+            .add_marker(edge_markers::FORWARD)
+            .add_string(entity_type)
+            .add_string(node_id);
+
+        if let Some(label) = label_filter {
+            prefix_builder = prefix_builder.add_string(label);
+        }
+
+        let range_start = prefix_builder.build();
+        let range_end = {
+            let mut end = range_start.to_vec();
+            end.push(0xFF);
+            end
+        };
+
+        let results = self
+            .db
+            .get_range(range_start.as_ref(), &range_end, limit)
+            .await?;
+
+        let mut edges = Vec::new();
+
+        // For each forward key, fetch the corresponding metadata
+        for (key, _) in results {
+            // Convert forward key to metadata key (change marker from 'f' to 'm')
+            let mut meta_key = key.clone();
+            // Find and replace the forward marker with metadata marker
+            if let Some(pos) = meta_key.iter().position(|&b| b == edge_markers::FORWARD) {
+                meta_key[pos] = edge_markers::FORWARD_META;
+            }
+
+            if let Some(meta_bytes) = self.db.get(&meta_key).await? {
+                let edge_data: EdgeData = decode_cbor(&meta_bytes)?;
+
+                // Parse the key to extract source/target info
+                // This is simplified - in production we'd parse the key properly
+                edges.push(StoredEdge {
+                    edge_id: edge_data.edge_id,
+                    source: NodeRef::new(database, namespace, entity_type, node_id),
+                    target: NodeRef::new(database, namespace, "Unknown", "Unknown"), // Would parse from key
+                    label: label_filter.unwrap_or("unknown").to_string(),
+                    properties: edge_data.properties,
+                    created_at: edge_data.created_at,
+                });
+            }
+        }
+
+        Ok(edges)
+    }
+}
+
+/// Internal edge data for storage
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EdgeData {
+    edge_id: String,
+    properties: HashMap<String, Value>,
+    created_at: i64,
 }
 
 /// Compute the FDB keys for an edge
@@ -270,7 +527,10 @@ mod tests {
 
     fn make_person_schema() -> EntitySchema {
         EntitySchema::new("Person")
-            .with_edge("KNOWS", EdgeDef::new(EdgeTarget::specific("Person")).bidirectional())
+            .with_edge(
+                "KNOWS",
+                EdgeDef::new(EdgeTarget::specific("Person")).bidirectional(),
+            )
             .with_edge("WORKS_AT", EdgeDef::new(EdgeTarget::specific("Company")))
             .with_edge("LIKES", EdgeDef::new(EdgeTarget::polymorphic()))
             .with_meta(SchemaMeta::strict())
@@ -282,7 +542,8 @@ mod tests {
         let source = NodeRef::new("db", "ns", "Person", "1_100");
         let target = NodeRef::new("db", "ns", "Company", "1_200");
 
-        let keys = compute_edge_keys(&subspace, &source, &target, "WORKS_AT", None, false).unwrap();
+        let keys =
+            compute_edge_keys(&subspace, &source, &target, "WORKS_AT", None, false).unwrap();
 
         assert!(keys.reverse_direction_keys.is_none());
         assert_eq!(keys.entry_count(), 3);

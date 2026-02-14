@@ -5,7 +5,7 @@
 //! - GetSchema: Retrieve a schema by type name and version
 //! - ListSchemas: List all registered schemas
 
-use crate::error::IntoStatus;
+use crate::error::ToStatus;
 use pelago_core::schema::{EntitySchema as CoreSchema, IndexType as CoreIndexType, PropertyDef as CorePropertyDef};
 use pelago_core::{PelagoError, PropertyType as CorePropertyType, Value as CoreValue};
 use pelago_proto::{
@@ -13,19 +13,19 @@ use pelago_proto::{
     IndexType, ListSchemasRequest, ListSchemasResponse, PropertyDef, PropertyType,
     RegisterSchemaRequest, RegisterSchemaResponse, Value,
 };
-use pelago_storage::PelagoDb;
+use pelago_storage::{PelagoDb, SchemaRegistry};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 /// Schema service implementation
 pub struct SchemaServiceImpl {
-    db: Arc<PelagoDb>,
+    schema_registry: Arc<SchemaRegistry>,
 }
 
 impl SchemaServiceImpl {
-    pub fn new(db: Arc<PelagoDb>) -> Self {
-        Self { db }
+    pub fn new(schema_registry: Arc<SchemaRegistry>) -> Self {
+        Self { schema_registry }
     }
 }
 
@@ -36,16 +36,20 @@ impl SchemaService for SchemaServiceImpl {
         request: Request<RegisterSchemaRequest>,
     ) -> Result<Response<RegisterSchemaResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
         let proto_schema = req.schema.ok_or_else(|| Status::invalid_argument("missing schema"))?;
 
         // Convert proto schema to core schema
-        let _core_schema = proto_to_core_schema(&proto_schema)?;
+        let core_schema = proto_to_core_schema(&proto_schema)?;
 
-        // TODO: Store schema in FDB when integration is ready
-        // For now, return success with version 1
+        // Register schema in FDB
+        let version = self.schema_registry
+            .register_schema(&ctx.database, &ctx.namespace, core_schema)
+            .await
+            .map_err(|e| e.into_status())?;
+
         Ok(Response::new(RegisterSchemaResponse {
-            version: 1,
+            version,
             created: true,
         }))
     }
@@ -55,12 +59,44 @@ impl SchemaService for SchemaServiceImpl {
         request: Request<GetSchemaRequest>,
     ) -> Result<Response<GetSchemaResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let _entity_type = req.entity_type;
-        let _version = req.version;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let entity_type = req.entity_type;
+        let version = req.version;
 
-        // TODO: Fetch schema from FDB when integration is ready
-        Err(Status::not_found("schema not found"))
+        // Fetch schema from FDB
+        if version > 0 {
+            // Get specific version - returns EntitySchema directly
+            let schema = self.schema_registry
+                .get_schema_version(&ctx.database, &ctx.namespace, &entity_type, version)
+                .await
+                .map_err(|e| e.into_status())?;
+
+            match schema {
+                Some(schema) => {
+                    let proto_schema = core_to_proto_schema(&schema);
+                    Ok(Response::new(GetSchemaResponse {
+                        schema: Some(proto_schema),
+                    }))
+                }
+                None => Err(Status::not_found(format!("schema '{}' version {} not found", entity_type, version))),
+            }
+        } else {
+            // Get latest version - returns Arc<EntitySchema>
+            let schema = self.schema_registry
+                .get_schema(&ctx.database, &ctx.namespace, &entity_type)
+                .await
+                .map_err(|e| e.into_status())?;
+
+            match schema {
+                Some(schema) => {
+                    let proto_schema = core_to_proto_schema(&*schema);
+                    Ok(Response::new(GetSchemaResponse {
+                        schema: Some(proto_schema),
+                    }))
+                }
+                None => Err(Status::not_found(format!("schema '{}' not found", entity_type))),
+            }
+        }
     }
 
     async fn list_schemas(
@@ -68,10 +104,27 @@ impl SchemaService for SchemaServiceImpl {
         request: Request<ListSchemasRequest>,
     ) -> Result<Response<ListSchemasResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
 
-        // TODO: List schemas from FDB when integration is ready
-        Ok(Response::new(ListSchemasResponse { schemas: vec![] }))
+        // List schema names from FDB
+        let schema_names = self.schema_registry
+            .list_schemas(&ctx.database, &ctx.namespace)
+            .await
+            .map_err(|e| e.into_status())?;
+
+        // Fetch full schemas for each name
+        let mut proto_schemas = Vec::with_capacity(schema_names.len());
+        for name in schema_names {
+            if let Some(schema) = self.schema_registry
+                .get_schema(&ctx.database, &ctx.namespace, &name)
+                .await
+                .map_err(|e| e.into_status())?
+            {
+                proto_schemas.push(core_to_proto_schema(&*schema));
+            }
+        }
+
+        Ok(Response::new(ListSchemasResponse { schemas: proto_schemas }))
     }
 }
 
@@ -85,6 +138,25 @@ fn proto_to_core_schema(proto: &EntitySchema) -> Result<CoreSchema, Status> {
     }
 
     Ok(schema)
+}
+
+/// Convert core EntitySchema to proto EntitySchema
+fn core_to_proto_schema(core: &CoreSchema) -> EntitySchema {
+    let mut properties = HashMap::new();
+
+    for (name, prop_def) in &core.properties {
+        properties.insert(name.clone(), core_to_proto_property_def(prop_def));
+    }
+
+    EntitySchema {
+        name: core.name.clone(),
+        version: core.version,
+        properties,
+        edges: HashMap::new(), // Edge definitions handled separately
+        meta: None,
+        created_at: 0,
+        created_by: String::new(),
+    }
 }
 
 /// Convert proto PropertyDef to core PropertyDef
@@ -120,6 +192,32 @@ fn proto_to_core_property_def(proto: &PropertyDef) -> Result<CorePropertyDef, St
     }
 
     Ok(def)
+}
+
+/// Convert core PropertyDef to proto PropertyDef
+fn core_to_proto_property_def(core: &CorePropertyDef) -> PropertyDef {
+    let prop_type = match core.property_type {
+        CorePropertyType::String => PropertyType::String,
+        CorePropertyType::Int => PropertyType::Int,
+        CorePropertyType::Float => PropertyType::Float,
+        CorePropertyType::Bool => PropertyType::Bool,
+        CorePropertyType::Timestamp => PropertyType::Timestamp,
+        CorePropertyType::Bytes => PropertyType::Bytes,
+    };
+
+    let index = match core.index {
+        CoreIndexType::Unique => IndexType::Unique,
+        CoreIndexType::Equality => IndexType::Equality,
+        CoreIndexType::Range => IndexType::Range,
+        CoreIndexType::None => IndexType::None,
+    };
+
+    PropertyDef {
+        r#type: prop_type as i32,
+        required: core.required,
+        index: index as i32,
+        default_value: core.default_value.as_ref().map(core_to_proto_value),
+    }
 }
 
 /// Convert proto Value to core Value

@@ -11,31 +11,27 @@
 //! - Each update increments version
 //! - Old versions are preserved for migration support
 
-#[allow(unused_imports)] // Will be used when FDB operations are implemented
 use crate::cache::SchemaCache;
+use crate::db::PelagoDb;
 use crate::Subspace;
-#[allow(unused_imports)]
 use bytes::Bytes;
-#[allow(unused_imports)] // Will be used when FDB operations are implemented
 use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::schema::EntitySchema;
 use pelago_core::PelagoError;
-#[allow(unused_imports)]
 use std::sync::Arc;
 
 /// Schema registry for managing entity type schemas
 pub struct SchemaRegistry {
-    #[allow(dead_code)] // Will be used when FDB operations are implemented
+    db: PelagoDb,
     cache: Arc<SchemaCache>,
 }
 
 impl SchemaRegistry {
-    pub fn new(cache: Arc<SchemaCache>) -> Self {
-        Self { cache }
+    pub fn new(db: PelagoDb, cache: Arc<SchemaCache>) -> Self {
+        Self { db, cache }
     }
 
     /// Build key for the latest version pointer
-    #[allow(dead_code)] // Will be used when FDB operations are implemented
     fn latest_version_key(subspace: &Subspace, entity_type: &str) -> Bytes {
         subspace
             .pack()
@@ -45,7 +41,6 @@ impl SchemaRegistry {
     }
 
     /// Build key for a specific schema version
-    #[allow(dead_code)] // Will be used when FDB operations are implemented
     fn version_key(subspace: &Subspace, entity_type: &str, version: u32) -> Bytes {
         subspace
             .pack()
@@ -56,13 +51,11 @@ impl SchemaRegistry {
     }
 
     /// Encode version number to bytes
-    #[allow(dead_code)] // Will be used when FDB operations are implemented
     fn encode_version(version: u32) -> [u8; 4] {
         version.to_be_bytes()
     }
 
     /// Decode version number from bytes
-    #[allow(dead_code)] // Will be used when FDB operations are implemented
     fn decode_version(bytes: &[u8]) -> Result<u32, PelagoError> {
         if bytes.len() != 4 {
             return Err(PelagoError::Internal(format!(
@@ -129,11 +122,201 @@ impl SchemaRegistry {
 
         Ok(())
     }
-}
 
-impl Default for SchemaRegistry {
-    fn default() -> Self {
-        Self::new(Arc::new(SchemaCache::new()))
+    /// Register a new schema or update an existing one
+    ///
+    /// Returns the version number assigned to this schema
+    pub async fn register_schema(
+        &self,
+        database: &str,
+        namespace: &str,
+        mut schema: EntitySchema,
+    ) -> Result<u32, PelagoError> {
+        // Validate schema first
+        Self::validate_schema(&schema)?;
+
+        let subspace = Subspace::namespace(database, namespace).schema();
+        let latest_key = Self::latest_version_key(&subspace, &schema.name);
+
+        // Get current version or start at 0
+        let current_version = match self.db.get(latest_key.as_ref()).await? {
+            Some(bytes) => Self::decode_version(&bytes)?,
+            None => 0,
+        };
+
+        let new_version = current_version + 1;
+        schema.version = new_version;
+
+        // Encode schema to CBOR
+        let schema_bytes = encode_cbor(&schema)?;
+
+        // Write in a transaction
+        let trx = self.db.create_transaction()?;
+
+        // Write version pointer
+        trx.set(latest_key.as_ref(), &Self::encode_version(new_version));
+
+        // Write versioned schema
+        let version_key = Self::version_key(&subspace, &schema.name, new_version);
+        trx.set(version_key.as_ref(), &schema_bytes);
+
+        trx.commit()
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Schema registration failed: {}", e)))?;
+
+        // Update cache
+        self.cache.insert(database, namespace, schema).await;
+
+        Ok(new_version)
+    }
+
+    /// Get the current version of a schema
+    pub async fn get_schema(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+    ) -> Result<Option<Arc<EntitySchema>>, PelagoError> {
+        // Check cache first
+        if let Some(schema) = self.cache.get(database, namespace, entity_type).await {
+            return Ok(Some(schema));
+        }
+
+        // Not in cache, fetch from FDB
+        let subspace = Subspace::namespace(database, namespace).schema();
+        let latest_key = Self::latest_version_key(&subspace, entity_type);
+
+        let version = match self.db.get(latest_key.as_ref()).await? {
+            Some(bytes) => Self::decode_version(&bytes)?,
+            None => return Ok(None),
+        };
+
+        // Fetch the versioned schema
+        let version_key = Self::version_key(&subspace, entity_type, version);
+        let schema_bytes = match self.db.get(version_key.as_ref()).await? {
+            Some(bytes) => bytes,
+            None => {
+                return Err(PelagoError::Internal(format!(
+                    "Schema version {} for {} exists but data is missing",
+                    version, entity_type
+                )))
+            }
+        };
+
+        let schema: EntitySchema = decode_cbor(&schema_bytes)?;
+
+        // Cache it
+        self.cache
+            .insert(database, namespace, schema.clone())
+            .await;
+
+        Ok(Some(Arc::new(schema)))
+    }
+
+    /// Get a specific version of a schema
+    pub async fn get_schema_version(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        version: u32,
+    ) -> Result<Option<EntitySchema>, PelagoError> {
+        let subspace = Subspace::namespace(database, namespace).schema();
+        let version_key = Self::version_key(&subspace, entity_type, version);
+
+        match self.db.get(version_key.as_ref()).await? {
+            Some(bytes) => {
+                let schema: EntitySchema = decode_cbor(&bytes)?;
+                Ok(Some(schema))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all schemas in a namespace
+    pub async fn list_schemas(
+        &self,
+        database: &str,
+        namespace: &str,
+    ) -> Result<Vec<String>, PelagoError> {
+        let subspace = Subspace::namespace(database, namespace).schema();
+
+        // Scan all keys in the schema subspace
+        let range_start = subspace.prefix().to_vec();
+        let range_end = subspace.range_end().to_vec();
+
+        let results = self.db.get_range(&range_start, &range_end, 1000).await?;
+
+        // Extract unique entity types from "latest" keys
+        // Key format: (prefix)(entity_type)(0x00)(0x02)latest(0x00)
+        let mut entity_types = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for (key, _value) in results {
+            // Check if this is a "latest" key by looking for the pattern
+            if let Some(entity_type) = Self::extract_entity_type_from_latest_key(&subspace, &key) {
+                if seen.insert(entity_type.clone()) {
+                    entity_types.push(entity_type);
+                }
+            }
+        }
+
+        Ok(entity_types)
+    }
+
+    /// Extract entity type from a "latest" key
+    fn extract_entity_type_from_latest_key(subspace: &Subspace, key: &[u8]) -> Option<String> {
+        let prefix = subspace.prefix();
+        if !key.starts_with(prefix) {
+            return None;
+        }
+
+        // After prefix, we have: (0x02)(entity_type bytes)(0x00)(0x02)latest(0x00)
+        let remainder = &key[prefix.len()..];
+
+        // Check for string type marker
+        if remainder.is_empty() || remainder[0] != 0x02 {
+            return None;
+        }
+
+        // Find the null terminator for entity_type
+        let entity_bytes = &remainder[1..];
+        let null_pos = entity_bytes.iter().position(|&b| b == 0x00)?;
+        let entity_type = std::str::from_utf8(&entity_bytes[..null_pos]).ok()?;
+
+        // Check if the next part is "latest"
+        let after_entity = &entity_bytes[null_pos + 1..];
+        if after_entity.len() < 2 || after_entity[0] != 0x02 {
+            return None;
+        }
+
+        let latest_start = &after_entity[1..];
+        if latest_start.starts_with(b"latest\x00") {
+            Some(entity_type.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Get the latest version number for a schema
+    pub async fn get_latest_version(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+    ) -> Result<Option<u32>, PelagoError> {
+        let subspace = Subspace::namespace(database, namespace).schema();
+        let latest_key = Self::latest_version_key(&subspace, entity_type);
+
+        match self.db.get(latest_key.as_ref()).await? {
+            Some(bytes) => Ok(Some(Self::decode_version(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Invalidate a cached schema (force reload on next access)
+    pub async fn invalidate_cache(&self, database: &str, namespace: &str, entity_type: &str) {
+        self.cache.invalidate(database, namespace, entity_type).await;
     }
 }
 

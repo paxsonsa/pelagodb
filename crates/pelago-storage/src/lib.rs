@@ -19,6 +19,10 @@ pub mod schema;
 pub mod subspace;
 
 pub use cache::SchemaCache;
+pub use cdc::{CdcEntry, CdcWriter};
 pub use db::{init_fdb_network, PelagoDb, PelagoTxn};
+pub use edge::{EdgeStore, NodeRef, StoredEdge};
+pub use ids::IdAllocator;
+pub use node::{NodeStore, StoredNode};
 pub use schema::SchemaRegistry;
 pub use subspace::Subspace;

@@ -6,24 +6,32 @@
 //! - UpdateNode: Update node properties (merge semantics)
 //! - DeleteNode: Delete a node and its edges
 
+use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
 use pelago_proto::{
     node_service_server::NodeService, CreateNodeRequest, CreateNodeResponse, DeleteNodeRequest,
     DeleteNodeResponse, GetNodeRequest, GetNodeResponse, Node, UpdateNodeRequest,
     UpdateNodeResponse,
 };
-use pelago_storage::PelagoDb;
+use pelago_storage::{CdcWriter, IdAllocator, NodeStore, PelagoDb, SchemaRegistry};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 /// Node service implementation
 pub struct NodeServiceImpl {
-    db: Arc<PelagoDb>,
+    node_store: NodeStore,
 }
 
 impl NodeServiceImpl {
-    pub fn new(db: Arc<PelagoDb>) -> Self {
-        Self { db }
+    pub fn new(
+        db: PelagoDb,
+        schema_registry: Arc<SchemaRegistry>,
+        id_allocator: Arc<IdAllocator>,
+        cdc_writer: Arc<CdcWriter>,
+    ) -> Self {
+        Self {
+            node_store: NodeStore::new(db, schema_registry, id_allocator, cdc_writer),
+        }
     }
 }
 
@@ -34,29 +42,24 @@ impl NodeService for NodeServiceImpl {
         request: Request<CreateNodeRequest>,
     ) -> Result<Response<CreateNodeResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let properties = proto_to_core_properties(&req.properties);
 
-        // TODO: Implement actual node creation with FDB
-        // 1. Load schema and validate properties
-        // 2. Allocate node ID
-        // 3. Compute index entries
-        // 4. Write node data and indexes in transaction
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
+        // Create node in FDB
+        let stored_node = self.node_store
+            .create_node(&ctx.database, &ctx.namespace, &entity_type, properties)
+            .await
+            .map_err(|e| e.into_status())?;
 
         Ok(Response::new(CreateNodeResponse {
             node: Some(Node {
-                id: "placeholder_id".to_string(),
-                entity_type,
-                properties: req.properties,
-                locality: String::new(),
-                created_at: now,
-                updated_at: now,
+                id: stored_node.id,
+                entity_type: stored_node.entity_type,
+                properties: core_to_proto_properties(&stored_node.properties),
+                locality: stored_node.locality.to_string(),
+                created_at: stored_node.created_at,
+                updated_at: stored_node.updated_at,
             }),
         }))
     }
@@ -66,14 +69,43 @@ impl NodeService for NodeServiceImpl {
         request: Request<GetNodeRequest>,
     ) -> Result<Response<GetNodeResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let _entity_type = req.entity_type;
-        let _node_id = req.node_id;
-        let _consistency = req.consistency;
-        let _fields = req.fields;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let entity_type = req.entity_type;
+        let node_id = req.node_id;
 
-        // TODO: Implement actual node retrieval from FDB
-        Err(Status::not_found("node not found"))
+        // Get node from FDB
+        let stored_node = self.node_store
+            .get_node(&ctx.database, &ctx.namespace, &entity_type, &node_id)
+            .await
+            .map_err(|e| e.into_status())?;
+
+        match stored_node {
+            Some(node) => {
+                // Apply field projection if specified
+                let properties = if req.fields.is_empty() {
+                    core_to_proto_properties(&node.properties)
+                } else {
+                    let filtered: std::collections::HashMap<_, _> = node.properties
+                        .iter()
+                        .filter(|(k, _)| req.fields.contains(k))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    core_to_proto_properties(&filtered)
+                };
+
+                Ok(Response::new(GetNodeResponse {
+                    node: Some(Node {
+                        id: node.id,
+                        entity_type: node.entity_type,
+                        properties,
+                        locality: node.locality.to_string(),
+                        created_at: node.created_at,
+                        updated_at: node.updated_at,
+                    }),
+                }))
+            }
+            None => Err(Status::not_found(format!("node '{}:{}' not found", entity_type, node_id))),
+        }
     }
 
     async fn update_node(
@@ -81,19 +113,27 @@ impl NodeService for NodeServiceImpl {
         request: Request<UpdateNodeRequest>,
     ) -> Result<Response<UpdateNodeResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let _entity_type = req.entity_type;
-        let _node_id = req.node_id;
-        let _properties = proto_to_core_properties(&req.properties);
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let entity_type = req.entity_type;
+        let node_id = req.node_id;
+        let properties = proto_to_core_properties(&req.properties);
 
-        // TODO: Implement actual node update with FDB
-        // 1. Read existing node
-        // 2. Merge properties
-        // 3. Validate merged properties
-        // 4. Compute index changes
-        // 5. Write updated node and index changes
+        // Update node in FDB
+        let stored_node = self.node_store
+            .update_node(&ctx.database, &ctx.namespace, &entity_type, &node_id, properties)
+            .await
+            .map_err(|e| e.into_status())?;
 
-        Err(Status::not_found("node not found"))
+        Ok(Response::new(UpdateNodeResponse {
+            node: Some(Node {
+                id: stored_node.id,
+                entity_type: stored_node.entity_type,
+                properties: core_to_proto_properties(&stored_node.properties),
+                locality: stored_node.locality.to_string(),
+                created_at: stored_node.created_at,
+                updated_at: stored_node.updated_at,
+            }),
+        }))
     }
 
     async fn delete_node(
@@ -101,15 +141,16 @@ impl NodeService for NodeServiceImpl {
         request: Request<DeleteNodeRequest>,
     ) -> Result<Response<DeleteNodeResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let _entity_type = req.entity_type;
-        let _node_id = req.node_id;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let entity_type = req.entity_type;
+        let node_id = req.node_id;
 
-        // TODO: Implement actual node deletion with FDB
-        // 1. Delete node data
-        // 2. Delete all index entries
-        // 3. Delete all edges (or mark for cleanup)
+        // Delete node from FDB
+        let deleted = self.node_store
+            .delete_node(&ctx.database, &ctx.namespace, &entity_type, &node_id)
+            .await
+            .map_err(|e| e.into_status())?;
 
-        Ok(Response::new(DeleteNodeResponse { deleted: false }))
+        Ok(Response::new(DeleteNodeResponse { deleted }))
     }
 }

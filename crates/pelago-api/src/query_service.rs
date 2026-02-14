@@ -5,13 +5,16 @@
 //! - Traverse: Graph traversal with multi-hop paths
 //! - Explain: Query plan explanation
 
+use crate::error::ToStatus;
+use crate::schema_service::core_to_proto_properties;
 use pelago_proto::{
     query_service_server::QueryService, ExplainRequest, ExplainResponse, FindNodesRequest,
-    IndexOperation, NodeResult, QueryPlan, TraverseRequest, TraverseResult,
+    IndexOperation, Node, NodeResult, QueryPlan, TraverseRequest, TraverseResult,
 };
 use pelago_query::planner::QueryPlanner;
-use pelago_query::plan::{ExecutionPlan, QueryPlan as CoreQueryPlan};
-use pelago_storage::PelagoDb;
+use pelago_query::plan::QueryExplanation;
+use pelago_query::QueryExecutor;
+use pelago_storage::{CdcWriter, IdAllocator, PelagoDb, SchemaRegistry};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
@@ -19,12 +22,21 @@ use tonic::{Request, Response, Status};
 
 /// Query service implementation
 pub struct QueryServiceImpl {
-    db: Arc<PelagoDb>,
+    query_executor: QueryExecutor,
+    schema_registry: Arc<SchemaRegistry>,
 }
 
 impl QueryServiceImpl {
-    pub fn new(db: Arc<PelagoDb>) -> Self {
-        Self { db }
+    pub fn new(
+        db: PelagoDb,
+        schema_registry: Arc<SchemaRegistry>,
+        id_allocator: Arc<IdAllocator>,
+        cdc_writer: Arc<pelago_storage::CdcWriter>,
+    ) -> Self {
+        Self {
+            query_executor: QueryExecutor::new(db, Arc::clone(&schema_registry), id_allocator, cdc_writer),
+            schema_registry,
+        }
     }
 }
 
@@ -37,22 +49,49 @@ impl QueryService for QueryServiceImpl {
         request: Request<FindNodesRequest>,
     ) -> Result<Response<Self::FindNodesStream>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let _entity_type = req.entity_type;
-        let _cel_expression = req.cel_expression;
-        let _consistency = req.consistency;
-        let _fields = req.fields;
-        let _limit = req.limit;
-        let _cursor = req.cursor;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let entity_type = req.entity_type;
+        let cel_expression = req.cel_expression;
+        let limit = if req.limit > 0 { Some(req.limit) } else { None };
 
-        // TODO: Implement actual query execution with FDB
-        // 1. Load schema for entity type
-        // 2. Plan query using QueryPlanner
-        // 3. Execute plan against FDB
-        // 4. Stream results with filtering
+        // Get schema for planning
+        let schema = self.schema_registry
+            .get_schema(&ctx.database, &ctx.namespace, &entity_type)
+            .await
+            .map_err(|e| e.into_status())?
+            .ok_or_else(|| Status::not_found(format!("schema '{}' not found", entity_type)))?;
 
-        // Return empty stream for now
-        let stream = tokio_stream::empty();
+        // Build execution plan
+        let projection = if req.fields.is_empty() {
+            None
+        } else {
+            Some(req.fields.into_iter().collect())
+        };
+
+        let plan = QueryPlanner::plan(&entity_type, &cel_expression, &schema, projection, limit)
+            .map_err(|e| e.into_status())?;
+
+        // Execute query
+        let results = self.query_executor
+            .execute(&ctx.database, &ctx.namespace, &plan)
+            .await
+            .map_err(|e| e.into_status())?;
+
+        // Convert to stream
+        let stream = tokio_stream::iter(results.nodes.into_iter().map(|node| {
+            Ok(NodeResult {
+                node: Some(Node {
+                    id: node.id,
+                    entity_type: node.entity_type,
+                    properties: core_to_proto_properties(&node.properties),
+                    locality: node.locality.to_string(),
+                    created_at: node.created_at,
+                    updated_at: node.updated_at,
+                }),
+                next_cursor: vec![], // Pagination cursor not implemented yet
+            })
+        }));
+
         Ok(Response::new(Box::pin(stream)))
     }
 
@@ -65,20 +104,9 @@ impl QueryService for QueryServiceImpl {
         let req = request.into_inner();
         let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
         let _start = req.start.ok_or_else(|| Status::invalid_argument("missing start node"))?;
-        let _steps = req.steps;
-        let _max_depth = req.max_depth;
-        let _timeout_ms = req.timeout_ms;
-        let _max_results = req.max_results;
-        let _consistency = req.consistency;
-        let _cascade = req.cascade;
 
-        // TODO: Implement actual graph traversal with FDB
-        // 1. Start from given node
-        // 2. Execute each step with filters
-        // 3. Respect depth, timeout, and result limits
-        // 4. Stream results
-
-        // Return empty stream for now
+        // TODO: Implement actual traversal when TraversalEngine is integrated
+        // For now, return empty stream
         let stream = tokio_stream::empty();
         Ok(Response::new(Box::pin(stream)))
     }
@@ -88,45 +116,45 @@ impl QueryService for QueryServiceImpl {
         request: Request<ExplainRequest>,
     ) -> Result<Response<ExplainResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let cel_expression = req.cel_expression;
 
-        // For explain, we don't need FDB - just use the planner
-        // We need a schema though - for now return a basic explanation
+        // Get schema for planning
+        let schema = self.schema_registry
+            .get_schema(&ctx.database, &ctx.namespace, &entity_type)
+            .await
+            .map_err(|e| e.into_status())?
+            .ok_or_else(|| Status::not_found(format!("schema '{}' not found", entity_type)))?;
 
-        // Build explanation
-        let mut explanation = vec![
-            format!("Query: {} WHERE {}", entity_type, cel_expression),
-        ];
+        // Build execution plan
+        let plan = QueryPlanner::plan(&entity_type, &cel_expression, &schema, None, None)
+            .map_err(|e| e.into_status())?;
 
-        // Without schema, we can only do basic parsing
-        let predicates = cel_expression.split("&&").collect::<Vec<_>>();
+        // Generate explanation
+        let explanation = QueryExplanation::from_plan(&plan, 10000.0); // Assume 10k rows
 
-        if predicates.is_empty() || cel_expression.is_empty() {
-            explanation.push("Strategy: FULL_SCAN (no predicates)".to_string());
+        // Build proto response
+        let indexes = if let Some(ref idx) = explanation.index_used {
+            vec![IndexOperation {
+                field: idx.property.clone(),
+                operator: idx.operator.clone(),
+                value: idx.value.clone(),
+                estimated_rows: explanation.estimated_rows,
+            }]
         } else {
-            explanation.push(format!("Extracted {} predicate(s)", predicates.len()));
-            explanation.push("Strategy: Requires schema to determine index usage".to_string());
-        }
+            vec![]
+        };
 
         Ok(Response::new(ExplainResponse {
             plan: Some(QueryPlan {
-                strategy: if cel_expression.is_empty() {
-                    "full_scan".to_string()
-                } else {
-                    "unknown".to_string()
-                },
-                indexes: vec![],
-                residual_filter: if cel_expression.is_empty() {
-                    String::new()
-                } else {
-                    cel_expression
-                },
+                strategy: explanation.strategy,
+                indexes,
+                residual_filter: explanation.residual_filter.unwrap_or_default(),
             }),
-            explanation,
-            estimated_cost: 1.0,
-            estimated_rows: 1000.0,
+            explanation: explanation.steps,
+            estimated_cost: explanation.estimated_cost,
+            estimated_rows: explanation.estimated_rows,
         }))
     }
 }

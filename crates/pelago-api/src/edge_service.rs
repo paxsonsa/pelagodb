@@ -5,25 +5,51 @@
 //! - DeleteEdge: Delete an edge
 //! - ListEdges: Stream edges for a given node
 
+use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
 use pelago_proto::{
     edge_service_server::EdgeService, CreateEdgeRequest, CreateEdgeResponse, DeleteEdgeRequest,
-    DeleteEdgeResponse, Edge, EdgeResult, ListEdgesRequest, NodeRef,
+    DeleteEdgeResponse, Edge, EdgeResult, ListEdgesRequest, NodeRef as ProtoNodeRef,
 };
-use pelago_storage::PelagoDb;
+use pelago_storage::{CdcWriter, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry};
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
 /// Edge service implementation
 pub struct EdgeServiceImpl {
-    db: Arc<PelagoDb>,
+    edge_store: EdgeStore,
 }
 
 impl EdgeServiceImpl {
-    pub fn new(db: Arc<PelagoDb>) -> Self {
-        Self { db }
+    pub fn new(
+        db: PelagoDb,
+        schema_registry: Arc<SchemaRegistry>,
+        id_allocator: Arc<IdAllocator>,
+        node_store: Arc<NodeStore>,
+    ) -> Self {
+        Self {
+            edge_store: EdgeStore::new(db, schema_registry, id_allocator, node_store),
+        }
+    }
+}
+
+fn proto_to_core_node_ref(proto: &ProtoNodeRef, ctx_db: &str, ctx_ns: &str) -> NodeRef {
+    NodeRef::new(
+        if proto.database.is_empty() { ctx_db } else { &proto.database },
+        if proto.namespace.is_empty() { ctx_ns } else { &proto.namespace },
+        &proto.entity_type,
+        &proto.node_id,
+    )
+}
+
+fn core_to_proto_node_ref(core: &NodeRef) -> ProtoNodeRef {
+    ProtoNodeRef {
+        database: core.database.clone(),
+        namespace: core.namespace.clone(),
+        entity_type: core.entity_type.clone(),
+        node_id: core.node_id.clone(),
     }
 }
 
@@ -34,31 +60,30 @@ impl EdgeService for EdgeServiceImpl {
         request: Request<CreateEdgeRequest>,
     ) -> Result<Response<CreateEdgeResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let source = req.source.ok_or_else(|| Status::invalid_argument("missing source"))?;
-        let target = req.target.ok_or_else(|| Status::invalid_argument("missing target"))?;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let source_proto = req.source.ok_or_else(|| Status::invalid_argument("missing source"))?;
+        let target_proto = req.target.ok_or_else(|| Status::invalid_argument("missing target"))?;
         let label = req.label;
         let properties = proto_to_core_properties(&req.properties);
 
-        // TODO: Implement actual edge creation with FDB
-        // 1. Verify source and target nodes exist
-        // 2. Load schema and validate edge type
-        // 3. Compute edge keys (forward, meta, reverse if bidirectional)
-        // 4. Write all edge entries in transaction
+        // Convert proto refs to core refs
+        let source = proto_to_core_node_ref(&source_proto, &ctx.database, &ctx.namespace);
+        let target = proto_to_core_node_ref(&target_proto, &ctx.database, &ctx.namespace);
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as i64;
+        // Create edge in FDB
+        let stored_edge = self.edge_store
+            .create_edge(&ctx.database, &ctx.namespace, source, target, &label, properties)
+            .await
+            .map_err(|e| e.into_status())?;
 
         Ok(Response::new(CreateEdgeResponse {
             edge: Some(Edge {
-                edge_id: "placeholder_edge_id".to_string(),
-                source: Some(source),
-                target: Some(target),
-                label,
-                properties: req.properties,
-                created_at: now,
+                edge_id: stored_edge.edge_id,
+                source: Some(core_to_proto_node_ref(&stored_edge.source)),
+                target: Some(core_to_proto_node_ref(&stored_edge.target)),
+                label: stored_edge.label,
+                properties: core_to_proto_properties(&stored_edge.properties),
+                created_at: stored_edge.created_at,
             }),
         }))
     }
@@ -68,16 +93,22 @@ impl EdgeService for EdgeServiceImpl {
         request: Request<DeleteEdgeRequest>,
     ) -> Result<Response<DeleteEdgeResponse>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let _source = req.source.ok_or_else(|| Status::invalid_argument("missing source"))?;
-        let _target = req.target.ok_or_else(|| Status::invalid_argument("missing target"))?;
-        let _label = req.label;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let source_proto = req.source.ok_or_else(|| Status::invalid_argument("missing source"))?;
+        let target_proto = req.target.ok_or_else(|| Status::invalid_argument("missing target"))?;
+        let label = req.label;
 
-        // TODO: Implement actual edge deletion with FDB
-        // 1. Compute edge keys
-        // 2. Delete all edge entries in transaction
+        // Convert proto refs to core refs
+        let source = proto_to_core_node_ref(&source_proto, &ctx.database, &ctx.namespace);
+        let target = proto_to_core_node_ref(&target_proto, &ctx.database, &ctx.namespace);
 
-        Ok(Response::new(DeleteEdgeResponse { deleted: false }))
+        // Delete edge from FDB
+        let deleted = self.edge_store
+            .delete_edge(&ctx.database, &ctx.namespace, source, target, &label)
+            .await
+            .map_err(|e| e.into_status())?;
+
+        Ok(Response::new(DeleteEdgeResponse { deleted }))
     }
 
     type ListEdgesStream = Pin<Box<dyn Stream<Item = Result<EdgeResult, Status>> + Send>>;
@@ -87,22 +118,33 @@ impl EdgeService for EdgeServiceImpl {
         request: Request<ListEdgesRequest>,
     ) -> Result<Response<Self::ListEdgesStream>, Status> {
         let req = request.into_inner();
-        let _ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let _entity_type = req.entity_type;
-        let _node_id = req.node_id;
-        let _label = req.label;
-        let _direction = req.direction;
-        let _consistency = req.consistency;
-        let _limit = req.limit;
-        let _cursor = req.cursor;
+        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let entity_type = req.entity_type;
+        let node_id = req.node_id;
+        let label_filter = if req.label.is_empty() { None } else { Some(req.label.as_str()) };
+        let limit = if req.limit > 0 { req.limit as usize } else { 1000 };
 
-        // TODO: Implement actual edge listing with FDB
-        // 1. Build key range based on direction and label
-        // 2. Iterate with cursor and limit
-        // 3. Stream results
+        // List edges from FDB
+        let edges = self.edge_store
+            .list_edges(&ctx.database, &ctx.namespace, &entity_type, &node_id, label_filter, limit)
+            .await
+            .map_err(|e| e.into_status())?;
 
-        // Return empty stream for now
-        let stream = tokio_stream::empty();
+        // Convert to stream
+        let stream = tokio_stream::iter(edges.into_iter().map(|edge| {
+            Ok(EdgeResult {
+                edge: Some(Edge {
+                    edge_id: edge.edge_id,
+                    source: Some(core_to_proto_node_ref(&edge.source)),
+                    target: Some(core_to_proto_node_ref(&edge.target)),
+                    label: edge.label,
+                    properties: core_to_proto_properties(&edge.properties),
+                    created_at: edge.created_at,
+                }),
+                next_cursor: vec![], // Pagination cursor not implemented yet
+            })
+        }));
+
         Ok(Response::new(Box::pin(stream)))
     }
 }

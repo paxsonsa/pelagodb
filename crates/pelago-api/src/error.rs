@@ -57,3 +57,14 @@ impl<T> IntoStatus<T> for Result<T, PelagoError> {
         self.map_err(to_status)
     }
 }
+
+/// Extension trait to convert PelagoError to Status directly
+pub trait ToStatus {
+    fn into_status(self) -> Status;
+}
+
+impl ToStatus for PelagoError {
+    fn into_status(self) -> Status {
+        to_status(self)
+    }
+}

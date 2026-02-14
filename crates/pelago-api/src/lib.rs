@@ -18,7 +18,7 @@ pub mod schema_service;
 
 pub use admin_service::AdminServiceImpl;
 pub use edge_service::EdgeServiceImpl;
-pub use error::{to_status, IntoStatus};
+pub use error::{to_status, IntoStatus, ToStatus};
 pub use health_service::HealthServiceImpl;
 pub use node_service::NodeServiceImpl;
 pub use query_service::QueryServiceImpl;
