@@ -321,6 +321,7 @@ message TraverseRequest {
   uint32 max_results = 6;     // Default: 10000
   ReadConsistency consistency = 7;
   bool cascade = 8;           // Require all nested paths exist
+  bytes cursor = 9;           // Continuation token from previous TraverseResult.next_cursor
 }
 
 message TraversalStep {
@@ -382,6 +383,7 @@ service AdminService {
   rpc DropIndex(DropIndexRequest) returns (DropIndexResponse);
   rpc StripProperty(StripPropertyRequest) returns (StripPropertyResponse);
   rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
   rpc DropEntityType(DropEntityTypeRequest) returns (DropEntityTypeResponse);
   rpc DropNamespace(DropNamespaceRequest) returns (DropNamespaceResponse);
 }
@@ -413,6 +415,14 @@ message GetJobStatusRequest {
 
 message GetJobStatusResponse {
   Job job = 1;
+}
+
+message ListJobsRequest {
+  RequestContext context = 1;
+}
+
+message ListJobsResponse {
+  repeated Job jobs = 1;
 }
 
 message Job {

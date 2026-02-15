@@ -10,16 +10,21 @@ use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
 use pelago_proto::{
     node_service_server::NodeService, CreateNodeRequest, CreateNodeResponse, DeleteNodeRequest,
-    DeleteNodeResponse, GetNodeRequest, GetNodeResponse, Node, UpdateNodeRequest,
+    DeleteNodeResponse, GetNodeRequest, GetNodeResponse, Node, ReadConsistency,
+    UpdateNodeRequest,
     UpdateNodeResponse,
 };
-use pelago_storage::{IdAllocator, NodeStore, PelagoDb, SchemaRegistry};
+use pelago_storage::{
+    CachedReadPath, IdAllocator, NodeStore, PelagoDb, ReadConsistency as CacheReadConsistency,
+    SchemaRegistry,
+};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 /// Node service implementation
 pub struct NodeServiceImpl {
     node_store: NodeStore,
+    cached_read_path: Option<Arc<CachedReadPath>>,
 }
 
 impl NodeServiceImpl {
@@ -28,9 +33,11 @@ impl NodeServiceImpl {
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
         site_id: String,
+        cached_read_path: Option<Arc<CachedReadPath>>,
     ) -> Self {
         Self {
             node_store: NodeStore::new(db, schema_registry, id_allocator, site_id),
+            cached_read_path,
         }
     }
 }
@@ -73,11 +80,35 @@ impl NodeService for NodeServiceImpl {
         let entity_type = req.entity_type;
         let node_id = req.node_id;
 
-        // Get node from FDB
-        let stored_node = self.node_store
-            .get_node(&ctx.database, &ctx.namespace, &entity_type, &node_id)
-            .await
-            .map_err(|e| e.into_status())?;
+        let consistency = match ReadConsistency::try_from(req.consistency)
+            .unwrap_or(ReadConsistency::Strong)
+        {
+            ReadConsistency::Strong | ReadConsistency::Unspecified => CacheReadConsistency::Strong,
+            ReadConsistency::Session => CacheReadConsistency::Session,
+            ReadConsistency::Eventual => CacheReadConsistency::Eventual,
+        };
+
+        let mut stored_node = None;
+        if let Some(cache) = &self.cached_read_path {
+            stored_node = cache
+                .get_node(
+                    &ctx.database,
+                    &ctx.namespace,
+                    &entity_type,
+                    &node_id,
+                    consistency,
+                )
+                .await
+                .map_err(|e| e.into_status())?;
+        }
+
+        if stored_node.is_none() {
+            stored_node = self
+                .node_store
+                .get_node(&ctx.database, &ctx.namespace, &entity_type, &node_id)
+                .await
+                .map_err(|e| e.into_status())?;
+        }
 
         match stored_node {
             Some(node) => {

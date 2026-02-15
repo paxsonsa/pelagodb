@@ -202,6 +202,16 @@ impl PelagoDb {
     pub fn fdb(&self) -> &Database {
         &self.fdb
     }
+
+    /// Read version for the current snapshot window.
+    pub async fn get_read_version(&self) -> Result<i64, PelagoError> {
+        let trx = self.fdb.create_trx().map_err(|e| {
+            PelagoError::FdbUnavailable(format!("Failed to create transaction: {}", e))
+        })?;
+        trx.get_read_version()
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Get read version failed: {}", e)))
+    }
 }
 
 /// Transaction wrapper for multi-operation transactions

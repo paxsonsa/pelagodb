@@ -9,17 +9,22 @@ use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
 use pelago_proto::{
     edge_service_server::EdgeService, CreateEdgeRequest, CreateEdgeResponse, DeleteEdgeRequest,
-    DeleteEdgeResponse, Edge, EdgeResult, ListEdgesRequest, NodeRef as ProtoNodeRef,
+    DeleteEdgeResponse, Edge, EdgeDirection, EdgeResult, ListEdgesRequest,
+    NodeRef as ProtoNodeRef, ReadConsistency,
 };
-use pelago_storage::{EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry};
+use pelago_storage::{
+    CachedReadPath, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb,
+    ReadConsistency as CacheReadConsistency, SchemaRegistry,
+};
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
 /// Edge service implementation
 pub struct EdgeServiceImpl {
     edge_store: EdgeStore,
+    cached_read_path: Option<Arc<CachedReadPath>>,
 }
 
 impl EdgeServiceImpl {
@@ -29,9 +34,11 @@ impl EdgeServiceImpl {
         id_allocator: Arc<IdAllocator>,
         node_store: Arc<NodeStore>,
         site_id: String,
+        cached_read_path: Option<Arc<CachedReadPath>>,
     ) -> Self {
         Self {
             edge_store: EdgeStore::new(db, schema_registry, id_allocator, node_store, site_id),
+            cached_read_path,
         }
     }
 }
@@ -124,12 +131,56 @@ impl EdgeService for EdgeServiceImpl {
         let node_id = req.node_id;
         let label_filter = if req.label.is_empty() { None } else { Some(req.label.as_str()) };
         let limit = if req.limit > 0 { req.limit as usize } else { 1000 };
+        let consistency = match ReadConsistency::try_from(req.consistency)
+            .unwrap_or(ReadConsistency::Strong)
+        {
+            ReadConsistency::Strong | ReadConsistency::Unspecified => CacheReadConsistency::Strong,
+            ReadConsistency::Session => CacheReadConsistency::Session,
+            ReadConsistency::Eventual => CacheReadConsistency::Eventual,
+        };
 
-        // List edges from FDB
-        let edges = self.edge_store
-            .list_edges(&ctx.database, &ctx.namespace, &entity_type, &node_id, label_filter, limit)
-            .await
-            .map_err(|e| e.into_status())?;
+        let mut edges = Vec::new();
+        if let Some(cache) = &self.cached_read_path {
+            edges = cache
+                .list_edges_cached(
+                    &ctx.database,
+                    &ctx.namespace,
+                    &entity_type,
+                    &node_id,
+                    label_filter,
+                    consistency,
+                )
+                .await
+                .map_err(|e| e.into_status())?;
+        }
+
+        if edges.is_empty() {
+            edges = self
+                .edge_store
+                .list_edges(
+                    &ctx.database,
+                    &ctx.namespace,
+                    &entity_type,
+                    &node_id,
+                    label_filter,
+                    limit,
+                )
+                .await
+                .map_err(|e| e.into_status())?;
+        }
+
+        let direction = EdgeDirection::try_from(req.direction).unwrap_or(EdgeDirection::Outgoing);
+        if direction != EdgeDirection::Both {
+            edges.retain(|e| match direction {
+                EdgeDirection::Outgoing | EdgeDirection::Unspecified => {
+                    e.source.entity_type == entity_type && e.source.node_id == node_id
+                }
+                EdgeDirection::Incoming => {
+                    e.target.entity_type == entity_type && e.target.node_id == node_id
+                }
+                EdgeDirection::Both => true,
+            });
+        }
 
         // Convert to stream
         let stream = tokio_stream::iter(edges.into_iter().map(|edge| {

@@ -184,6 +184,9 @@ impl EdgeStore {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_micros() as i64,
+            source: Some(source.clone()),
+            target: Some(target.clone()),
+            label: Some(label.to_string()),
         };
         let edge_bytes = encode_cbor(&edge_data)?;
 
@@ -348,14 +351,24 @@ impl EdgeStore {
 
             if let Some(meta_bytes) = self.db.get(&meta_key).await? {
                 let edge_data: EdgeData = decode_cbor(&meta_bytes)?;
+                let label = edge_data
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| label_filter.unwrap_or("unknown").to_string());
+                let source = edge_data
+                    .source
+                    .clone()
+                    .unwrap_or_else(|| NodeRef::new(database, namespace, entity_type, node_id));
+                let target = edge_data
+                    .target
+                    .clone()
+                    .unwrap_or_else(|| NodeRef::new(database, namespace, "Unknown", "Unknown"));
 
-                // Parse the key to extract source/target info
-                // This is simplified - in production we'd parse the key properly
                 edges.push(StoredEdge {
                     edge_id: edge_data.edge_id,
-                    source: NodeRef::new(database, namespace, entity_type, node_id),
-                    target: NodeRef::new(database, namespace, "Unknown", "Unknown"), // Would parse from key
-                    label: label_filter.unwrap_or("unknown").to_string(),
+                    source,
+                    target,
+                    label,
                     properties: edge_data.properties,
                     created_at: edge_data.created_at,
                 });
@@ -372,6 +385,12 @@ struct EdgeData {
     edge_id: String,
     properties: HashMap<String, Value>,
     created_at: i64,
+    #[serde(default)]
+    source: Option<NodeRef>,
+    #[serde(default)]
+    target: Option<NodeRef>,
+    #[serde(default)]
+    label: Option<String>,
 }
 
 /// Compute the FDB keys for an edge
