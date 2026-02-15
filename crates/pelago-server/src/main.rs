@@ -19,7 +19,7 @@ use pelago_proto::{
     replication_service_server::ReplicationServiceServer,
     schema_service_server::SchemaServiceServer,
 };
-use pelago_storage::{IdAllocator, NodeStore, PelagoDb, SchemaCache, SchemaRegistry};
+use pelago_storage::{IdAllocator, JobWorker, NodeStore, PelagoDb, SchemaCache, SchemaRegistry};
 use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
@@ -92,6 +92,17 @@ async fn main() -> Result<()> {
     let admin_service = AdminServiceImpl::new(Arc::new(db.clone()));
     let health_service = HealthServiceImpl::new();
 
+    // Start background job worker
+    let job_worker = JobWorker::new(db.clone(), Arc::clone(&schema_registry));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let job_db_name = std::env::var("PELAGO_DEFAULT_DATABASE").unwrap_or_else(|_| "default".to_string());
+    let job_ns_name = std::env::var("PELAGO_DEFAULT_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+    tokio::spawn(async move {
+        if let Err(e) = job_worker.run(&job_db_name, &job_ns_name, shutdown_rx).await {
+            tracing::error!("Job worker exited with error: {}", e);
+        }
+    });
+
     // Parse listen address
     let addr = config.listen_addr.parse()?;
 
@@ -109,6 +120,8 @@ async fn main() -> Result<()> {
         .serve(addr)
         .await?;
 
+    // Signal job worker to shut down
+    let _ = shutdown_tx.send(true);
     info!("PelagoDB server shutdown complete");
 
     Ok(())

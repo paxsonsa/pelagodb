@@ -14,10 +14,11 @@
 use crate::cache::SchemaCache;
 use crate::cdc::{CdcAccumulator, CdcOperation};
 use crate::db::PelagoDb;
+use crate::jobs::{JobStore, JobType};
 use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
-use pelago_core::schema::EntitySchema;
+use pelago_core::schema::{EntitySchema, IndexType};
 use pelago_core::PelagoError;
 use std::sync::Arc;
 
@@ -178,7 +179,42 @@ impl SchemaRegistry {
             .map_err(|e| PelagoError::Internal(format!("Schema registration failed: {}", e)))?;
 
         // Update cache
-        self.cache.insert(database, namespace, schema).await;
+        self.cache
+            .insert(database, namespace, schema.clone())
+            .await;
+
+        // Auto-create IndexBackfill jobs for newly indexed properties on schema updates
+        if current_version > 0 {
+            if let Ok(Some(old_schema)) =
+                self.get_schema_version(database, namespace, &schema.name, current_version)
+                    .await
+            {
+                let job_store = JobStore::new(self.db.clone());
+                for (prop_name, new_def) in &schema.properties {
+                    if new_def.index != IndexType::None {
+                        let old_index = old_schema
+                            .properties
+                            .get(prop_name)
+                            .map(|d| d.index)
+                            .unwrap_or(IndexType::None);
+                        if old_index == IndexType::None {
+                            // New index on this property — create backfill job
+                            let _ = job_store
+                                .create_job(
+                                    database,
+                                    namespace,
+                                    JobType::IndexBackfill {
+                                        entity_type: schema.name.clone(),
+                                        property_name: prop_name.clone(),
+                                        index_type: new_def.index,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(new_version)
     }
