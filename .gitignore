@@ -15,3 +15,7 @@ Thumbs.db
 # Local development
 fdb.cluster
 *.log
+
+# AI agent worktrees
+.codex/
+claude/
