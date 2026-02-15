@@ -16,6 +16,7 @@ pub mod node_service;
 pub mod query_service;
 pub mod replication_service;
 pub mod schema_service;
+pub mod watch_service;
 
 pub use admin_service::AdminServiceImpl;
 pub use edge_service::EdgeServiceImpl;
@@ -25,3 +26,4 @@ pub use node_service::NodeServiceImpl;
 pub use query_service::QueryServiceImpl;
 pub use replication_service::ReplicationServiceImpl;
 pub use schema_service::SchemaServiceImpl;
+pub use watch_service::WatchServiceImpl;

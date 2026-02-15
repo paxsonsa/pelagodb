@@ -1385,6 +1385,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "pelago-api"
 version = "0.1.0"
 dependencies = [
+ "cel-interpreter",
  "pelago-core",
  "pelago-proto",
  "pelago-query",
@@ -1395,12 +1396,14 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "pelago-cli"
 version = "0.1.0"
 dependencies = [
+ "cel-interpreter",
  "clap",
  "comfy-table",
  "dirs",

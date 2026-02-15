@@ -22,6 +22,7 @@ pub mod jobs;
 pub mod node;
 pub mod schema;
 pub mod subspace;
+pub mod watch;
 
 pub use cache::SchemaCache;
 pub use cdc::{read_cdc_entries, CdcAccumulator, CdcEntry, CdcOperation, Versionstamp};
@@ -34,6 +35,7 @@ pub use jobs::{JobState, JobStatus, JobStore, JobType};
 pub use node::{NodeStore, StoredNode};
 pub use schema::SchemaRegistry;
 pub use subspace::Subspace;
+pub use watch::{DispatcherState, RegistryConfig, SubscriptionRegistry, TtlManager, WatchDispatcher};
 
 #[cfg(feature = "cache")]
 pub use rocks_cache::{CachedReadPath, CdcProjector, ReadConsistency, RocksCacheConfig, RocksCacheStore};

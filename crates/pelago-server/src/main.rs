@@ -9,7 +9,7 @@ use anyhow::Result;
 use clap::Parser;
 use pelago_api::{
     AdminServiceImpl, EdgeServiceImpl, HealthServiceImpl, NodeServiceImpl, QueryServiceImpl,
-    ReplicationServiceImpl, SchemaServiceImpl,
+    ReplicationServiceImpl, SchemaServiceImpl, WatchServiceImpl,
 };
 use pelago_core::ServerConfig;
 use pelago_proto::{
@@ -18,10 +18,12 @@ use pelago_proto::{
     query_service_server::QueryServiceServer,
     replication_service_server::ReplicationServiceServer,
     schema_service_server::SchemaServiceServer,
+    watch_service_server::WatchServiceServer,
 };
 use pelago_storage::{
-    CachedReadPath, CdcProjector, IdAllocator, JobWorker, NodeStore, PelagoDb, RocksCacheConfig,
-    RocksCacheStore, SchemaCache, SchemaRegistry,
+    CachedReadPath, CdcProjector, IdAllocator, JobWorker, NodeStore, PelagoDb, RegistryConfig,
+    RocksCacheConfig, RocksCacheStore, SchemaCache, SchemaRegistry, SubscriptionRegistry,
+    TtlManager,
 };
 use std::sync::Arc;
 use tonic::transport::Server;
@@ -179,6 +181,22 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Watch system: subscription registry and TTL manager
+    let watch_config = RegistryConfig::default();
+    let subscription_registry = Arc::new(SubscriptionRegistry::new(db.clone(), watch_config));
+    let watch_service = WatchServiceImpl::new(
+        Arc::clone(&subscription_registry),
+        Arc::clone(&schema_registry),
+    );
+
+    // Spawn TTL manager to expire stale subscriptions
+    let ttl_registry = Arc::clone(&subscription_registry);
+    let shutdown_for_ttl = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let ttl_manager = TtlManager::new(ttl_registry);
+        ttl_manager.run(shutdown_for_ttl).await;
+    });
+
     // Parse listen address
     let addr = config.listen_addr.parse()?;
 
@@ -193,11 +211,13 @@ async fn main() -> Result<()> {
         .add_service(ReplicationServiceServer::new(replication_service))
         .add_service(AdminServiceServer::new(admin_service))
         .add_service(HealthServiceServer::new(health_service))
+        .add_service(WatchServiceServer::new(watch_service))
         .serve(addr)
         .await?;
 
-    // Signal job worker to shut down
+    // Signal background workers to shut down
     let _ = shutdown_tx.send(true);
+    subscription_registry.shutdown().await;
     info!("PelagoDB server shutdown complete");
 
     Ok(())
