@@ -103,6 +103,31 @@ pub enum PelagoError {
     #[error("Traversal result limit exceeded: {current_count} >= {max_results}")]
     TraversalLimit { max_results: u32, current_count: u32 },
 
+    // Watch System errors (Phase 4)
+    #[error("Subscription limit reached: {current}/{limit}")]
+    WatchSubscriptionLimit { limit: usize, current: usize },
+
+    #[error("Query watch limit reached: {current}/{limit}")]
+    WatchQueryLimit { limit: usize, current: usize },
+
+    #[error("Resume position expired (oldest available: {oldest_available})")]
+    WatchPositionExpired {
+        requested: String,
+        oldest_available: String,
+    },
+
+    #[error("Invalid watch query '{expression}': {error}")]
+    WatchInvalidQuery { expression: String, error: String },
+
+    #[error("Watch query too complex: complexity {complexity} exceeds limit {limit}")]
+    WatchQueryTooComplex { complexity: u64, limit: u64 },
+
+    #[error("Subscription not found: {subscription_id}")]
+    WatchSubscriptionNotFound { subscription_id: String },
+
+    #[error("Requested TTL {requested_secs}s exceeds maximum {max_secs}s")]
+    WatchTtlExceeded { requested_secs: u32, max_secs: u32 },
+
     // Internal errors
     #[error("FDB unavailable: {0}")]
     FdbUnavailable(String),
@@ -137,6 +162,13 @@ impl PelagoError {
             PelagoError::TraversalTimeout { .. } => "ERR_TIMEOUT_TRAVERSAL",
             PelagoError::TransactionTimeout => "ERR_TIMEOUT_TRANSACTION",
             PelagoError::TraversalLimit { .. } => "ERR_RESOURCE_TRAVERSAL_LIMIT",
+            PelagoError::WatchSubscriptionLimit { .. } => "ERR_WATCH_SUBSCRIPTION_LIMIT",
+            PelagoError::WatchQueryLimit { .. } => "ERR_WATCH_QUERY_LIMIT",
+            PelagoError::WatchPositionExpired { .. } => "ERR_WATCH_POSITION_EXPIRED",
+            PelagoError::WatchInvalidQuery { .. } => "ERR_WATCH_INVALID_QUERY",
+            PelagoError::WatchQueryTooComplex { .. } => "ERR_WATCH_QUERY_TOO_COMPLEX",
+            PelagoError::WatchSubscriptionNotFound { .. } => "ERR_WATCH_SUBSCRIPTION_NOT_FOUND",
+            PelagoError::WatchTtlExceeded { .. } => "ERR_WATCH_TTL_EXCEEDED",
             PelagoError::FdbUnavailable(_) => "ERR_INTERNAL_FDB_UNAVAILABLE",
             PelagoError::Internal(_) => "ERR_INTERNAL_UNEXPECTED",
         }
@@ -170,7 +202,17 @@ impl PelagoError {
             | PelagoError::TraversalTimeout { .. }
             | PelagoError::TransactionTimeout => "TIMEOUT",
 
-            PelagoError::TraversalLimit { .. } => "RESOURCE",
+            PelagoError::TraversalLimit { .. }
+            | PelagoError::WatchSubscriptionLimit { .. }
+            | PelagoError::WatchQueryLimit { .. } => "RESOURCE",
+
+            PelagoError::WatchPositionExpired { .. } => "WATCH",
+
+            PelagoError::WatchInvalidQuery { .. }
+            | PelagoError::WatchQueryTooComplex { .. }
+            | PelagoError::WatchTtlExceeded { .. } => "VALIDATION",
+
+            PelagoError::WatchSubscriptionNotFound { .. } => "REFERENTIAL",
 
             PelagoError::FdbUnavailable(_) | PelagoError::Internal(_) => "INTERNAL",
         }
@@ -249,6 +291,24 @@ impl PelagoError {
             } => {
                 m.insert("max_results".into(), max_results.to_string());
                 m.insert("current_count".into(), current_count.to_string());
+            }
+            PelagoError::WatchSubscriptionLimit { limit, current } => {
+                m.insert("limit".into(), limit.to_string());
+                m.insert("current".into(), current.to_string());
+            }
+            PelagoError::WatchQueryLimit { limit, current } => {
+                m.insert("limit".into(), limit.to_string());
+                m.insert("current".into(), current.to_string());
+            }
+            PelagoError::WatchPositionExpired {
+                requested,
+                oldest_available,
+            } => {
+                m.insert("requested".into(), requested.clone());
+                m.insert("oldest_available".into(), oldest_available.clone());
+            }
+            PelagoError::WatchSubscriptionNotFound { subscription_id } => {
+                m.insert("subscription_id".into(), subscription_id.clone());
             }
             _ => {}
         }

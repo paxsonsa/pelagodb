@@ -562,6 +562,281 @@ enum ServingStatus {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// WATCH SERVICE (Phase 4: Reactive Subscriptions)
+// ═══════════════════════════════════════════════════════════════════════════
+
+service WatchService {
+  // Subscribe to changes on specific nodes, edges, or properties
+  rpc WatchPoint(WatchPointRequest) returns (stream WatchEvent);
+
+  // Subscribe to changes matching a CEL or PQL query
+  rpc WatchQuery(WatchQueryRequest) returns (stream WatchEvent);
+
+  // Subscribe to all changes within a namespace
+  rpc WatchNamespace(WatchNamespaceRequest) returns (stream WatchEvent);
+
+  // List active subscriptions for this connection
+  rpc ListSubscriptions(ListSubscriptionsRequest) returns (ListSubscriptionsResponse);
+
+  // Cancel a subscription by ID
+  rpc CancelSubscription(CancelSubscriptionRequest) returns (CancelSubscriptionResponse);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POINT WATCH
+// ═══════════════════════════════════════════════════════════════════════════
+
+message WatchPointRequest {
+  RequestContext context = 1;
+
+  // What to watch (at least one required)
+  repeated NodeWatch nodes = 2;
+  repeated EdgeWatch edges = 3;
+
+  // Resume position (optional, empty = start from now)
+  bytes resume_position = 4;
+
+  // Subscription options
+  WatchOptions options = 5;
+}
+
+message NodeWatch {
+  string entity_type = 1;
+  string node_id = 2;
+
+  // Optional: watch only specific properties (empty = all)
+  repeated string properties = 3;
+}
+
+message EdgeWatch {
+  NodeRef source = 1;
+  string label = 2;
+
+  // Optional: watch specific target (empty = all edges with label)
+  NodeRef target = 3;
+
+  // Optional: watch edge direction
+  EdgeDirection direction = 4;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QUERY WATCH
+// ═══════════════════════════════════════════════════════════════════════════
+
+message WatchQueryRequest {
+  RequestContext context = 1;
+
+  // Query specification (exactly one required)
+  oneof query {
+    // CEL expression (e.g., "entity_type == 'Person' && age >= 30")
+    string cel_expression = 2;
+
+    // PQL query string
+    string pql_query = 3;
+  }
+
+  // Entity type scope (required for CEL, optional for PQL)
+  string entity_type = 4;
+
+  // Include full entity data in events (default: true)
+  bool include_data = 5;
+
+  // Resume position
+  bytes resume_position = 6;
+
+  // Subscription options
+  WatchOptions options = 7;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NAMESPACE WATCH
+// ═══════════════════════════════════════════════════════════════════════════
+
+message WatchNamespaceRequest {
+  RequestContext context = 1;
+
+  // Optional: filter by entity types (empty = all types)
+  repeated string entity_types = 2;
+
+  // Optional: filter by operation types
+  repeated OperationType operation_types = 3;
+
+  // Resume position
+  bytes resume_position = 4;
+
+  // Subscription options
+  WatchOptions options = 5;
+}
+
+enum OperationType {
+  OPERATION_TYPE_UNSPECIFIED = 0;
+  OPERATION_TYPE_NODE_CREATE = 1;
+  OPERATION_TYPE_NODE_UPDATE = 2;
+  OPERATION_TYPE_NODE_DELETE = 3;
+  OPERATION_TYPE_EDGE_CREATE = 4;
+  OPERATION_TYPE_EDGE_DELETE = 5;
+  OPERATION_TYPE_SCHEMA_REGISTER = 6;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WATCH OPTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+message WatchOptions {
+  // Subscription TTL in seconds (0 = use server default)
+  uint32 ttl_seconds = 1;
+
+  // Heartbeat interval in seconds (0 = use server default)
+  uint32 heartbeat_seconds = 2;
+
+  // Maximum events per second (0 = unlimited)
+  uint32 rate_limit = 3;
+
+  // Batch events before sending (reduces RPCs, increases latency)
+  BatchOptions batch = 4;
+
+  // Initial load: emit current state before streaming changes
+  bool initial_snapshot = 5;
+}
+
+message BatchOptions {
+  // Maximum events per batch
+  uint32 max_events = 1;
+
+  // Maximum time to wait for batch fill (milliseconds)
+  uint32 max_wait_ms = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WATCH EVENTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+message WatchEvent {
+  // Unique event ID (versionstamp from CDC)
+  bytes event_id = 1;
+
+  // Position for resume (opaque, pass back in resume_position)
+  bytes position = 2;
+
+  // Event type
+  WatchEventType event_type = 3;
+
+  // Timestamp (unix microseconds)
+  int64 timestamp = 4;
+
+  // Subscription that matched this event
+  string subscription_id = 5;
+
+  // Entity information
+  string entity_type = 6;
+  string node_id = 7;
+
+  // Optional: full entity data (if requested)
+  map<string, Value> data = 8;
+
+  // Optional: changed properties only (for updates)
+  map<string, Value> changed_properties = 9;
+
+  // Optional: edge information (for edge events)
+  EdgeEventData edge = 10;
+
+  // For query watches: entry/exit metadata
+  QueryWatchMeta query_meta = 11;
+
+  // For subscription end events
+  SubscriptionEndReason end_reason = 12;
+}
+
+enum WatchEventType {
+  WATCH_EVENT_TYPE_UNSPECIFIED = 0;
+
+  // Node events
+  WATCH_EVENT_TYPE_NODE_CREATED = 1;
+  WATCH_EVENT_TYPE_NODE_UPDATED = 2;
+  WATCH_EVENT_TYPE_NODE_DELETED = 3;
+
+  // Edge events
+  WATCH_EVENT_TYPE_EDGE_CREATED = 4;
+  WATCH_EVENT_TYPE_EDGE_DELETED = 5;
+
+  // Query watch specific
+  WATCH_EVENT_TYPE_QUERY_ENTER = 6;
+  WATCH_EVENT_TYPE_QUERY_EXIT = 7;
+
+  // System events
+  WATCH_EVENT_TYPE_HEARTBEAT = 8;
+  WATCH_EVENT_TYPE_SUBSCRIPTION_ENDED = 9;
+}
+
+message EdgeEventData {
+  NodeRef source = 1;
+  NodeRef target = 2;
+  string label = 3;
+  map<string, Value> properties = 4;
+}
+
+message QueryWatchMeta {
+  // For QUERY_EXIT: why the entity exited
+  ExitReason exit_reason = 1;
+
+  // For QUERY_ENTER: was this initial load or live change
+  bool initial_load = 2;
+}
+
+enum ExitReason {
+  EXIT_REASON_UNSPECIFIED = 0;
+  EXIT_REASON_DELETED = 1;
+  EXIT_REASON_NO_LONGER_MATCHES = 2;
+}
+
+enum SubscriptionEndReason {
+  SUBSCRIPTION_END_REASON_UNSPECIFIED = 0;
+  SUBSCRIPTION_END_REASON_CLIENT_CANCELLED = 1;
+  SUBSCRIPTION_END_REASON_TTL_EXPIRED = 2;
+  SUBSCRIPTION_END_REASON_POSITION_EXPIRED = 3;
+  SUBSCRIPTION_END_REASON_RESOURCE_LIMIT = 4;
+  SUBSCRIPTION_END_REASON_SERVER_SHUTDOWN = 5;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SUBSCRIPTION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+message ListSubscriptionsRequest {
+  RequestContext context = 1;
+}
+
+message ListSubscriptionsResponse {
+  repeated SubscriptionInfo subscriptions = 1;
+}
+
+message SubscriptionInfo {
+  string subscription_id = 1;
+  SubscriptionType type = 2;
+  string database = 3;
+  string namespace = 4;
+  int64 created_at = 5;
+  int64 expires_at = 6;
+  uint64 events_delivered = 7;
+}
+
+enum SubscriptionType {
+  SUBSCRIPTION_TYPE_UNSPECIFIED = 0;
+  SUBSCRIPTION_TYPE_POINT = 1;
+  SUBSCRIPTION_TYPE_QUERY = 2;
+  SUBSCRIPTION_TYPE_NAMESPACE = 3;
+}
+
+message CancelSubscriptionRequest {
+  RequestContext context = 1;
+  string subscription_id = 2;
+}
+
+message CancelSubscriptionResponse {
+  bool cancelled = 1;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ERROR DETAILS
 // ═══════════════════════════════════════════════════════════════════════════
 

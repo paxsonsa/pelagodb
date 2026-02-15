@@ -37,7 +37,16 @@ pub fn to_status(err: PelagoError) -> Status {
         | PelagoError::TransactionTimeout => Code::DeadlineExceeded,
 
         // Resource errors -> RESOURCE_EXHAUSTED
-        PelagoError::TraversalLimit { .. } => Code::ResourceExhausted,
+        PelagoError::TraversalLimit { .. }
+        | PelagoError::WatchSubscriptionLimit { .. }
+        | PelagoError::WatchQueryLimit { .. } => Code::ResourceExhausted,
+
+        // Watch errors
+        PelagoError::WatchPositionExpired { .. } => Code::OutOfRange,
+        PelagoError::WatchInvalidQuery { .. }
+        | PelagoError::WatchQueryTooComplex { .. }
+        | PelagoError::WatchTtlExceeded { .. } => Code::InvalidArgument,
+        PelagoError::WatchSubscriptionNotFound { .. } => Code::NotFound,
 
         // Internal errors -> INTERNAL / UNAVAILABLE
         PelagoError::FdbUnavailable(_) => Code::Unavailable,
