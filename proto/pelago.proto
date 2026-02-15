@@ -451,6 +451,85 @@ message DropNamespaceResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// REPLICATION SERVICE (Phase 2: internal CDC consumption)
+// ═══════════════════════════════════════════════════════════════════════════
+
+service ReplicationService {
+  rpc PullCdcEvents(PullCdcEventsRequest) returns (stream CdcEventResponse);
+}
+
+message PullCdcEventsRequest {
+  RequestContext context = 1;
+  bytes after_versionstamp = 2;  // 10-byte versionstamp (empty = from beginning)
+  uint32 limit = 3;              // Max events per response (default: 1000)
+}
+
+message CdcEventResponse {
+  bytes versionstamp = 1;        // 10-byte versionstamp of this entry
+  CdcEntryProto entry = 2;
+}
+
+message CdcEntryProto {
+  string site = 1;
+  int64 timestamp = 2;
+  string batch_id = 3;
+  repeated CdcOperationProto operations = 4;
+}
+
+message CdcOperationProto {
+  oneof operation {
+    NodeCreateOp node_create = 1;
+    NodeUpdateOp node_update = 2;
+    NodeDeleteOp node_delete = 3;
+    EdgeCreateOp edge_create = 4;
+    EdgeDeleteOp edge_delete = 5;
+    SchemaRegisterOp schema_register = 6;
+  }
+}
+
+message NodeCreateOp {
+  string entity_type = 1;
+  string node_id = 2;
+  map<string, Value> properties = 3;
+  string home_site = 4;
+}
+
+message NodeUpdateOp {
+  string entity_type = 1;
+  string node_id = 2;
+  map<string, Value> changed_properties = 3;
+  map<string, Value> old_properties = 4;
+}
+
+message NodeDeleteOp {
+  string entity_type = 1;
+  string node_id = 2;
+}
+
+message EdgeCreateOp {
+  string source_type = 1;
+  string source_id = 2;
+  string target_type = 3;
+  string target_id = 4;
+  string edge_type = 5;
+  string edge_id = 6;
+  map<string, Value> properties = 7;
+}
+
+message EdgeDeleteOp {
+  string source_type = 1;
+  string source_id = 2;
+  string target_type = 3;
+  string target_id = 4;
+  string edge_type = 5;
+}
+
+message SchemaRegisterOp {
+  string entity_type = 1;
+  uint32 version = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // HEALTH SERVICE
 // ═══════════════════════════════════════════════════════════════════════════
 

@@ -4,8 +4,9 @@
 //! 1. Schema registration
 //! 2. Node creation with validation
 //! 3. Edge creation (including bidirectional)
-//! 4. Querying nodes
-//! 5. Graph traversal
+//! 4. Node updates and constraint validation
+//! 5. Edge and node deletion
+//! 6. CDC verification (Phase 2)
 //!
 //! Run with:
 //!   LIBRARY_PATH=/usr/local/lib cargo test --test lifecycle_test -- --ignored --nocapture
@@ -15,7 +16,8 @@
 use pelago_core::schema::{EdgeDef, EdgeTarget, EntitySchema, IndexType, PropertyDef};
 use pelago_core::{PropertyType, Value};
 use pelago_storage::{
-    CdcWriter, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaCache, SchemaRegistry,
+    CdcConsumer, CdcOperation, ConsumerConfig, Versionstamp,
+    EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaCache, SchemaRegistry,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,21 +63,26 @@ async fn test_full_lifecycle() {
     );
 
     // Create shared components
+    let site_id = "1".to_string();
     let schema_cache = Arc::new(SchemaCache::new());
-    let schema_registry = Arc::new(SchemaRegistry::new(db.clone(), Arc::clone(&schema_cache)));
+    let schema_registry = Arc::new(SchemaRegistry::new(
+        db.clone(),
+        Arc::clone(&schema_cache),
+        site_id.clone(),
+    ));
     let id_allocator = Arc::new(IdAllocator::new(db.clone(), 1, 100)); // site_id=1, batch=100
-    let cdc_writer = Arc::new(CdcWriter::new(db.clone()));
     let node_store = Arc::new(NodeStore::new(
         db.clone(),
         Arc::clone(&schema_registry),
         Arc::clone(&id_allocator),
-        Arc::clone(&cdc_writer),
+        site_id.clone(),
     ));
     let edge_store = EdgeStore::new(
         db.clone(),
         Arc::clone(&schema_registry),
         Arc::clone(&id_allocator),
         Arc::clone(&node_store),
+        site_id,
     );
 
     // =========================================================================
@@ -535,6 +542,107 @@ async fn test_full_lifecycle() {
     assert!(carol_check.is_none());
 
     // =========================================================================
+    // PHASE 10: CDC Verification
+    // =========================================================================
+    println!("{}", THIN_SEP);
+    println!("  PHASE 10: CDC Verification");
+    println!("{}\n", THIN_SEP);
+
+    // Create a consumer to read all CDC entries produced during the test
+    let consumer_config = ConsumerConfig::new("lifecycle_test", &database, &namespace);
+    let mut consumer = CdcConsumer::new(db.clone(), consumer_config)
+        .await
+        .expect("Failed to create CDC consumer");
+
+    let entries = consumer
+        .poll_batch()
+        .await
+        .expect("Failed to poll CDC entries");
+
+    println!("   CDC entries found: {}", entries.len());
+    assert!(!entries.is_empty(), "Expected CDC entries from mutations");
+
+    // Count operations by type
+    let mut op_counts: HashMap<&str, usize> = HashMap::new();
+    for (_vs, entry) in &entries {
+        for op in &entry.operations {
+            let name = match op {
+                CdcOperation::NodeCreate { .. } => "NodeCreate",
+                CdcOperation::NodeUpdate { .. } => "NodeUpdate",
+                CdcOperation::NodeDelete { .. } => "NodeDelete",
+                CdcOperation::EdgeCreate { .. } => "EdgeCreate",
+                CdcOperation::EdgeDelete { .. } => "EdgeDelete",
+                CdcOperation::SchemaRegister { .. } => "SchemaRegister",
+            };
+            *op_counts.entry(name).or_insert(0) += 1;
+        }
+    }
+
+    println!("   CDC operation counts:");
+    for (op, count) in &op_counts {
+        println!("     {}: {}", op, count);
+    }
+    println!();
+
+    // Expected operations from the lifecycle test:
+    // - 2 SchemaRegister (User, Post)
+    // - 4 NodeCreate (Alice, Bob, Carol, Post1)
+    // - 1 NodeUpdate (Alice age 30→31)
+    // - 4+ EdgeCreate (follows x2, friends_with (bidirectional creates 2), authored_by)
+    // - 1 EdgeDelete (Alice --follows--> Carol)
+    // - 1 NodeDelete (Carol)
+    assert!(
+        op_counts.get("SchemaRegister").unwrap_or(&0) >= &2,
+        "Expected >= 2 SchemaRegister CDC ops"
+    );
+    assert!(
+        op_counts.get("NodeCreate").unwrap_or(&0) >= &4,
+        "Expected >= 4 NodeCreate CDC ops"
+    );
+    assert!(
+        op_counts.get("NodeUpdate").unwrap_or(&0) >= &1,
+        "Expected >= 1 NodeUpdate CDC ops"
+    );
+    assert!(
+        op_counts.get("EdgeCreate").unwrap_or(&0) >= &4,
+        "Expected >= 4 EdgeCreate CDC ops"
+    );
+    assert!(
+        op_counts.get("EdgeDelete").unwrap_or(&0) >= &1,
+        "Expected >= 1 EdgeDelete CDC ops"
+    );
+    assert!(
+        op_counts.get("NodeDelete").unwrap_or(&0) >= &1,
+        "Expected >= 1 NodeDelete CDC ops"
+    );
+    println!("   ✓ All expected CDC operation types present");
+
+    // Verify versionstamp ordering is monotonic
+    let mut prev_vs: Option<&Versionstamp> = None;
+    for (vs, _) in &entries {
+        if let Some(prev) = prev_vs {
+            assert!(vs > prev, "CDC entries should be in versionstamp order");
+        }
+        prev_vs = Some(vs);
+    }
+    println!("   ✓ All CDC entries in monotonically increasing versionstamp order");
+
+    // Checkpoint and verify resume works
+    consumer
+        .checkpoint()
+        .await
+        .expect("Failed to save CDC checkpoint");
+    let empty_batch = consumer
+        .poll_batch()
+        .await
+        .expect("Failed to poll after checkpoint");
+    assert!(
+        empty_batch.is_empty(),
+        "Expected no new entries after checkpoint"
+    );
+    println!("   ✓ Consumer checkpoint + resume works\n");
+
+    // =========================================================================
     // SUMMARY
     // =========================================================================
     println!("{}", SEPARATOR);
@@ -550,5 +658,8 @@ async fn test_full_lifecycle() {
     println!("    • 1 node deleted");
     println!("    • Unique constraint enforced");
     println!("    • Required field validation enforced");
+    println!("    • CDC entries verified for all operations");
+    println!("    • CDC versionstamp ordering verified");
+    println!("    • CDC consumer checkpoint + resume verified");
     println!();
 }

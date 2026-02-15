@@ -2,24 +2,24 @@
 //!
 //! Main entry point for the PelagoDB gRPC server.
 //!
-//! Initializes the FDB connection, sets up shared components (schema cache, ID allocator,
-//! CDC writer), and starts the gRPC server with all service handlers.
+//! Initializes the FDB connection, sets up shared components (schema cache, ID allocator),
+//! and starts the gRPC server with all service handlers.
 
 use anyhow::Result;
 use clap::Parser;
 use pelago_api::{
     AdminServiceImpl, EdgeServiceImpl, HealthServiceImpl, NodeServiceImpl, QueryServiceImpl,
-    SchemaServiceImpl,
+    ReplicationServiceImpl, SchemaServiceImpl,
 };
 use pelago_core::ServerConfig;
 use pelago_proto::{
     admin_service_server::AdminServiceServer, edge_service_server::EdgeServiceServer,
     health_service_server::HealthServiceServer, node_service_server::NodeServiceServer,
-    query_service_server::QueryServiceServer, schema_service_server::SchemaServiceServer,
+    query_service_server::QueryServiceServer,
+    replication_service_server::ReplicationServiceServer,
+    schema_service_server::SchemaServiceServer,
 };
-use pelago_storage::{
-    CdcWriter, IdAllocator, NodeStore, PelagoDb, SchemaCache, SchemaRegistry,
-};
+use pelago_storage::{IdAllocator, NodeStore, PelagoDb, SchemaCache, SchemaRegistry};
 use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
@@ -48,19 +48,23 @@ async fn main() -> Result<()> {
     let db = PelagoDb::connect(&config.fdb_cluster).await?;
 
     // Initialize shared components
+    let site_id_str = config.site_id.to_string();
     let schema_cache = Arc::new(SchemaCache::new());
-    let schema_registry = Arc::new(SchemaRegistry::new(db.clone(), Arc::clone(&schema_cache)));
+    let schema_registry = Arc::new(SchemaRegistry::new(
+        db.clone(),
+        Arc::clone(&schema_cache),
+        site_id_str.clone(),
+    ));
     let id_allocator = Arc::new(IdAllocator::new(
         db.clone(),
         config.site_id,
         config.id_batch_size,
     ));
-    let cdc_writer = Arc::new(CdcWriter::new(db.clone()));
     let node_store = Arc::new(NodeStore::new(
         db.clone(),
         Arc::clone(&schema_registry),
         Arc::clone(&id_allocator),
-        Arc::clone(&cdc_writer),
+        site_id_str.clone(),
     ));
 
     // Create service implementations
@@ -69,20 +73,22 @@ async fn main() -> Result<()> {
         db.clone(),
         Arc::clone(&schema_registry),
         Arc::clone(&id_allocator),
-        Arc::clone(&cdc_writer),
+        site_id_str.clone(),
     );
     let edge_service = EdgeServiceImpl::new(
         db.clone(),
         Arc::clone(&schema_registry),
         Arc::clone(&id_allocator),
         Arc::clone(&node_store),
+        site_id_str.clone(),
     );
     let query_service = QueryServiceImpl::new(
         db.clone(),
         Arc::clone(&schema_registry),
         Arc::clone(&id_allocator),
-        Arc::clone(&cdc_writer),
+        site_id_str,
     );
+    let replication_service = ReplicationServiceImpl::new(db.clone());
     let admin_service = AdminServiceImpl::new(Arc::new(db.clone()));
     let health_service = HealthServiceImpl::new();
 
@@ -97,6 +103,7 @@ async fn main() -> Result<()> {
         .add_service(NodeServiceServer::new(node_service))
         .add_service(EdgeServiceServer::new(edge_service))
         .add_service(QueryServiceServer::new(query_service))
+        .add_service(ReplicationServiceServer::new(replication_service))
         .add_service(AdminServiceServer::new(admin_service))
         .add_service(HealthServiceServer::new(health_service))
         .serve(addr)

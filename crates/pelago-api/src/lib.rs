@@ -14,6 +14,7 @@ pub mod error;
 pub mod health_service;
 pub mod node_service;
 pub mod query_service;
+pub mod replication_service;
 pub mod schema_service;
 
 pub use admin_service::AdminServiceImpl;
@@ -22,4 +23,5 @@ pub use error::{to_status, IntoStatus, ToStatus};
 pub use health_service::HealthServiceImpl;
 pub use node_service::NodeServiceImpl;
 pub use query_service::QueryServiceImpl;
+pub use replication_service::ReplicationServiceImpl;
 pub use schema_service::SchemaServiceImpl;
