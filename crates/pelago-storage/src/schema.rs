@@ -12,6 +12,7 @@
 //! - Old versions are preserved for migration support
 
 use crate::cache::SchemaCache;
+use crate::cdc::{CdcAccumulator, CdcOperation};
 use crate::db::PelagoDb;
 use crate::Subspace;
 use bytes::Bytes;
@@ -24,11 +25,12 @@ use std::sync::Arc;
 pub struct SchemaRegistry {
     db: PelagoDb,
     cache: Arc<SchemaCache>,
+    site_id: String,
 }
 
 impl SchemaRegistry {
-    pub fn new(db: PelagoDb, cache: Arc<SchemaCache>) -> Self {
-        Self { db, cache }
+    pub fn new(db: PelagoDb, cache: Arc<SchemaCache>, site_id: String) -> Self {
+        Self { db, cache, site_id }
     }
 
     /// Build key for the latest version pointer
@@ -150,8 +152,9 @@ impl SchemaRegistry {
         // Encode schema to CBOR
         let schema_bytes = encode_cbor(&schema)?;
 
-        // Write in a transaction
+        // Write in a single transaction (schema + CDC)
         let trx = self.db.create_transaction()?;
+        let mut cdc = CdcAccumulator::new(&self.site_id);
 
         // Write version pointer
         trx.set(latest_key.as_ref(), &Self::encode_version(new_version));
@@ -160,6 +163,16 @@ impl SchemaRegistry {
         let version_key = Self::version_key(&subspace, &schema.name, new_version);
         trx.set(version_key.as_ref(), &schema_bytes);
 
+        // Accumulate CDC operation
+        cdc.push(CdcOperation::SchemaRegister {
+            entity_type: schema.name.clone(),
+            version: new_version,
+        });
+
+        // Flush CDC into same transaction
+        cdc.flush(&trx, database, namespace)?;
+
+        // Single atomic commit
         trx.commit()
             .await
             .map_err(|e| PelagoError::Internal(format!("Schema registration failed: {}", e)))?;

@@ -11,7 +11,7 @@ use pelago_proto::{
     edge_service_server::EdgeService, CreateEdgeRequest, CreateEdgeResponse, DeleteEdgeRequest,
     DeleteEdgeResponse, Edge, EdgeResult, ListEdgesRequest, NodeRef as ProtoNodeRef,
 };
-use pelago_storage::{CdcWriter, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry};
+use pelago_storage::{EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::{Stream, StreamExt};
@@ -28,9 +28,10 @@ impl EdgeServiceImpl {
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
         node_store: Arc<NodeStore>,
+        site_id: String,
     ) -> Self {
         Self {
-            edge_store: EdgeStore::new(db, schema_registry, id_allocator, node_store),
+            edge_store: EdgeStore::new(db, schema_registry, id_allocator, node_store, site_id),
         }
     }
 }

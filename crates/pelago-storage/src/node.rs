@@ -12,7 +12,7 @@
 //! - update_node: Read-modify-write with index diff
 //! - delete_node: Remove data, indexes, cascade edges, emit CDC
 
-use crate::cdc::CdcWriter;
+use crate::cdc::{CdcAccumulator, CdcOperation};
 use crate::db::PelagoDb;
 use crate::ids::IdAllocator;
 use crate::index::{compute_index_entries, compute_index_removals, IndexEntry, IndexEntryType};
@@ -31,7 +31,7 @@ pub struct NodeStore {
     db: PelagoDb,
     schema_registry: Arc<SchemaRegistry>,
     id_allocator: Arc<IdAllocator>,
-    cdc_writer: Arc<CdcWriter>,
+    site_id: String,
 }
 
 impl NodeStore {
@@ -39,13 +39,13 @@ impl NodeStore {
         db: PelagoDb,
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
-        cdc_writer: Arc<CdcWriter>,
+        site_id: String,
     ) -> Self {
         Self {
             db,
             schema_registry,
             id_allocator,
-            cdc_writer,
+            site_id,
         }
     }
 
@@ -140,8 +140,9 @@ impl NodeStore {
             updated_at: stored_node.updated_at,
         })?;
 
-        // Write everything in a transaction
+        // Write everything in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
+        let mut cdc = CdcAccumulator::new(&self.site_id);
 
         // Write data key
         let data_subspace = subspace.data();
@@ -153,15 +154,21 @@ impl NodeStore {
             Self::write_index_entry(&trx, entry)?;
         }
 
-        // Commit
+        // Accumulate CDC operation
+        cdc.push(CdcOperation::NodeCreate {
+            entity_type: entity_type.to_string(),
+            node_id: node_id.to_string(),
+            properties: properties.clone(),
+            home_site: self.site_id.clone(),
+        });
+
+        // Flush CDC into same transaction
+        cdc.flush(&trx, database, namespace)?;
+
+        // Single atomic commit: mutation + CDC
         trx.commit()
             .await
             .map_err(|e| PelagoError::Internal(format!("Failed to create node: {}", e)))?;
-
-        // Write CDC entry (after commit for ordering)
-        self.cdc_writer
-            .write_create(database, namespace, entity_type, &node_id.to_string(), &properties)
-            .await?;
 
         Ok(stored_node)
     }
@@ -278,8 +285,9 @@ impl NodeStore {
         };
         let node_data = encode_cbor(&updated_data)?;
 
-        // Write in transaction
+        // Write in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
+        let mut cdc = CdcAccumulator::new(&self.site_id);
 
         // Remove old index entries
         for entry in &removals {
@@ -294,21 +302,21 @@ impl NodeStore {
         // Update data
         trx.set(data_key.as_ref(), &node_data);
 
+        // Accumulate CDC operation
+        cdc.push(CdcOperation::NodeUpdate {
+            entity_type: entity_type.to_string(),
+            node_id: node_id.to_string(),
+            changed_properties: new_properties,
+            old_properties: old_properties.clone(),
+        });
+
+        // Flush CDC into same transaction
+        cdc.flush(&trx, database, namespace)?;
+
+        // Single atomic commit
         trx.commit()
             .await
             .map_err(|e| PelagoError::Internal(format!("Failed to update node: {}", e)))?;
-
-        // Write CDC entry
-        self.cdc_writer
-            .write_update(
-                database,
-                namespace,
-                entity_type,
-                node_id,
-                &old_properties,
-                &merged_properties,
-            )
-            .await?;
 
         Ok(StoredNode {
             id: node_id.to_string(),
@@ -366,8 +374,9 @@ impl NodeStore {
             &existing_data.properties,
         )?;
 
-        // Delete in transaction
+        // Delete in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
+        let mut cdc = CdcAccumulator::new(&self.site_id);
 
         // Remove data
         trx.clear(data_key.as_ref());
@@ -377,20 +386,19 @@ impl NodeStore {
             trx.clear(entry.key.as_ref());
         }
 
+        // Accumulate CDC operation
+        cdc.push(CdcOperation::NodeDelete {
+            entity_type: entity_type.to_string(),
+            node_id: node_id.to_string(),
+        });
+
+        // Flush CDC into same transaction
+        cdc.flush(&trx, database, namespace)?;
+
+        // Single atomic commit
         trx.commit()
             .await
             .map_err(|e| PelagoError::Internal(format!("Failed to delete node: {}", e)))?;
-
-        // Write CDC entry
-        self.cdc_writer
-            .write_delete(
-                database,
-                namespace,
-                entity_type,
-                node_id,
-                &existing_data.properties,
-            )
-            .await?;
 
         Ok(true)
     }

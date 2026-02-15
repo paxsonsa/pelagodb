@@ -13,7 +13,7 @@ use pelago_proto::{
     DeleteNodeResponse, GetNodeRequest, GetNodeResponse, Node, UpdateNodeRequest,
     UpdateNodeResponse,
 };
-use pelago_storage::{CdcWriter, IdAllocator, NodeStore, PelagoDb, SchemaRegistry};
+use pelago_storage::{IdAllocator, NodeStore, PelagoDb, SchemaRegistry};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
@@ -27,10 +27,10 @@ impl NodeServiceImpl {
         db: PelagoDb,
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
-        cdc_writer: Arc<CdcWriter>,
+        site_id: String,
     ) -> Self {
         Self {
-            node_store: NodeStore::new(db, schema_registry, id_allocator, cdc_writer),
+            node_store: NodeStore::new(db, schema_registry, id_allocator, site_id),
         }
     }
 }

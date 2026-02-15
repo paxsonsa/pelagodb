@@ -14,7 +14,7 @@ use pelago_proto::{
 use pelago_query::planner::QueryPlanner;
 use pelago_query::plan::QueryExplanation;
 use pelago_query::QueryExecutor;
-use pelago_storage::{CdcWriter, IdAllocator, PelagoDb, SchemaRegistry};
+use pelago_storage::{IdAllocator, PelagoDb, SchemaRegistry};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
@@ -31,10 +31,10 @@ impl QueryServiceImpl {
         db: PelagoDb,
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
-        cdc_writer: Arc<pelago_storage::CdcWriter>,
+        site_id: String,
     ) -> Self {
         Self {
-            query_executor: QueryExecutor::new(db, Arc::clone(&schema_registry), id_allocator, cdc_writer),
+            query_executor: QueryExecutor::new(db, Arc::clone(&schema_registry), id_allocator, site_id),
             schema_registry,
         }
     }

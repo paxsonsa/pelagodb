@@ -34,6 +34,7 @@ pub mod markers {
     pub const LOC: &str = "loc";
     pub const IDX: &str = "idx";
     pub const EDGE: &str = "edge";
+    pub const META: &str = "_meta";
 }
 
 /// Edge key markers
@@ -107,6 +108,11 @@ impl Subspace {
     /// Get the IDs subspace
     pub fn ids(&self) -> Self {
         self.subspace(markers::IDS)
+    }
+
+    /// Get the meta subspace (for checkpoints, counters, etc.)
+    pub fn meta(&self) -> Self {
+        self.subspace(markers::META)
     }
 
     /// Create a child subspace

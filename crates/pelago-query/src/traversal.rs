@@ -8,8 +8,8 @@
 //! The traversal engine implements BFS/DFS graph traversal with filtering.
 
 use pelago_core::{PelagoError, Value};
-use pelago_storage::{CdcWriter, EdgeStore, IdAllocator, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode};
-use std::collections::{HashMap, HashSet, VecDeque};
+use pelago_storage::{EdgeStore, IdAllocator, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode};
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -134,7 +134,7 @@ pub struct TraversalEngine {
     db: PelagoDb,
     schema_registry: Arc<SchemaRegistry>,
     id_allocator: Arc<IdAllocator>,
-    cdc_writer: Arc<CdcWriter>,
+    site_id: String,
     config: TraversalConfig,
 }
 
@@ -144,13 +144,13 @@ impl TraversalEngine {
         db: PelagoDb,
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
-        cdc_writer: Arc<CdcWriter>,
+        site_id: String,
     ) -> Self {
         Self {
             db,
             schema_registry,
             id_allocator,
-            cdc_writer,
+            site_id,
             config: TraversalConfig::default(),
         }
     }
@@ -160,14 +160,14 @@ impl TraversalEngine {
         db: PelagoDb,
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
-        cdc_writer: Arc<CdcWriter>,
+        site_id: String,
         config: TraversalConfig,
     ) -> Self {
         Self {
             db,
             schema_registry,
             id_allocator,
-            cdc_writer,
+            site_id,
             config,
         }
     }
@@ -188,7 +188,7 @@ impl TraversalEngine {
             self.db.clone(),
             Arc::clone(&self.schema_registry),
             Arc::clone(&self.id_allocator),
-            Arc::clone(&self.cdc_writer),
+            self.site_id.clone(),
         ));
 
         let start_node = node_store
@@ -204,6 +204,7 @@ impl TraversalEngine {
             Arc::clone(&self.schema_registry),
             Arc::clone(&self.id_allocator),
             Arc::clone(&node_store),
+            self.site_id.clone(),
         );
 
         // BFS traversal
@@ -332,7 +333,7 @@ impl TraversalEngine {
         let db = self.db.clone();
         let schema_registry = Arc::clone(&self.schema_registry);
         let id_allocator = Arc::clone(&self.id_allocator);
-        let cdc_writer = Arc::clone(&self.cdc_writer);
+        let site_id = self.site_id.clone();
         let config = self.config.clone();
         let database = database.to_string();
         let namespace = namespace.to_string();
@@ -340,7 +341,7 @@ impl TraversalEngine {
         let start_node_id = start_node_id.to_string();
 
         tokio::spawn(async move {
-            let engine = TraversalEngine::with_config(db, schema_registry, id_allocator, cdc_writer, config);
+            let engine = TraversalEngine::with_config(db, schema_registry, id_allocator, site_id, config);
 
             match engine
                 .traverse(&database, &namespace, &start_entity_type, &start_node_id, &hops)

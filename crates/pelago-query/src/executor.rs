@@ -12,7 +12,7 @@ use crate::plan::{ExecutionPlan, IndexPredicate, PredicateValue, QueryPlan};
 use pelago_core::encoding::encode_value_for_index;
 use pelago_core::{PelagoError, Value};
 use pelago_storage::index::markers;
-use pelago_storage::{CdcWriter, IdAllocator, NodeStore, PelagoDb, SchemaRegistry, StoredNode, Subspace};
+use pelago_storage::{IdAllocator, NodeStore, PelagoDb, SchemaRegistry, StoredNode, Subspace};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -41,7 +41,7 @@ pub struct QueryExecutor {
     db: PelagoDb,
     schema_registry: Arc<SchemaRegistry>,
     id_allocator: Arc<IdAllocator>,
-    cdc_writer: Arc<CdcWriter>,
+    site_id: String,
     config: ExecutorConfig,
 }
 
@@ -51,13 +51,13 @@ impl QueryExecutor {
         db: PelagoDb,
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
-        cdc_writer: Arc<CdcWriter>,
+        site_id: String,
     ) -> Self {
         Self {
             db,
             schema_registry,
             id_allocator,
-            cdc_writer,
+            site_id,
             config: ExecutorConfig::default(),
         }
     }
@@ -67,14 +67,14 @@ impl QueryExecutor {
         db: PelagoDb,
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
-        cdc_writer: Arc<CdcWriter>,
+        site_id: String,
         config: ExecutorConfig,
     ) -> Self {
         Self {
             db,
             schema_registry,
             id_allocator,
-            cdc_writer,
+            site_id,
             config,
         }
     }
@@ -190,7 +190,7 @@ impl QueryExecutor {
             self.db.clone(),
             Arc::clone(&self.schema_registry),
             Arc::clone(&self.id_allocator),
-            Arc::clone(&self.cdc_writer),
+            self.site_id.clone(),
         );
 
         match node_store.get_node(database, namespace, entity_type, node_id).await? {
@@ -344,7 +344,7 @@ impl QueryExecutor {
             self.db.clone(),
             Arc::clone(&self.schema_registry),
             Arc::clone(&self.id_allocator),
-            Arc::clone(&self.cdc_writer),
+            self.site_id.clone(),
         );
         let mut nodes = Vec::new();
         for node_id_bytes in node_ids {
@@ -396,7 +396,7 @@ impl QueryExecutor {
             self.db.clone(),
             Arc::clone(&self.schema_registry),
             Arc::clone(&self.id_allocator),
-            Arc::clone(&self.cdc_writer),
+            self.site_id.clone(),
         );
 
         // Decode nodes - need to fetch them individually since results are raw KV
@@ -438,14 +438,14 @@ impl QueryExecutor {
         let db = self.db.clone();
         let schema_registry = Arc::clone(&self.schema_registry);
         let id_allocator = Arc::clone(&self.id_allocator);
-        let cdc_writer = Arc::clone(&self.cdc_writer);
+        let site_id = self.site_id.clone();
         let plan = plan.clone();
         let database = database.to_string();
         let namespace = namespace.to_string();
         let config = ExecutorConfig::default();
 
         tokio::spawn(async move {
-            let executor = QueryExecutor::with_config(db, schema_registry, id_allocator, cdc_writer, config);
+            let executor = QueryExecutor::with_config(db, schema_registry, id_allocator, site_id, config);
 
             match executor.execute(&database, &namespace, &plan).await {
                 Ok(results) => {

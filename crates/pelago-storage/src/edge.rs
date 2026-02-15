@@ -12,7 +12,7 @@
 //! - delete_edge: Remove all paired entries
 //! - list_edges: Range scan with optional label filter
 
-// CdcWriter will be used when CDC is integrated into edge operations
+use crate::cdc::{CdcAccumulator, CdcOperation};
 use crate::db::PelagoDb;
 use crate::ids::IdAllocator;
 use crate::node::NodeStore;
@@ -93,6 +93,7 @@ pub struct EdgeStore {
     schema_registry: Arc<SchemaRegistry>,
     id_allocator: Arc<IdAllocator>,
     node_store: Arc<NodeStore>,
+    site_id: String,
 }
 
 impl EdgeStore {
@@ -101,12 +102,14 @@ impl EdgeStore {
         schema_registry: Arc<SchemaRegistry>,
         id_allocator: Arc<IdAllocator>,
         node_store: Arc<NodeStore>,
+        site_id: String,
     ) -> Self {
         Self {
             db,
             schema_registry,
             id_allocator,
             node_store,
+            site_id,
         }
     }
 
@@ -184,8 +187,9 @@ impl EdgeStore {
         };
         let edge_bytes = encode_cbor(&edge_data)?;
 
-        // Write in transaction
+        // Write in a single transaction (edge keys + CDC)
         let trx = self.db.create_transaction()?;
+        let mut cdc = CdcAccumulator::new(&self.site_id);
 
         // Write forward key (empty value - just existence)
         trx.set(keys.forward_key.as_ref(), &[]);
@@ -202,6 +206,21 @@ impl EdgeStore {
             trx.set(rev_reverse.as_ref(), &[]);
         }
 
+        // Accumulate CDC operation
+        cdc.push(CdcOperation::EdgeCreate {
+            source_type: source.entity_type.clone(),
+            source_id: source.node_id.clone(),
+            target_type: target.entity_type.clone(),
+            target_id: target.node_id.clone(),
+            edge_type: label.to_string(),
+            edge_id: edge_id.to_string(),
+            properties: properties.clone(),
+        });
+
+        // Flush CDC into same transaction
+        cdc.flush(&trx, database, namespace)?;
+
+        // Single atomic commit
         trx.commit()
             .await
             .map_err(|e| PelagoError::Internal(format!("Failed to create edge: {}", e)))?;
@@ -245,8 +264,9 @@ impl EdgeStore {
             return Ok(false);
         }
 
-        // Delete in transaction
+        // Delete in a single transaction (edge keys + CDC)
         let trx = self.db.create_transaction()?;
+        let mut cdc = CdcAccumulator::new(&self.site_id);
 
         trx.clear(keys.forward_key.as_ref());
         trx.clear(keys.meta_key.as_ref());
@@ -257,6 +277,19 @@ impl EdgeStore {
             trx.clear(rev_reverse.as_ref());
         }
 
+        // Accumulate CDC operation
+        cdc.push(CdcOperation::EdgeDelete {
+            source_type: source.entity_type.clone(),
+            source_id: source.node_id.clone(),
+            target_type: target.entity_type.clone(),
+            target_id: target.node_id.clone(),
+            edge_type: label.to_string(),
+        });
+
+        // Flush CDC into same transaction
+        cdc.flush(&trx, database, namespace)?;
+
+        // Single atomic commit
         trx.commit()
             .await
             .map_err(|e| PelagoError::Internal(format!("Failed to delete edge: {}", e)))?;
