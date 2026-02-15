@@ -11,3 +11,6 @@ tokio.workspace = true
 cel-interpreter.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+pest = { workspace = true }
+pest_derive = { workspace = true }
+serde = { workspace = true }

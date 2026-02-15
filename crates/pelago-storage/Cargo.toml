@@ -3,6 +3,10 @@ name = "pelago-storage"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["cache"]
+cache = ["dep:rocksdb"]
+
 [dependencies]
 pelago-core.workspace = true
 pelago-proto.workspace = true
@@ -15,3 +19,7 @@ bytes.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
+rocksdb = { workspace = true, optional = true }
+
+[dev-dependencies]
+pelago-query = { path = "../pelago-query" }

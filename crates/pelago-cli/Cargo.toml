@@ -1,0 +1,26 @@
+[package]
+name = "pelago-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "pelago"
+path = "src/main.rs"
+
+[dependencies]
+pelago-proto = { workspace = true }
+pelago-query = { workspace = true }
+pelago-core = { workspace = true }
+clap = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+comfy-table = { workspace = true }
+rustyline = { workspace = true }
+dirs = { workspace = true }
+toml_edit = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+cel-interpreter = { workspace = true }

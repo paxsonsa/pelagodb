@@ -7,6 +7,7 @@ members = [
     "crates/pelago-query",
     "crates/pelago-api",
     "crates/pelago-server",
+    "crates/pelago-cli",
 ]
 
 [workspace.package]
@@ -46,10 +47,15 @@ clap = { version = "4", features = ["derive", "env"] }
 # CEL
 cel-interpreter = "0.9"
 
+# PEG Parser
+pest = "2"
+pest_derive = "2"
+
 # Utilities
 uuid = { version = "1", features = ["v7"] }
 bytes = "1"
 async-trait = "0.1"
+rocksdb = "0.22"
 
 # Internal crates
 pelago-core = { path = "crates/pelago-core" }
@@ -57,3 +63,11 @@ pelago-proto = { path = "crates/pelago-proto" }
 pelago-storage = { path = "crates/pelago-storage" }
 pelago-query = { path = "crates/pelago-query" }
 pelago-api = { path = "crates/pelago-api" }
+pelago-cli = { path = "crates/pelago-cli" }
+
+# CLI extras
+serde_json = "1"
+comfy-table = "7"
+rustyline = "14"
+dirs = "5"
+toml_edit = "0.22"

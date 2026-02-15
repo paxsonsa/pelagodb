@@ -543,7 +543,7 @@ struct NodeData {
 }
 
 /// Node data structure for API responses
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredNode {
     pub id: String,
     pub entity_type: String,

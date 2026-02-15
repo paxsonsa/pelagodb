@@ -7,8 +7,10 @@
 //!
 //! The traversal engine implements BFS/DFS graph traversal with filtering.
 
+use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::{PelagoError, Value};
-use pelago_storage::{EdgeStore, IdAllocator, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode};
+use pelago_storage::{EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -86,6 +88,30 @@ pub enum TraversalDirection {
     Inbound,
     /// Follow both directions
     Both,
+}
+
+/// Serialized BFS state for resuming truncated traversals
+#[derive(Serialize, Deserialize)]
+struct ContinuationState {
+    /// Already-visited node keys (type:id format)
+    visited: Vec<String>,
+    /// Queue entries to resume from
+    frontier: Vec<FrontierEntry>,
+}
+
+/// A single frontier entry in a continuation token
+#[derive(Serialize, Deserialize)]
+struct FrontierEntry {
+    /// The node key at the end of the path (entity_type:node_id)
+    node_key: String,
+    /// Entity type of this node
+    entity_type: String,
+    /// Node ID
+    node_id: String,
+    /// Which hop index to resume at
+    hop_idx: usize,
+    /// Path so far as (entity_type, node_id) pairs from start to this node
+    path_keys: Vec<(String, String)>,
 }
 
 /// A path through the graph
@@ -173,6 +199,9 @@ impl TraversalEngine {
     }
 
     /// Execute a traversal starting from a node
+    ///
+    /// If `continuation_token` is provided, the traversal resumes from the
+    /// serialized BFS state rather than starting fresh.
     pub async fn traverse(
         &self,
         database: &str,
@@ -180,6 +209,7 @@ impl TraversalEngine {
         start_entity_type: &str,
         start_node_id: &str,
         hops: &[TraversalHop],
+        continuation_token: Option<&[u8]>,
     ) -> Result<TraversalResults, PelagoError> {
         let start_time = Instant::now();
 
@@ -212,10 +242,71 @@ impl TraversalEngine {
         let mut visited: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<(TraversalPath, usize)> = VecDeque::new();
 
-        // Start with initial path
-        let initial_path = TraversalPath::new(start_node.clone());
-        visited.insert(format!("{}:{}", start_entity_type, start_node_id));
-        queue.push_back((initial_path, 0));
+        if let Some(token_bytes) = continuation_token {
+            // Resume from a continuation token
+            let state: ContinuationState = decode_cbor(token_bytes)?;
+            for key in state.visited {
+                visited.insert(key);
+            }
+            for entry in state.frontier {
+                // Rebuild the path by fetching each node along the recorded path
+                let first_et = &entry.path_keys.first().map(|(et, _)| et.as_str()).unwrap_or(start_entity_type);
+                let first_id = &entry.path_keys.first().map(|(_, id)| id.as_str()).unwrap_or(start_node_id);
+                let path_start = node_store
+                    .get_node(database, namespace, first_et, first_id)
+                    .await?
+                    .ok_or_else(|| PelagoError::NodeNotFound {
+                        entity_type: first_et.to_string(),
+                        node_id: first_id.to_string(),
+                    })?;
+                // We only need the end node for BFS expansion; the path is a stub
+                // containing the start. For full path reconstruction we'd need edges,
+                // but the frontier entry's node is what matters for continuing BFS.
+                if entry.entity_type == *first_et && entry.node_id == *first_id {
+                    // The frontier node is the start node itself
+                    let path = TraversalPath::new(path_start);
+                    queue.push_back((path, entry.hop_idx));
+                } else {
+                    // Fetch the frontier node and build a minimal path to it
+                    let frontier_node = match node_store
+                        .get_node(database, namespace, &entry.entity_type, &entry.node_id)
+                        .await?
+                    {
+                        Some(n) => n,
+                        None => continue, // Node no longer exists
+                    };
+                    let mut path = TraversalPath::new(path_start);
+                    // Create a stub path — the edge is unavailable from the token
+                    // but the frontier node is what BFS needs to expand from.
+                    // We construct a minimal StoredEdge for path continuity.
+                    let stub_edge = StoredEdge {
+                        edge_id: String::new(),
+                        source: NodeRef {
+                            database: database.to_string(),
+                            namespace: namespace.to_string(),
+                            entity_type: start_entity_type.to_string(),
+                            node_id: start_node_id.to_string(),
+                        },
+                        target: NodeRef {
+                            database: database.to_string(),
+                            namespace: namespace.to_string(),
+                            entity_type: entry.entity_type.clone(),
+                            node_id: entry.node_id.clone(),
+                        },
+                        label: String::new(),
+                        properties: std::collections::HashMap::new(),
+                        created_at: 0,
+                    };
+                    path.push(stub_edge, frontier_node);
+                    queue.push_back((path, entry.hop_idx));
+                }
+            }
+        } else {
+            // Fresh traversal
+            let initial_path = TraversalPath::new(start_node.clone());
+            visited.insert(format!("{}:{}", start_entity_type, start_node_id));
+            queue.push_back((initial_path, 0));
+        }
 
         while let Some((current_path, hop_idx)) = queue.pop_front() {
             // Check timeout
@@ -228,6 +319,8 @@ impl TraversalEngine {
 
             // Check result limit
             if results.len() >= self.config.max_results as usize {
+                // Put this entry back so it ends up in the frontier
+                queue.push_front((current_path, hop_idx));
                 break;
             }
 
@@ -312,9 +405,50 @@ impl TraversalEngine {
             }
         }
 
+        let truncated = results.len() >= self.config.max_results as usize && !queue.is_empty();
+
+        // Build continuation token and frontier if truncated
+        let (continuation_token, frontier) = if truncated && !queue.is_empty() {
+            let frontier_entries: Vec<FrontierEntry> = queue
+                .iter()
+                .map(|(path, hop_idx)| {
+                    let end = path.end_node();
+                    let node_key = format!("{}:{}", end.entity_type, end.id);
+                    // Build path keys from the traversal path
+                    let mut path_keys = vec![(path.start.entity_type.clone(), path.start.id.clone())];
+                    for h in &path.hops {
+                        path_keys.push((h.node.entity_type.clone(), h.node.id.clone()));
+                    }
+                    FrontierEntry {
+                        node_key,
+                        entity_type: end.entity_type.clone(),
+                        node_id: end.id.clone(),
+                        hop_idx: *hop_idx,
+                        path_keys,
+                    }
+                })
+                .collect();
+
+            let frontier_pairs: Vec<(String, String)> = frontier_entries
+                .iter()
+                .map(|e| (e.entity_type.clone(), e.node_id.clone()))
+                .collect();
+
+            let state = ContinuationState {
+                visited: visited.into_iter().collect(),
+                frontier: frontier_entries,
+            };
+            let token = encode_cbor(&state)?;
+            (Some(token), frontier_pairs)
+        } else {
+            (None, Vec::new())
+        };
+
         Ok(TraversalResults {
             paths: results,
-            truncated: visited.len() >= self.config.max_results as usize,
+            truncated,
+            continuation_token,
+            frontier,
         })
     }
 
@@ -344,7 +478,7 @@ impl TraversalEngine {
             let engine = TraversalEngine::with_config(db, schema_registry, id_allocator, site_id, config);
 
             match engine
-                .traverse(&database, &namespace, &start_entity_type, &start_node_id, &hops)
+                .traverse(&database, &namespace, &start_entity_type, &start_node_id, &hops, None)
                 .await
             {
                 Ok(results) => {
@@ -425,12 +559,42 @@ impl TraversalEngine {
     fn filter_edges(
         &self,
         edges: &[StoredEdge],
-        _filter: &str,
+        filter: &str,
     ) -> Result<Vec<StoredEdge>, PelagoError> {
-        // For edge filtering, we'd need a schema for edge properties
-        // For now, return all edges (filter is ignored)
-        // A full implementation would compile and evaluate the CEL expression
-        Ok(edges.to_vec())
+        let mut filtered = Vec::with_capacity(edges.len());
+        for edge in edges {
+            if self.matches_edge_filter(edge, filter)? {
+                filtered.push(edge.clone());
+            }
+        }
+        Ok(filtered)
+    }
+
+    /// Check if an edge matches a CEL filter
+    fn matches_edge_filter(
+        &self,
+        edge: &StoredEdge,
+        filter: &str,
+    ) -> Result<bool, PelagoError> {
+        use cel_interpreter::{Context, Program, Value as CelValue};
+
+        let program = Program::compile(filter).map_err(|e| PelagoError::CelSyntax {
+            expression: filter.to_string(),
+            message: e.to_string(),
+        })?;
+
+        let mut context = Context::default();
+        for (key, value) in &edge.properties {
+            let cel_value = pelago_value_to_cel(value);
+            context.add_variable(key, cel_value).ok();
+        }
+
+        match program.execute(&context) {
+            Ok(CelValue::Bool(b)) => Ok(b),
+            Ok(CelValue::Null) => Ok(false),
+            Ok(_) => Ok(false),
+            Err(_) => Ok(false),
+        }
     }
 
     /// Check if a node matches a CEL filter
@@ -484,6 +648,10 @@ pub struct TraversalResults {
     pub paths: Vec<TraversalPath>,
     /// Whether results were truncated due to limits
     pub truncated: bool,
+    /// Serialized continuation token for resuming truncated traversals
+    pub continuation_token: Option<Vec<u8>>,
+    /// Unexplored frontier nodes as (entity_type, node_id) pairs
+    pub frontier: Vec<(String, String)>,
 }
 
 /// Streaming traversal results

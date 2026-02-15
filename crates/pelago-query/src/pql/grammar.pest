@@ -1,0 +1,125 @@
+// PQL Grammar - PelagoDB Query Language
+// Supports both short-form and full-form queries
+
+// Implicit whitespace and comment handling
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "#" ~ (!"\n" ~ ANY)* }
+
+// Entry point: either short-form or full-form query
+query = { SOI ~ (full_query | short_form) ~ EOI }
+
+// Short form: TypeName @directives { selections }
+short_form = { qualified_type ~ directive* ~ selection_block }
+
+// Full form: query name? { blocks }
+full_query = { "query" ~ ident? ~ "{" ~ query_block+ ~ "}" }
+
+// Query block: optional_var_capture block_name(func: root_func) @directives { selections }
+query_block = { (ident ~ "as")? ~ ident ~ "(" ~ "func" ~ ":" ~ root_function ~ ")" ~ directive* ~ selection_block }
+
+// Root functions
+root_function = { uid_var_func | uid_set_func | uid_func | type_func | eq_func | ge_func | le_func | gt_func | lt_func | between_func | has_func | allofterms_func }
+
+uid_func      = { "uid" ~ "(" ~ qualified_ref ~ ")" }
+uid_var_func   = { "uid" ~ "(" ~ ident ~ ")" }
+uid_set_func   = { "uid" ~ "(" ~ ident ~ ("," ~ ident)+ ~ ")" }
+type_func     = { "type" ~ "(" ~ qualified_type ~ ")" }
+eq_func       = { "eq" ~ "(" ~ ident ~ "," ~ literal ~ ")" }
+ge_func       = { "ge" ~ "(" ~ ident ~ "," ~ literal ~ ")" }
+le_func       = { "le" ~ "(" ~ ident ~ "," ~ literal ~ ")" }
+gt_func       = { "gt" ~ "(" ~ ident ~ "," ~ literal ~ ")" }
+lt_func       = { "lt" ~ "(" ~ ident ~ "," ~ literal ~ ")" }
+between_func  = { "between" ~ "(" ~ ident ~ "," ~ literal ~ "," ~ literal ~ ")" }
+has_func      = { "has" ~ "(" ~ ident ~ ")" }
+allofterms_func = { "allofterms" ~ "(" ~ ident ~ "," ~ string_literal ~ ")" }
+
+// Qualified references: ns:Type:id or Type:id
+qualified_ref  = { (ident ~ ":")? ~ ident ~ ":" ~ node_id }
+qualified_type = { (ident ~ ":")? ~ ident }
+
+// Node ID: alphanumeric with underscores and hyphens
+node_id = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+
+// Selection block
+selection_block = { "{" ~ selection* ~ "}" }
+
+// Individual selection
+selection = { value_var | aggregate_expr | edge_traversal | field_name }
+
+// Field name
+field_name = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// Value variable: varname as aggregate(...)
+value_var = { ident ~ "as" ~ aggregate_call }
+
+// Edge traversal: -[ns:LABEL]-> target? @directives { selections }
+edge_traversal = { (ident ~ "as")? ~ edge_spec ~ target_spec? ~ directive* ~ selection_block? }
+
+edge_spec = { "-" ~ "[" ~ edge_label ~ "]" ~ edge_direction }
+
+edge_label = { (ident ~ ":")? ~ edge_type_name }
+
+edge_type_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
+
+edge_direction = { bidirectional | incoming | outgoing }
+outgoing      = { "->" }
+incoming      = { "<-" }
+bidirectional = { "<->" }
+
+// Target type specification after edge: ns:Type
+target_spec = { qualified_type }
+
+// Directives
+directive = { filter_directive | edge_directive | cascade_directive | limit_directive | sort_directive | facets_directive | recurse_directive | groupby_directive | explain_directive }
+
+filter_directive  = { "@filter" ~ "(" ~ balanced_parens ~ ")" }
+edge_directive    = { "@edge" ~ "(" ~ balanced_parens ~ ")" }
+cascade_directive = { "@cascade" }
+limit_directive   = { "@limit" ~ "(" ~ limit_args ~ ")" }
+sort_directive    = { "@sort" ~ "(" ~ sort_args ~ ")" }
+facets_directive  = { "@facets" ~ "(" ~ ident_list ~ ")" }
+recurse_directive = { "@recurse" ~ "(" ~ "depth" ~ ":" ~ integer ~ ")" }
+groupby_directive = { "@groupby" ~ "(" ~ ident_list ~ ")" }
+explain_directive = { "@explain" }
+
+// Balanced parentheses content for filter/edge expressions
+balanced_parens = @{ balanced_inner+ }
+balanced_inner  = _{ "(" ~ balanced_inner* ~ ")" | (!("(" | ")") ~ ANY) }
+
+// Limit arguments
+limit_args  = { first_arg ~ ("," ~ offset_arg)? }
+first_arg   = { "first" ~ ":" ~ integer }
+offset_arg  = { "offset" ~ ":" ~ integer }
+
+// Sort arguments
+sort_args   = { ident ~ ":" ~ sort_order ~ ("," ~ "on_edge" ~ ":" ~ bool_literal)? }
+sort_order  = { "asc" | "desc" }
+
+// Ident list
+ident_list = { ident ~ ("," ~ ident)* }
+
+// Aggregate expressions
+aggregate_expr = { aggregate_call }
+
+aggregate_call = { count_edge | count_func | sum_func | avg_func | min_func | max_func }
+
+count_edge = { "count" ~ "(" ~ edge_spec ~ ")" }
+count_func = { "count" ~ "(" ~ ident ~ ")" }
+sum_func   = { "sum" ~ "(" ~ ident ~ ")" }
+avg_func   = { "avg" ~ "(" ~ ident ~ ")" }
+min_func   = { "min" ~ "(" ~ ident ~ ")" }
+max_func   = { "max" ~ "(" ~ ident ~ ")" }
+
+// Literals
+literal = { float_literal | integer_literal | string_literal | bool_literal }
+
+float_literal   = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+integer_literal = @{ "-"? ~ ASCII_DIGIT+ }
+string_literal  = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+bool_literal    = @{ "true" | "false" }
+
+// Basic integer (for limit/recurse args)
+integer = @{ ASCII_DIGIT+ }
+
+// Identifiers
+ident = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }

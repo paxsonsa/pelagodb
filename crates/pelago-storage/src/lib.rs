@@ -9,6 +9,8 @@
 
 pub mod cache;
 pub mod cdc;
+#[cfg(feature = "cache")]
+pub mod rocks_cache;
 pub mod consumer;
 pub mod db;
 pub mod edge;
@@ -32,3 +34,6 @@ pub use jobs::{JobState, JobStatus, JobStore, JobType};
 pub use node::{NodeStore, StoredNode};
 pub use schema::SchemaRegistry;
 pub use subspace::Subspace;
+
+#[cfg(feature = "cache")]
+pub use rocks_cache::{CachedReadPath, CdcProjector, ReadConsistency, RocksCacheConfig, RocksCacheStore};
