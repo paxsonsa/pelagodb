@@ -1,10 +1,18 @@
 //! Server configuration
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "pelago", about = "PelagoDB graph database server")]
 pub struct ServerConfig {
+    /// Path to optional server config file (TOML)
+    #[arg(long, env = "PELAGO_CONFIG")]
+    pub config: Option<String>,
+
+    /// Disable loading config file
+    #[arg(long, env = "PELAGO_NO_CONFIG", default_value_t = false)]
+    pub no_config: bool,
+
     /// FDB cluster file path
     #[arg(
         long,
@@ -32,17 +40,207 @@ pub struct ServerConfig {
     /// ID allocation batch size
     #[arg(long, env = "PELAGO_ID_BATCH_SIZE", default_value = "100")]
     pub id_batch_size: u64,
+
+    /// Default database used by background workers and replicator defaults
+    #[arg(long, env = "PELAGO_DEFAULT_DATABASE", default_value = "default")]
+    pub default_database: String,
+
+    /// Default namespace used by background workers and replicator defaults
+    #[arg(long, env = "PELAGO_DEFAULT_NAMESPACE", default_value = "default")]
+    pub default_namespace: String,
+
+    /// Enable RocksDB cache layer
+    #[arg(
+        long,
+        env = "PELAGO_CACHE_ENABLED",
+        default_value_t = true,
+        action = ArgAction::Set
+    )]
+    pub cache_enabled: bool,
+
+    /// RocksDB cache path
+    #[arg(long, env = "PELAGO_CACHE_PATH", default_value = "./data/cache")]
+    pub cache_path: String,
+
+    /// RocksDB block cache size in MB
+    #[arg(long, env = "PELAGO_CACHE_SIZE_MB", default_value_t = 1024)]
+    pub cache_size_mb: usize,
+
+    /// RocksDB write buffer size in MB
+    #[arg(long, env = "PELAGO_CACHE_WRITE_BUFFER_MB", default_value_t = 64)]
+    pub cache_write_buffer_mb: usize,
+
+    /// RocksDB max write buffers
+    #[arg(long, env = "PELAGO_CACHE_MAX_WRITE_BUFFERS", default_value_t = 3)]
+    pub cache_max_write_buffers: i32,
+
+    /// CDC projector batch size for cache projection
+    #[arg(
+        long,
+        env = "PELAGO_CACHE_PROJECTOR_BATCH_SIZE",
+        default_value_t = 1000
+    )]
+    pub cache_projector_batch_size: usize,
+
+    /// Require auth on all gRPC requests
+    #[arg(
+        long,
+        env = "PELAGO_AUTH_REQUIRED",
+        default_value_t = false,
+        action = ArgAction::Set
+    )]
+    pub auth_required: bool,
+
+    /// Static API key map (CSV entries; optionally `key:principal`)
+    #[arg(long, env = "PELAGO_API_KEYS")]
+    pub api_keys: Option<String>,
+
+    /// Enable audit retention sweeps
+    #[arg(
+        long,
+        env = "PELAGO_AUDIT_ENABLED",
+        default_value_t = true,
+        action = ArgAction::Set
+    )]
+    pub audit_enabled: bool,
+
+    /// Audit retention in days
+    #[arg(long, env = "PELAGO_AUDIT_RETENTION_DAYS", default_value_t = 90)]
+    pub audit_retention_days: u64,
+
+    /// Audit sweep interval in seconds
+    #[arg(long, env = "PELAGO_AUDIT_RETENTION_SWEEP_SECS", default_value_t = 300)]
+    pub audit_retention_sweep_secs: u64,
+
+    /// Max records deleted per audit retention sweep
+    #[arg(long, env = "PELAGO_AUDIT_RETENTION_BATCH", default_value_t = 1000)]
+    pub audit_retention_batch: usize,
+
+    /// Enable replication pull workers (when unset, defaults to enabled if peers are configured)
+    #[arg(long, env = "PELAGO_REPLICATION_ENABLED")]
+    pub replication_enabled: Option<bool>,
+
+    /// Replication peers (`site_id=host:port,site_id=host:port`)
+    #[arg(long, env = "PELAGO_REPLICATION_PEERS", default_value = "")]
+    pub replication_peers: String,
+
+    /// Replication source database override
+    #[arg(long, env = "PELAGO_REPLICATION_DATABASE")]
+    pub replication_database: Option<String>,
+
+    /// Replication source namespace override
+    #[arg(long, env = "PELAGO_REPLICATION_NAMESPACE")]
+    pub replication_namespace: Option<String>,
+
+    /// Replication pull batch size
+    #[arg(long, env = "PELAGO_REPLICATION_BATCH_SIZE", default_value_t = 512)]
+    pub replication_batch_size: usize,
+
+    /// Replication poll interval in milliseconds
+    #[arg(long, env = "PELAGO_REPLICATION_POLL_MS", default_value_t = 300)]
+    pub replication_poll_ms: u64,
+
+    /// API key used by pull replicators for source auth
+    #[arg(long, env = "PELAGO_REPLICATION_API_KEY")]
+    pub replication_api_key: Option<String>,
+
+    /// Enable embedded docs HTTP server
+    #[arg(
+        long,
+        env = "PELAGO_DOCS_ENABLED",
+        default_value_t = false,
+        action = ArgAction::Set
+    )]
+    pub docs_enabled: bool,
+
+    /// Embedded docs bind address
+    #[arg(long, env = "PELAGO_DOCS_ADDR", default_value = "127.0.0.1:4070")]
+    pub docs_addr: String,
+
+    /// Embedded docs markdown directory
+    #[arg(long, env = "PELAGO_DOCS_DIR", default_value = "docs")]
+    pub docs_dir: String,
+
+    /// Embedded docs site title
+    #[arg(
+        long,
+        env = "PELAGO_DOCS_TITLE",
+        default_value = "PelagoDB Documentation"
+    )]
+    pub docs_title: String,
+
+    /// Max total watch subscriptions
+    #[arg(long, env = "PELAGO_WATCH_MAX_SUBSCRIPTIONS")]
+    pub watch_max_subscriptions: Option<usize>,
+
+    /// Max watch subscriptions per namespace
+    #[arg(long, env = "PELAGO_WATCH_MAX_NAMESPACE_SUBSCRIPTIONS")]
+    pub watch_max_namespace_subscriptions: Option<usize>,
+
+    /// Max query watches per namespace
+    #[arg(long, env = "PELAGO_WATCH_MAX_QUERY_WATCHES")]
+    pub watch_max_query_watches: Option<usize>,
+
+    /// Max watch subscriptions per principal
+    #[arg(long, env = "PELAGO_WATCH_MAX_PRINCIPAL_SUBSCRIPTIONS")]
+    pub watch_max_principal_subscriptions: Option<usize>,
+
+    /// Max watch TTL seconds
+    #[arg(long, env = "PELAGO_WATCH_MAX_TTL_SECS")]
+    pub watch_max_ttl_secs: Option<u32>,
+
+    /// Max buffered events per watch stream
+    #[arg(long, env = "PELAGO_WATCH_MAX_QUEUE_SIZE")]
+    pub watch_max_queue_size: Option<u32>,
+
+    /// Max dropped events before terminating a watch stream
+    #[arg(long, env = "PELAGO_WATCH_MAX_DROPPED_EVENTS")]
+    pub watch_max_dropped_events: Option<u32>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            config: None,
+            no_config: false,
             fdb_cluster: "/etc/foundationdb/fdb.cluster".to_string(),
             site_id: 1,
             site_name: "default".to_string(),
             listen_addr: "[::1]:50051".to_string(),
             log_level: "info".to_string(),
             id_batch_size: 100,
+            default_database: "default".to_string(),
+            default_namespace: "default".to_string(),
+            cache_enabled: true,
+            cache_path: "./data/cache".to_string(),
+            cache_size_mb: 1024,
+            cache_write_buffer_mb: 64,
+            cache_max_write_buffers: 3,
+            cache_projector_batch_size: 1000,
+            auth_required: false,
+            api_keys: None,
+            audit_enabled: true,
+            audit_retention_days: 90,
+            audit_retention_sweep_secs: 300,
+            audit_retention_batch: 1000,
+            replication_enabled: None,
+            replication_peers: String::new(),
+            replication_database: None,
+            replication_namespace: None,
+            replication_batch_size: 512,
+            replication_poll_ms: 300,
+            replication_api_key: None,
+            docs_enabled: false,
+            docs_addr: "127.0.0.1:4070".to_string(),
+            docs_dir: "docs".to_string(),
+            docs_title: "PelagoDB Documentation".to_string(),
+            watch_max_subscriptions: None,
+            watch_max_namespace_subscriptions: None,
+            watch_max_query_watches: None,
+            watch_max_principal_subscriptions: None,
+            watch_max_ttl_secs: None,
+            watch_max_queue_size: None,
+            watch_max_dropped_events: None,
         }
     }
 }
