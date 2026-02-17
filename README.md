@@ -25,6 +25,8 @@ So the name reflects the core idea: connected, clustered systems with explicit l
 - Two query surfaces: CEL for filter/range style queries and PQL for graph-native query composition.
 - Built-in CDC: watch streams, cache projection, and replication all flow from the same event backbone.
 - Multi-site by design: pull-based CDC replication and owner-aware conflict handling.
+- Global relationship modeling: relationships can cross tenant and namespace boundaries when your domain requires it.
+- Partition-aware writes: preserve availability and writability, with explicit LWW handling for conflicting new-data creation paths.
 - Operational controls: authn/authz/audit APIs plus retention and admin surfaces.
 
 ## Feature Highlights
@@ -36,6 +38,25 @@ So the name reflects the core idea: connected, clustered systems with explicit l
 - Authentication, authorization, and audit logging
 - CLI for admin + query workflows
 - Client SDKs/scaffolds for Python, Elixir, Rust, and Swift
+
+## Who Should Use PelagoDB
+- Teams building globally distributed applications with cross-DC writes.
+- Teams that need strict schema governance and explicit ownership controls.
+- Teams that need graph relationships across tenant boundaries in one model.
+- Teams comfortable operating replication, cache, watch, and security controls.
+
+## Who Should Not Use PelagoDB
+- Teams prioritizing minimal-ops managed graph experience above all else.
+- Teams needing immediate deep compatibility with Cypher/Gremlin ecosystems.
+- Teams unable to accept LWW resolution plus reconciliation for conflicting new-data creation under partition.
+- Teams whose workload is mostly ad-hoc graph exploration with minimal governance requirements.
+
+## Data Modeling Principles (Read Before First Schema)
+- Keep `tenant`, `namespace`, and `ownership` as separate concepts.
+- Use ownership to enforce mutation safety at the entity level.
+- Use namespaces for operational partitioning and lifecycle control, not as a complete substitute for ownership.
+- Model cross-tenant relationships intentionally, and review fanout/latency costs.
+- Assume partition scenarios will happen and design create flows for deterministic conflict handling and reconciliation.
 
 ## Quick Start (ASAP, Local FDB)
 
@@ -57,6 +78,15 @@ Path B: start local test cluster with Docker
 ./scripts/start-fdb.sh
 ```
 This creates `./fdb.cluster` for the containerized test cluster.
+
+Path C: run full local multi-site topology (2 sites + centralized replicators)
+```bash
+docker compose -f docker-compose.multisite.yml up --build -d
+```
+This boots:
+- `site1-api` on `127.0.0.1:27615`
+- `site2-api` on `127.0.0.1:27616`
+- dedicated replicator workers for each site
 
 ### 3) Start PelagoDB server
 Open terminal A:
@@ -130,6 +160,11 @@ Open `http://127.0.0.1:4070/docs/`
 ## Quick Links
 - Documentation index: `docs/README.md`
 - Getting started: `docs/01-getting-started.md`
+- Architecture and design: `docs/15-architecture-and-design.md`
+- When to use PelagoDB: `docs/16-when-to-use-pelagodb.md`
+- Watch and streaming guide: `docs/17-watch-and-streaming.md`
+- Data modeling and scaling: `docs/14-data-modeling-and-scaling.md`
+- Replication runtime architecture: `docs/13-centralized-replication-and-scaling.md`
 - Operations playbook: `docs/09-operations-playbook.md`
 - Hosted docs setup: `docs/12-server-docs-site.md`
 - API protocol: `proto/pelago.proto`
