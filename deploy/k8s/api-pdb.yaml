@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pelagodb-api
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: pelagodb
+      role: api

@@ -35,6 +35,9 @@ replication_enabled = false
 replication_batch_size = 512
 replication_poll_ms = 300
 # replication_api_key = "replication-key"
+replication_lease_enabled = true
+replication_lease_ttl_ms = 10000
+replication_lease_heartbeat_ms = 2000
 
 # Embedded docs server
 docs_enabled = false

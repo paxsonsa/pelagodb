@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pelagodb-replicator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pelagodb
+      role: replicator
+  template:
+    metadata:
+      labels:
+        app: pelagodb
+        role: replicator
+    spec:
+      containers:
+        - name: pelagodb-replicator
+          image: ghcr.io/pelagodb/pelago-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 27615
+              name: grpc
+          envFrom:
+            - configMapRef:
+                name: pelagodb-config
+          env:
+            - name: PELAGO_REPLICATION_ENABLED
+              value: "true"
+            - name: PELAGO_CACHE_ENABLED
+              value: "false"
+            - name: PELAGO_REPLICATION_PEERS
+              value: "2=pelagodb-peer-site2:27615"
+            - name: PELAGO_REPLICATION_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pelagodb-secrets
+                  key: replication-api-key
+            - name: PELAGO_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: pelagodb-secrets
+                  key: api-keys
+          volumeMounts:
+            - name: fdb-cluster
+              mountPath: /etc/pelago
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: fdb-cluster
+          secret:
+            secretName: pelagodb-secrets
+            items:
+              - key: fdb.cluster
+                path: fdb.cluster

@@ -1,0 +1,142 @@
+services:
+  fdb:
+    image: foundationdb/foundationdb:7.3.70
+    container_name: pelago-fdb-multisite
+    platform: linux/amd64
+    environment:
+      FDB_NETWORKING_MODE: container
+      FDB_PORT: 4500
+      FDB_TRACE_FORMAT: json
+      FDB_TRACE_LOG_GROUP: pelago-multisite
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - >
+        /var/fdb/scripts/fdb_single.bash &
+        pid=$$!;
+        while [ ! -f /var/fdb/fdb.cluster ]; do sleep 1; done;
+        cp /var/fdb/fdb.cluster /shared/fdb.cluster;
+        wait "$$pid"
+    volumes:
+      - fdb-multisite-data:/var/fdb/data
+      - fdb-shared:/shared
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -f /shared/fdb.cluster && fdbcli -C /shared/fdb.cluster --exec 'status minimal' | grep -Eq 'The database is available|Healthy'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 25s
+
+  site1-api:
+    build: .
+    depends_on:
+      fdb:
+        condition: service_healthy
+    environment:
+      PELAGO_FDB_CLUSTER: /shared/fdb.cluster
+      PELAGO_SITE_ID: 1
+      PELAGO_SITE_NAME: site1
+      PELAGO_LISTEN_ADDR: 0.0.0.0:27615
+      PELAGO_DEFAULT_DATABASE: default
+      PELAGO_DEFAULT_NAMESPACE: default
+      PELAGO_AUTH_REQUIRED: "false"
+      PELAGO_CACHE_ENABLED: "true"
+      PELAGO_CACHE_PATH: /var/lib/pelago/cache-site1-api
+      PELAGO_REPLICATION_ENABLED: "false"
+    ports:
+      - "27615:27615"
+    volumes:
+      - fdb-shared:/shared:ro
+      - site1-api-cache:/var/lib/pelago
+
+  site1-replicator:
+    build: .
+    depends_on:
+      fdb:
+        condition: service_healthy
+      site1-api:
+        condition: service_started
+      site2-api:
+        condition: service_started
+    environment:
+      PELAGO_FDB_CLUSTER: /shared/fdb.cluster
+      PELAGO_SITE_ID: 1
+      PELAGO_SITE_NAME: site1
+      PELAGO_LISTEN_ADDR: 0.0.0.0:28615
+      PELAGO_DEFAULT_DATABASE: default
+      PELAGO_DEFAULT_NAMESPACE: default
+      PELAGO_AUTH_REQUIRED: "false"
+      PELAGO_CACHE_ENABLED: "false"
+      PELAGO_REPLICATION_ENABLED: "true"
+      PELAGO_REPLICATION_PEERS: 2=site2-api:27615
+      PELAGO_REPLICATION_DATABASE: default
+      PELAGO_REPLICATION_NAMESPACE: default
+      PELAGO_REPLICATION_BATCH_SIZE: 512
+      PELAGO_REPLICATION_POLL_MS: 300
+      PELAGO_REPLICATION_LEASE_ENABLED: "true"
+      PELAGO_REPLICATION_LEASE_TTL_MS: 10000
+      PELAGO_REPLICATION_LEASE_HEARTBEAT_MS: 2000
+    volumes:
+      - fdb-shared:/shared:ro
+
+  site2-api:
+    build: .
+    depends_on:
+      fdb:
+        condition: service_healthy
+    environment:
+      PELAGO_FDB_CLUSTER: /shared/fdb.cluster
+      PELAGO_SITE_ID: 2
+      PELAGO_SITE_NAME: site2
+      PELAGO_LISTEN_ADDR: 0.0.0.0:27615
+      PELAGO_DEFAULT_DATABASE: default
+      PELAGO_DEFAULT_NAMESPACE: default
+      PELAGO_AUTH_REQUIRED: "false"
+      PELAGO_CACHE_ENABLED: "true"
+      PELAGO_CACHE_PATH: /var/lib/pelago/cache-site2-api
+      PELAGO_REPLICATION_ENABLED: "false"
+    ports:
+      - "27616:27615"
+    volumes:
+      - fdb-shared:/shared:ro
+      - site2-api-cache:/var/lib/pelago
+
+  site2-replicator:
+    build: .
+    depends_on:
+      fdb:
+        condition: service_healthy
+      site1-api:
+        condition: service_started
+      site2-api:
+        condition: service_started
+    environment:
+      PELAGO_FDB_CLUSTER: /shared/fdb.cluster
+      PELAGO_SITE_ID: 2
+      PELAGO_SITE_NAME: site2
+      PELAGO_LISTEN_ADDR: 0.0.0.0:28615
+      PELAGO_DEFAULT_DATABASE: default
+      PELAGO_DEFAULT_NAMESPACE: default
+      PELAGO_AUTH_REQUIRED: "false"
+      PELAGO_CACHE_ENABLED: "false"
+      PELAGO_REPLICATION_ENABLED: "true"
+      PELAGO_REPLICATION_PEERS: 1=site1-api:27615
+      PELAGO_REPLICATION_DATABASE: default
+      PELAGO_REPLICATION_NAMESPACE: default
+      PELAGO_REPLICATION_BATCH_SIZE: 512
+      PELAGO_REPLICATION_POLL_MS: 300
+      PELAGO_REPLICATION_LEASE_ENABLED: "true"
+      PELAGO_REPLICATION_LEASE_TTL_MS: 10000
+      PELAGO_REPLICATION_LEASE_HEARTBEAT_MS: 2000
+    volumes:
+      - fdb-shared:/shared:ro
+
+volumes:
+  fdb-multisite-data:
+  fdb-shared:
+  site1-api-cache:
+  site2-api-cache:
