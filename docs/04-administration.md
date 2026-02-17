@@ -53,6 +53,13 @@ Each env var below also has a matching CLI flag using kebab-case names (for exam
 - `PELAGO_REPLICATION_BATCH_SIZE`
 - `PELAGO_REPLICATION_POLL_MS`
 - `PELAGO_REPLICATION_API_KEY`
+- `PELAGO_REPLICATION_LEASE_ENABLED` (default: `true`)
+- `PELAGO_REPLICATION_LEASE_TTL_MS` (default: `10000`)
+- `PELAGO_REPLICATION_LEASE_HEARTBEAT_MS` (default: `2000`)
+
+Recommended topology:
+- API/query servers: `PELAGO_REPLICATION_ENABLED=false`
+- Dedicated replicator deployment: `PELAGO_REPLICATION_ENABLED=true`
 
 ## Security and Audit Controls
 - `PELAGO_AUTH_REQUIRED` (default: `false`)
