@@ -5,12 +5,13 @@
 //! - DeleteEdge: Delete an edge
 //! - ListEdges: Stream edges for a given node
 
+use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
 use pelago_proto::{
     edge_service_server::EdgeService, CreateEdgeRequest, CreateEdgeResponse, DeleteEdgeRequest,
-    DeleteEdgeResponse, Edge, EdgeDirection, EdgeResult, ListEdgesRequest,
-    NodeRef as ProtoNodeRef, ReadConsistency,
+    DeleteEdgeResponse, Edge, EdgeDirection, EdgeResult, ListEdgesRequest, NodeRef as ProtoNodeRef,
+    ReadConsistency,
 };
 use pelago_storage::{
     CachedReadPath, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb,
@@ -21,8 +22,11 @@ use std::sync::Arc;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
+const OFFSET_CURSOR_LEN: usize = 8;
+
 /// Edge service implementation
 pub struct EdgeServiceImpl {
+    db: PelagoDb,
     edge_store: EdgeStore,
     cached_read_path: Option<Arc<CachedReadPath>>,
 }
@@ -37,6 +41,7 @@ impl EdgeServiceImpl {
         cached_read_path: Option<Arc<CachedReadPath>>,
     ) -> Self {
         Self {
+            db: db.clone(),
             edge_store: EdgeStore::new(db, schema_registry, id_allocator, node_store, site_id),
             cached_read_path,
         }
@@ -45,8 +50,16 @@ impl EdgeServiceImpl {
 
 fn proto_to_core_node_ref(proto: &ProtoNodeRef, ctx_db: &str, ctx_ns: &str) -> NodeRef {
     NodeRef::new(
-        if proto.database.is_empty() { ctx_db } else { &proto.database },
-        if proto.namespace.is_empty() { ctx_ns } else { &proto.namespace },
+        if proto.database.is_empty() {
+            ctx_db
+        } else {
+            &proto.database
+        },
+        if proto.namespace.is_empty() {
+            ctx_ns
+        } else {
+            &proto.namespace
+        },
         &proto.entity_type,
         &proto.node_id,
     )
@@ -67,11 +80,32 @@ impl EdgeService for EdgeServiceImpl {
         &self,
         request: Request<CreateEdgeRequest>,
     ) -> Result<Response<CreateEdgeResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let source_proto = req.source.ok_or_else(|| Status::invalid_argument("missing source"))?;
-        let target_proto = req.target.ok_or_else(|| Status::invalid_argument("missing target"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let source_proto = req
+            .source
+            .ok_or_else(|| Status::invalid_argument("missing source"))?;
+        let target_proto = req
+            .target
+            .ok_or_else(|| Status::invalid_argument("missing target"))?;
         let label = req.label;
+        let entity_for_acl = if source_proto.entity_type.is_empty() {
+            "*".to_string()
+        } else {
+            source_proto.entity_type.clone()
+        };
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "edge.write",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_for_acl,
+        )
+        .await?;
         let properties = proto_to_core_properties(&req.properties);
 
         // Convert proto refs to core refs
@@ -79,8 +113,16 @@ impl EdgeService for EdgeServiceImpl {
         let target = proto_to_core_node_ref(&target_proto, &ctx.database, &ctx.namespace);
 
         // Create edge in FDB
-        let stored_edge = self.edge_store
-            .create_edge(&ctx.database, &ctx.namespace, source, target, &label, properties)
+        let stored_edge = self
+            .edge_store
+            .create_edge(
+                &ctx.database,
+                &ctx.namespace,
+                source,
+                target,
+                &label,
+                properties,
+            )
             .await
             .map_err(|e| e.into_status())?;
 
@@ -100,18 +142,40 @@ impl EdgeService for EdgeServiceImpl {
         &self,
         request: Request<DeleteEdgeRequest>,
     ) -> Result<Response<DeleteEdgeResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let source_proto = req.source.ok_or_else(|| Status::invalid_argument("missing source"))?;
-        let target_proto = req.target.ok_or_else(|| Status::invalid_argument("missing target"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let source_proto = req
+            .source
+            .ok_or_else(|| Status::invalid_argument("missing source"))?;
+        let target_proto = req
+            .target
+            .ok_or_else(|| Status::invalid_argument("missing target"))?;
         let label = req.label;
+        let entity_for_acl = if source_proto.entity_type.is_empty() {
+            "*".to_string()
+        } else {
+            source_proto.entity_type.clone()
+        };
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "edge.write",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_for_acl,
+        )
+        .await?;
 
         // Convert proto refs to core refs
         let source = proto_to_core_node_ref(&source_proto, &ctx.database, &ctx.namespace);
         let target = proto_to_core_node_ref(&target_proto, &ctx.database, &ctx.namespace);
 
         // Delete edge from FDB
-        let deleted = self.edge_store
+        let deleted = self
+            .edge_store
             .delete_edge(&ctx.database, &ctx.namespace, source, target, &label)
             .await
             .map_err(|e| e.into_status())?;
@@ -125,12 +189,34 @@ impl EdgeService for EdgeServiceImpl {
         &self,
         request: Request<ListEdgesRequest>,
     ) -> Result<Response<Self::ListEdgesStream>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let node_id = req.node_id;
-        let label_filter = if req.label.is_empty() { None } else { Some(req.label.as_str()) };
-        let limit = if req.limit > 0 { req.limit as usize } else { 1000 };
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "edge.read",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
+        let label_filter = if req.label.is_empty() {
+            None
+        } else {
+            Some(req.label.as_str())
+        };
+        let page_size = if req.limit > 0 {
+            req.limit as usize
+        } else {
+            1000
+        };
+        let cursor_offset = decode_offset_cursor(&req.cursor)?;
+        let fetch_limit = cursor_offset.saturating_add(page_size).saturating_add(1);
         let consistency = match ReadConsistency::try_from(req.consistency)
             .unwrap_or(ReadConsistency::Strong)
         {
@@ -163,7 +249,7 @@ impl EdgeService for EdgeServiceImpl {
                     &entity_type,
                     &node_id,
                     label_filter,
-                    limit,
+                    fetch_limit,
                 )
                 .await
                 .map_err(|e| e.into_status())?;
@@ -182,21 +268,79 @@ impl EdgeService for EdgeServiceImpl {
             });
         }
 
+        let total = edges.len();
+        let start = cursor_offset.min(total);
+        let end = start.saturating_add(page_size).min(total);
+        let has_more = total > end;
+        let next_cursor = if has_more {
+            encode_offset_cursor(end)
+        } else {
+            Vec::new()
+        };
+        let page_edges: Vec<_> = edges.into_iter().skip(start).take(page_size).collect();
+        let last_idx = page_edges.len().saturating_sub(1);
+
         // Convert to stream
-        let stream = tokio_stream::iter(edges.into_iter().map(|edge| {
-            Ok(EdgeResult {
-                edge: Some(Edge {
-                    edge_id: edge.edge_id,
-                    source: Some(core_to_proto_node_ref(&edge.source)),
-                    target: Some(core_to_proto_node_ref(&edge.target)),
-                    label: edge.label,
-                    properties: core_to_proto_properties(&edge.properties),
-                    created_at: edge.created_at,
-                }),
-                next_cursor: vec![], // Pagination cursor not implemented yet
-            })
-        }));
+        let stream =
+            tokio_stream::iter(page_edges.into_iter().enumerate().map(move |(idx, edge)| {
+                let item_cursor = if idx == last_idx {
+                    next_cursor.clone()
+                } else {
+                    Vec::new()
+                };
+                Ok(EdgeResult {
+                    edge: Some(Edge {
+                        edge_id: edge.edge_id,
+                        source: Some(core_to_proto_node_ref(&edge.source)),
+                        target: Some(core_to_proto_node_ref(&edge.target)),
+                        label: edge.label,
+                        properties: core_to_proto_properties(&edge.properties),
+                        created_at: edge.created_at,
+                    }),
+                    next_cursor: item_cursor,
+                })
+            }));
 
         Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+fn decode_offset_cursor(cursor: &[u8]) -> Result<usize, Status> {
+    if cursor.is_empty() {
+        return Ok(0);
+    }
+    if cursor.len() != OFFSET_CURSOR_LEN {
+        return Err(Status::invalid_argument(format!(
+            "invalid cursor: expected {} bytes, got {}",
+            OFFSET_CURSOR_LEN,
+            cursor.len()
+        )));
+    }
+
+    let mut bytes = [0u8; OFFSET_CURSOR_LEN];
+    bytes.copy_from_slice(cursor);
+    Ok(u64::from_be_bytes(bytes) as usize)
+}
+
+fn encode_offset_cursor(offset: usize) -> Vec<u8> {
+    let offset = u64::try_from(offset).unwrap_or(u64::MAX);
+    offset.to_be_bytes().to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::Code;
+
+    #[test]
+    fn test_offset_cursor_roundtrip() {
+        let cursor = encode_offset_cursor(123);
+        assert_eq!(decode_offset_cursor(&cursor).unwrap(), 123);
+    }
+
+    #[test]
+    fn test_offset_cursor_invalid_length() {
+        let err = decode_offset_cursor(&[1, 2, 3]).unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
     }
 }

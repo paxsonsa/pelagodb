@@ -5,22 +5,31 @@
 //! - Traverse: Graph traversal with multi-hop paths
 //! - Explain: Query plan explanation
 
+use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::core_to_proto_properties;
 use pelago_proto::{
-    query_service_server::QueryService, Edge, EdgeDirection, ExplainRequest, ExplainResponse,
-    FindNodesRequest, IndexOperation, Node, NodeRef as ProtoNodeRef, NodeResult, QueryPlan,
-    TraverseRequest, TraverseResult,
+    query_service_server::QueryService, Edge, EdgeDirection, ExecutePqlRequest, ExplainRequest,
+    ExplainResponse, FindNodesRequest, IndexOperation, Node, NodeRef as ProtoNodeRef, NodeResult,
+    PqlResult, QueryPlan, TraverseRequest, TraverseResult,
 };
-use pelago_query::planner::QueryPlanner;
 use pelago_query::plan::QueryExplanation;
+use pelago_query::planner::QueryPlanner;
+use pelago_query::pql::{
+    explain_query, parse_pql, InMemorySchemaProvider, PqlCompiler, PqlResolver, SchemaInfo,
+};
 use pelago_query::traversal::{TraversalConfig, TraversalDirection, TraversalEngine, TraversalHop};
 use pelago_query::QueryExecutor;
-use pelago_storage::{IdAllocator, NodeRef, PelagoDb, SchemaRegistry, StoredEdge, StoredNode};
+use pelago_storage::{
+    IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode,
+};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
+
+const OFFSET_CURSOR_LEN: usize = 8;
 
 /// Query service implementation
 pub struct QueryServiceImpl {
@@ -61,14 +70,37 @@ impl QueryService for QueryServiceImpl {
         &self,
         request: Request<FindNodesRequest>,
     ) -> Result<Response<Self::FindNodesStream>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "query.find",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
         let cel_expression = req.cel_expression;
-        let limit = if req.limit > 0 { Some(req.limit) } else { None };
+        let page_size = if req.limit > 0 {
+            req.limit as usize
+        } else {
+            1000
+        };
+        let cursor_offset = decode_offset_cursor(&req.cursor)?;
+        let fetch_limit = cursor_offset
+            .saturating_add(page_size)
+            .saturating_add(1)
+            .min(u32::MAX as usize) as u32;
+        let limit = Some(fetch_limit);
 
         // Get schema for planning
-        let schema = self.schema_registry
+        let schema = self
+            .schema_registry
             .get_schema(&ctx.database, &ctx.namespace, &entity_type)
             .await
             .map_err(|e| e.into_status())?
@@ -85,25 +117,49 @@ impl QueryService for QueryServiceImpl {
             .map_err(|e| e.into_status())?;
 
         // Execute query
-        let results = self.query_executor
+        let results = self
+            .query_executor
             .execute(&ctx.database, &ctx.namespace, &plan)
             .await
             .map_err(|e| e.into_status())?;
 
+        let total = results.nodes.len();
+        let start = cursor_offset.min(total);
+        let end = start.saturating_add(page_size).min(total);
+        let has_more = total > end;
+        let next_cursor = if has_more {
+            encode_offset_cursor(end)
+        } else {
+            Vec::new()
+        };
+        let page_nodes: Vec<_> = results
+            .nodes
+            .into_iter()
+            .skip(start)
+            .take(page_size)
+            .collect();
+        let last_idx = page_nodes.len().saturating_sub(1);
+
         // Convert to stream
-        let stream = tokio_stream::iter(results.nodes.into_iter().map(|node| {
-            Ok(NodeResult {
-                node: Some(Node {
-                    id: node.id,
-                    entity_type: node.entity_type,
-                    properties: core_to_proto_properties(&node.properties),
-                    locality: node.locality.to_string(),
-                    created_at: node.created_at,
-                    updated_at: node.updated_at,
-                }),
-                next_cursor: vec![], // Pagination cursor not implemented yet
-            })
-        }));
+        let stream =
+            tokio_stream::iter(page_nodes.into_iter().enumerate().map(move |(idx, node)| {
+                let item_cursor = if idx == last_idx {
+                    next_cursor.clone()
+                } else {
+                    Vec::new()
+                };
+                Ok(NodeResult {
+                    node: Some(Node {
+                        id: node.id,
+                        entity_type: node.entity_type,
+                        properties: core_to_proto_properties(&node.properties),
+                        locality: node.locality.to_string(),
+                        created_at: node.created_at,
+                        updated_at: node.updated_at,
+                    }),
+                    next_cursor: item_cursor,
+                })
+            }));
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -114,8 +170,20 @@ impl QueryService for QueryServiceImpl {
         &self,
         request: Request<TraverseRequest>,
     ) -> Result<Response<Self::TraverseStream>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "query.traverse",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
         let start = req
             .start
             .ok_or_else(|| Status::invalid_argument("missing start node"))?;
@@ -221,13 +289,26 @@ impl QueryService for QueryServiceImpl {
         &self,
         request: Request<ExplainRequest>,
     ) -> Result<Response<ExplainResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "query.explain",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
         let cel_expression = req.cel_expression;
 
         // Get schema for planning
-        let schema = self.schema_registry
+        let schema = self
+            .schema_registry
             .get_schema(&ctx.database, &ctx.namespace, &entity_type)
             .await
             .map_err(|e| e.into_status())?
@@ -262,6 +343,226 @@ impl QueryService for QueryServiceImpl {
             estimated_cost: explanation.estimated_cost,
             estimated_rows: explanation.estimated_rows,
         }))
+    }
+
+    type ExecutePQLStream = Pin<Box<dyn Stream<Item = Result<PqlResult, Status>> + Send>>;
+
+    async fn execute_pql(
+        &self,
+        request: Request<ExecutePqlRequest>,
+    ) -> Result<Response<Self::ExecutePQLStream>, Status> {
+        let principal = principal_from_request(&request);
+        let req = request.into_inner();
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "query.pql",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
+        let input = apply_params(&req.pql, &req.params);
+
+        let ast = parse_pql(&input).map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let schemas = self
+            .build_pql_schema_provider(&ctx.database, &ctx.namespace)
+            .await
+            .map_err(|e| e.into_status())?;
+
+        let resolver = PqlResolver::new();
+        let resolved = resolver
+            .resolve(&ast, &schemas)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let compiler = PqlCompiler::new();
+        let compiled = compiler
+            .compile(&resolved)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+
+        if req.explain {
+            let explanation = explain_query(&compiled);
+            let stream = tokio_stream::iter(vec![Ok(PqlResult {
+                block_name: "explain".to_string(),
+                node: None,
+                edge: None,
+                next_cursor: vec![],
+                explain: explanation,
+            })]);
+            return Ok(Response::new(Box::pin(stream)));
+        }
+
+        let node_store = NodeStore::new(
+            self.db.clone(),
+            Arc::clone(&self.schema_registry),
+            Arc::clone(&self.id_allocator),
+            self.site_id.clone(),
+        );
+        let mut variables: HashMap<String, Vec<StoredNode>> = HashMap::new();
+        let mut out = Vec::new();
+
+        for (compiled_idx, block) in compiled.iter().enumerate() {
+            let resolved_idx = resolved.execution_order[compiled_idx];
+            let resolved_block = &resolved.blocks[resolved_idx];
+
+            let mut block_nodes: Vec<StoredNode> = Vec::new();
+            match block {
+                pelago_query::pql::CompiledBlock::PointLookup {
+                    entity_type,
+                    node_id,
+                    fields,
+                    ..
+                } => {
+                    if let Some(mut node) = node_store
+                        .get_node(&ctx.database, &ctx.namespace, entity_type, node_id)
+                        .await
+                        .map_err(|e| e.into_status())?
+                    {
+                        if !fields.is_empty() {
+                            node.properties.retain(|k, _| fields.contains(k));
+                        }
+                        block_nodes.push(node);
+                    }
+                }
+                pelago_query::pql::CompiledBlock::FindNodes {
+                    entity_type,
+                    cel_expression,
+                    fields,
+                    limit,
+                    offset,
+                    ..
+                } => {
+                    let schema = self
+                        .schema_registry
+                        .get_schema(&ctx.database, &ctx.namespace, entity_type)
+                        .await
+                        .map_err(|e| e.into_status())?
+                        .ok_or_else(|| {
+                            Status::not_found(format!("schema '{}' not found", entity_type))
+                        })?;
+                    let projection = if fields.is_empty() {
+                        None
+                    } else {
+                        Some(fields.iter().cloned().collect())
+                    };
+                    let plan = QueryPlanner::plan(
+                        entity_type,
+                        cel_expression.as_deref().unwrap_or(""),
+                        &schema,
+                        projection,
+                        *limit,
+                    )
+                    .map_err(|e| e.into_status())?;
+                    let mut nodes = self
+                        .query_executor
+                        .execute(&ctx.database, &ctx.namespace, &plan)
+                        .await
+                        .map_err(|e| e.into_status())?
+                        .nodes;
+                    if let Some(skip) = offset {
+                        nodes = nodes.into_iter().skip(*skip as usize).collect();
+                    }
+                    block_nodes = nodes;
+                }
+                pelago_query::pql::CompiledBlock::Traverse {
+                    start_entity_type,
+                    start_node_id,
+                    steps,
+                    max_depth,
+                    cascade,
+                    max_results,
+                    ..
+                } => {
+                    let hops: Vec<TraversalHop> = steps
+                        .iter()
+                        .map(|step| {
+                            let mut hop = TraversalHop::new(match step.direction {
+                                pelago_query::pql::PqlEdgeDirection::Outgoing => {
+                                    TraversalDirection::Outbound
+                                }
+                                pelago_query::pql::PqlEdgeDirection::Incoming => {
+                                    TraversalDirection::Inbound
+                                }
+                                pelago_query::pql::PqlEdgeDirection::Both => {
+                                    TraversalDirection::Both
+                                }
+                            })
+                            .with_labels(vec![step.edge_type.clone()]);
+                            if let Some(ref f) = step.edge_filter {
+                                hop = hop.with_edge_filter(f.clone());
+                            }
+                            if let Some(ref f) = step.node_filter {
+                                hop = hop.with_node_filter(f.clone());
+                            }
+                            hop
+                        })
+                        .collect();
+                    let engine = TraversalEngine::with_config(
+                        self.db.clone(),
+                        Arc::clone(&self.schema_registry),
+                        Arc::clone(&self.id_allocator),
+                        self.site_id.clone(),
+                        TraversalConfig {
+                            max_depth: *max_depth,
+                            max_results: *max_results,
+                            timeout: std::time::Duration::from_secs(5),
+                            buffer_size: 100,
+                        },
+                    );
+                    let results = engine
+                        .traverse(
+                            &ctx.database,
+                            &ctx.namespace,
+                            start_entity_type,
+                            start_node_id,
+                            &hops,
+                            None,
+                        )
+                        .await
+                        .map_err(|e| e.into_status())?;
+                    for path in results.paths {
+                        let node = path.end_node().clone();
+                        if *cascade && node.id.is_empty() {
+                            continue;
+                        }
+                        block_nodes.push(node);
+                    }
+                }
+                pelago_query::pql::CompiledBlock::VariableRef {
+                    variable, fields, ..
+                } => {
+                    if let Some(nodes) = variables.get(variable) {
+                        block_nodes = nodes
+                            .iter()
+                            .map(|n| {
+                                let mut n2 = n.clone();
+                                if !fields.is_empty() {
+                                    n2.properties.retain(|k, _| fields.contains(k));
+                                }
+                                n2
+                            })
+                            .collect();
+                    }
+                }
+            }
+
+            if let Some(ref capture) = resolved_block.block.capture_as {
+                variables.insert(capture.clone(), block_nodes.clone());
+            }
+
+            out.extend(block_nodes.into_iter().map(|node| PqlResult {
+                block_name: resolved_block.name.clone(),
+                node: Some(stored_node_to_proto(&node)),
+                edge: None,
+                next_cursor: vec![],
+                explain: String::new(),
+            }));
+        }
+
+        let stream = tokio_stream::iter(out.into_iter().map(Ok));
+        Ok(Response::new(Box::pin(stream)))
     }
 }
 
@@ -302,5 +603,87 @@ fn stored_edge_to_proto(edge: &StoredEdge) -> Edge {
         label: edge.label.clone(),
         properties: core_to_proto_properties(&edge.properties),
         created_at: edge.created_at,
+    }
+}
+
+impl QueryServiceImpl {
+    async fn build_pql_schema_provider(
+        &self,
+        database: &str,
+        namespace: &str,
+    ) -> Result<InMemorySchemaProvider, pelago_core::PelagoError> {
+        let mut provider = InMemorySchemaProvider::new();
+        let names = self
+            .schema_registry
+            .list_schemas(database, namespace)
+            .await?;
+        for name in names {
+            if let Some(schema) = self
+                .schema_registry
+                .get_schema(database, namespace, &name)
+                .await?
+            {
+                provider.add_schema(SchemaInfo {
+                    entity_type: schema.name.clone(),
+                    fields: schema.properties.keys().cloned().collect(),
+                    edges: schema.edges.keys().cloned().collect(),
+                    allow_undeclared_edges: schema.meta.allow_undeclared_edges,
+                });
+            }
+        }
+        Ok(provider)
+    }
+}
+
+fn apply_params(input: &str, params: &std::collections::HashMap<String, String>) -> String {
+    let mut replaced = input.to_string();
+    for (key, value) in params {
+        replaced = replaced.replace(&format!("${}", key), value);
+    }
+    replaced
+}
+
+fn decode_offset_cursor(cursor: &[u8]) -> Result<usize, Status> {
+    if cursor.is_empty() {
+        return Ok(0);
+    }
+    if cursor.len() != OFFSET_CURSOR_LEN {
+        return Err(Status::invalid_argument(format!(
+            "invalid cursor: expected {} bytes, got {}",
+            OFFSET_CURSOR_LEN,
+            cursor.len()
+        )));
+    }
+
+    let mut bytes = [0u8; OFFSET_CURSOR_LEN];
+    bytes.copy_from_slice(cursor);
+    Ok(u64::from_be_bytes(bytes) as usize)
+}
+
+fn encode_offset_cursor(offset: usize) -> Vec<u8> {
+    let offset = u64::try_from(offset).unwrap_or(u64::MAX);
+    offset.to_be_bytes().to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::Code;
+
+    #[test]
+    fn test_offset_cursor_roundtrip() {
+        let cursor = encode_offset_cursor(42);
+        assert_eq!(decode_offset_cursor(&cursor).unwrap(), 42);
+    }
+
+    #[test]
+    fn test_offset_cursor_empty_is_zero() {
+        assert_eq!(decode_offset_cursor(&[]).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_offset_cursor_invalid_length() {
+        let err = decode_offset_cursor(&[1, 2, 3]).unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
     }
 }

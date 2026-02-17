@@ -175,6 +175,7 @@ service NodeService {
   rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
   rpc UpdateNode(UpdateNodeRequest) returns (UpdateNodeResponse);
   rpc DeleteNode(DeleteNodeRequest) returns (DeleteNodeResponse);
+  rpc TransferOwnership(TransferOwnershipRequest) returns (TransferOwnershipResponse);
 }
 
 message CreateNodeRequest {
@@ -218,6 +219,19 @@ message DeleteNodeRequest {
 
 message DeleteNodeResponse {
   bool deleted = 1;
+}
+
+message TransferOwnershipRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string node_id = 3;
+  string target_site_id = 4;
+}
+
+message TransferOwnershipResponse {
+  bool transferred = 1;
+  string previous_site_id = 2;
+  string current_site_id = 3;
 }
 
 message Node {
@@ -295,6 +309,7 @@ service QueryService {
   rpc FindNodes(FindNodesRequest) returns (stream NodeResult);
   rpc Traverse(TraverseRequest) returns (stream TraverseResult);
   rpc Explain(ExplainRequest) returns (ExplainResponse);
+  rpc ExecutePQL(ExecutePQLRequest) returns (stream PQLResult);
 }
 
 message FindNodesRequest {
@@ -375,6 +390,21 @@ message IndexOperation {
   double estimated_rows = 4;
 }
 
+message ExecutePQLRequest {
+  RequestContext context = 1;
+  string pql = 2;
+  map<string, string> params = 3;
+  bool explain = 4;
+}
+
+message PQLResult {
+  string block_name = 1;
+  Node node = 2;
+  Edge edge = 3;
+  bytes next_cursor = 4;
+  string explain = 5;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ADMIN SERVICE
 // ═══════════════════════════════════════════════════════════════════════════
@@ -386,6 +416,9 @@ service AdminService {
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
   rpc DropEntityType(DropEntityTypeRequest) returns (DropEntityTypeResponse);
   rpc DropNamespace(DropNamespaceRequest) returns (DropNamespaceResponse);
+  rpc ListSites(ListSitesRequest) returns (ListSitesResponse);
+  rpc GetReplicationStatus(GetReplicationStatusRequest) returns (GetReplicationStatusResponse);
+  rpc QueryAuditLog(QueryAuditLogRequest) returns (QueryAuditLogResponse);
 }
 
 message DropIndexRequest {
@@ -460,6 +493,60 @@ message DropNamespaceResponse {
   bool dropped = 1;
 }
 
+message ListSitesRequest {
+  RequestContext context = 1;
+}
+
+message SiteInfo {
+  string site_id = 1;
+  string site_name = 2;
+  int64 claimed_at = 3;
+  string status = 4;
+}
+
+message ListSitesResponse {
+  repeated SiteInfo sites = 1;
+}
+
+message GetReplicationStatusRequest {
+  RequestContext context = 1;
+}
+
+message ReplicationPeerStatus {
+  string remote_site_id = 1;
+  bytes last_applied_versionstamp = 2;
+  int64 lag_events = 3;
+  int64 updated_at = 4;
+}
+
+message GetReplicationStatusResponse {
+  repeated ReplicationPeerStatus peers = 1;
+}
+
+message QueryAuditLogRequest {
+  RequestContext context = 1;
+  string principal_id = 2;
+  string action = 3;
+  int64 from_timestamp = 4;
+  int64 to_timestamp = 5;
+  uint32 limit = 6;
+}
+
+message AuditEvent {
+  string event_id = 1;
+  int64 timestamp = 2;
+  string principal_id = 3;
+  string action = 4;
+  string resource = 5;
+  bool allowed = 6;
+  string reason = 7;
+  map<string, string> metadata = 8;
+}
+
+message QueryAuditLogResponse {
+  repeated AuditEvent events = 1;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // REPLICATION SERVICE (Phase 2: internal CDC consumption)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -472,6 +559,7 @@ message PullCdcEventsRequest {
   RequestContext context = 1;
   bytes after_versionstamp = 2;  // 10-byte versionstamp (empty = from beginning)
   uint32 limit = 3;              // Max events per response (default: 1000)
+  string source_site = 4;        // Optional source-site filter (entry.site)
 }
 
 message CdcEventResponse {
@@ -494,6 +582,7 @@ message CdcOperationProto {
     EdgeCreateOp edge_create = 4;
     EdgeDeleteOp edge_delete = 5;
     SchemaRegisterOp schema_register = 6;
+    OwnershipTransferOp ownership_transfer = 7;
   }
 }
 
@@ -539,6 +628,13 @@ message SchemaRegisterOp {
   uint32 version = 2;
 }
 
+message OwnershipTransferOp {
+  string entity_type = 1;
+  string node_id = 2;
+  string previous_site_id = 3;
+  string current_site_id = 4;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // HEALTH SERVICE
 // ═══════════════════════════════════════════════════════════════════════════
@@ -559,6 +655,214 @@ enum ServingStatus {
   SERVING_STATUS_UNKNOWN = 0;
   SERVING_STATUS_SERVING = 1;
   SERVING_STATUS_NOT_SERVING = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WATCH SERVICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+service WatchService {
+  rpc WatchPoint(WatchPointRequest) returns (stream WatchEvent);
+  rpc WatchQuery(WatchQueryRequest) returns (stream WatchEvent);
+  rpc WatchNamespace(WatchNamespaceRequest) returns (stream WatchEvent);
+  rpc ListSubscriptions(ListSubscriptionsRequest) returns (ListSubscriptionsResponse);
+  rpc CancelSubscription(CancelSubscriptionRequest) returns (CancelSubscriptionResponse);
+}
+
+enum WatchEventType {
+  WATCH_EVENT_TYPE_UNSPECIFIED = 0;
+  WATCH_EVENT_TYPE_ENTER = 1;
+  WATCH_EVENT_TYPE_UPDATE = 2;
+  WATCH_EVENT_TYPE_EXIT = 3;
+  WATCH_EVENT_TYPE_DELETE = 4;
+}
+
+enum WatchSubscriptionType {
+  WATCH_SUBSCRIPTION_TYPE_UNSPECIFIED = 0;
+  WATCH_SUBSCRIPTION_TYPE_POINT = 1;
+  WATCH_SUBSCRIPTION_TYPE_QUERY = 2;
+  WATCH_SUBSCRIPTION_TYPE_NAMESPACE = 3;
+}
+
+message WatchOptions {
+  bool include_initial = 1;
+  uint32 ttl_secs = 2;
+  uint32 max_queue_size = 3;
+}
+
+message WatchPointRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string node_id = 3;
+  WatchOptions options = 4;
+  bytes resume_after = 5;
+}
+
+message WatchQueryRequest {
+  RequestContext context = 1;
+  string entity_type = 2;
+  string cel_expression = 3;
+  string pql_query = 4;
+  WatchOptions options = 5;
+  bytes resume_after = 6;
+}
+
+message WatchNamespaceRequest {
+  RequestContext context = 1;
+  WatchOptions options = 2;
+  bytes resume_after = 3;
+}
+
+message WatchEvent {
+  string subscription_id = 1;
+  WatchEventType type = 2;
+  bytes versionstamp = 3;
+  Node node = 4;
+  Edge edge = 5;
+  string reason = 6;
+}
+
+message ListSubscriptionsRequest {
+  RequestContext context = 1;
+}
+
+message SubscriptionInfo {
+  string subscription_id = 1;
+  WatchSubscriptionType subscription_type = 2;
+  string database = 3;
+  string namespace = 4;
+  int64 created_at = 5;
+  int64 expires_at = 6;
+}
+
+message ListSubscriptionsResponse {
+  repeated SubscriptionInfo subscriptions = 1;
+}
+
+message CancelSubscriptionRequest {
+  RequestContext context = 1;
+  string subscription_id = 2;
+}
+
+message CancelSubscriptionResponse {
+  bool cancelled = 1;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTH SERVICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+service AuthService {
+  rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+  rpc CreatePolicy(CreatePolicyRequest) returns (CreatePolicyResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+  rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse);
+  rpc CheckPermission(CheckPermissionRequest) returns (CheckPermissionResponse);
+}
+
+message Principal {
+  string principal_id = 1;
+  string principal_type = 2;
+  repeated string roles = 3;
+}
+
+message AuthenticateRequest {
+  string api_key = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message AuthenticateResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+  int64 expires_at = 3;
+  Principal principal = 4;
+}
+
+message RefreshTokenRequest {
+  string refresh_token = 1;
+}
+
+message RefreshTokenResponse {
+  string access_token = 1;
+  int64 expires_at = 2;
+}
+
+message ValidateTokenRequest {
+  string token = 1;
+}
+
+message ValidateTokenResponse {
+  bool valid = 1;
+  Principal principal = 2;
+  int64 expires_at = 3;
+}
+
+message Permission {
+  string database = 1;
+  string namespace = 2;
+  string entity_type = 3;
+  repeated string actions = 4;
+}
+
+message Policy {
+  string policy_id = 1;
+  string principal_id = 2;
+  repeated Permission permissions = 3;
+  int64 created_at = 4;
+}
+
+message CreatePolicyRequest {
+  RequestContext context = 1;
+  Policy policy = 2;
+}
+
+message CreatePolicyResponse {
+  Policy policy = 1;
+}
+
+message GetPolicyRequest {
+  RequestContext context = 1;
+  string policy_id = 2;
+}
+
+message GetPolicyResponse {
+  Policy policy = 1;
+}
+
+message ListPoliciesRequest {
+  RequestContext context = 1;
+  string principal_id = 2;
+}
+
+message ListPoliciesResponse {
+  repeated Policy policies = 1;
+}
+
+message DeletePolicyRequest {
+  RequestContext context = 1;
+  string policy_id = 2;
+}
+
+message DeletePolicyResponse {
+  bool deleted = 1;
+}
+
+message CheckPermissionRequest {
+  RequestContext context = 1;
+  string principal_id = 2;
+  string action = 3;
+  string database = 4;
+  string namespace = 5;
+  string entity_type = 6;
+}
+
+message CheckPermissionResponse {
+  bool allowed = 1;
+  string reason = 2;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

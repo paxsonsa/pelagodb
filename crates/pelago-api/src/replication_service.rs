@@ -3,12 +3,13 @@
 //! Provides the internal CDC consumption endpoint:
 //! - PullCdcEvents: Stream CDC events from a namespace starting after a versionstamp
 
+use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::core_to_proto_properties;
 use pelago_proto::{
     replication_service_server::ReplicationService, CdcEntryProto, CdcEventResponse,
     CdcOperationProto, EdgeCreateOp, EdgeDeleteOp, NodeCreateOp, NodeDeleteOp, NodeUpdateOp,
-    PullCdcEventsRequest, SchemaRegisterOp,
+    OwnershipTransferOp, PullCdcEventsRequest, SchemaRegisterOp,
 };
 use pelago_storage::{read_cdc_entries, CdcOperation, PelagoDb, Versionstamp};
 use std::pin::Pin;
@@ -28,24 +29,34 @@ impl ReplicationServiceImpl {
 
 #[tonic::async_trait]
 impl ReplicationService for ReplicationServiceImpl {
-    type PullCdcEventsStream =
-        Pin<Box<dyn Stream<Item = Result<CdcEventResponse, Status>> + Send>>;
+    type PullCdcEventsStream = Pin<Box<dyn Stream<Item = Result<CdcEventResponse, Status>> + Send>>;
 
     async fn pull_cdc_events(
         &self,
         request: Request<PullCdcEventsRequest>,
     ) -> Result<Response<Self::PullCdcEventsStream>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
         let ctx = req
             .context
             .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "replication.pull",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
 
         let after_vs = if req.after_versionstamp.is_empty() {
             None
         } else {
             Some(
-                Versionstamp::from_bytes(&req.after_versionstamp)
-                    .ok_or_else(|| Status::invalid_argument("invalid versionstamp (must be 10 bytes)"))?,
+                Versionstamp::from_bytes(&req.after_versionstamp).ok_or_else(|| {
+                    Status::invalid_argument("invalid versionstamp (must be 10 bytes)")
+                })?,
             )
         };
 
@@ -65,7 +76,22 @@ impl ReplicationService for ReplicationServiceImpl {
         .await
         .map_err(|e| e.into_status())?;
 
-        let stream = tokio_stream::iter(entries.into_iter().map(|(vs, entry)| {
+        let source_site_filter = if req.source_site.is_empty() {
+            None
+        } else {
+            Some(req.source_site)
+        };
+        let filtered = entries
+            .into_iter()
+            .filter(move |(_, entry)| {
+                source_site_filter
+                    .as_ref()
+                    .map(|s| &entry.site == s)
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+
+        let stream = tokio_stream::iter(filtered.into_iter().map(|(vs, entry)| {
             let proto_ops: Vec<CdcOperationProto> = entry
                 .operations
                 .into_iter()
@@ -157,6 +183,17 @@ fn cdc_op_to_proto(op: CdcOperation) -> CdcOperationProto {
         } => Operation::SchemaRegister(SchemaRegisterOp {
             entity_type,
             version,
+        }),
+        CdcOperation::OwnershipTransfer {
+            entity_type,
+            node_id,
+            previous_site_id,
+            current_site_id,
+        } => Operation::OwnershipTransfer(OwnershipTransferOp {
+            entity_type,
+            node_id,
+            previous_site_id,
+            current_site_id,
         }),
     };
 

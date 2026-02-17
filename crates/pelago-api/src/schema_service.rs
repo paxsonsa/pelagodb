@@ -5,9 +5,12 @@
 //! - GetSchema: Retrieve a schema by type name and version
 //! - ListSchemas: List all registered schemas
 
+use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
-use pelago_core::schema::{EntitySchema as CoreSchema, IndexType as CoreIndexType, PropertyDef as CorePropertyDef};
-use pelago_core::{PelagoError, PropertyType as CorePropertyType, Value as CoreValue};
+use pelago_core::schema::{
+    EntitySchema as CoreSchema, IndexType as CoreIndexType, PropertyDef as CorePropertyDef,
+};
+use pelago_core::{PropertyType as CorePropertyType, Value as CoreValue};
 use pelago_proto::{
     schema_service_server::SchemaService, EntitySchema, GetSchemaRequest, GetSchemaResponse,
     IndexType, ListSchemasRequest, ListSchemasResponse, PropertyDef, PropertyType,
@@ -20,12 +23,16 @@ use tonic::{Request, Response, Status};
 
 /// Schema service implementation
 pub struct SchemaServiceImpl {
+    db: PelagoDb,
     schema_registry: Arc<SchemaRegistry>,
 }
 
 impl SchemaServiceImpl {
-    pub fn new(schema_registry: Arc<SchemaRegistry>) -> Self {
-        Self { schema_registry }
+    pub fn new(db: PelagoDb, schema_registry: Arc<SchemaRegistry>) -> Self {
+        Self {
+            db,
+            schema_registry,
+        }
     }
 }
 
@@ -35,15 +42,30 @@ impl SchemaService for SchemaServiceImpl {
         &self,
         request: Request<RegisterSchemaRequest>,
     ) -> Result<Response<RegisterSchemaResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
-        let proto_schema = req.schema.ok_or_else(|| Status::invalid_argument("missing schema"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let proto_schema = req
+            .schema
+            .ok_or_else(|| Status::invalid_argument("missing schema"))?;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "schema.register",
+            &ctx.database,
+            &ctx.namespace,
+            &proto_schema.name,
+        )
+        .await?;
 
         // Convert proto schema to core schema
         let core_schema = proto_to_core_schema(&proto_schema)?;
 
         // Register schema in FDB
-        let version = self.schema_registry
+        let version = self
+            .schema_registry
             .register_schema(&ctx.database, &ctx.namespace, core_schema)
             .await
             .map_err(|e| e.into_status())?;
@@ -58,15 +80,28 @@ impl SchemaService for SchemaServiceImpl {
         &self,
         request: Request<GetSchemaRequest>,
     ) -> Result<Response<GetSchemaResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let version = req.version;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "schema.read",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
 
         // Fetch schema from FDB
         if version > 0 {
             // Get specific version - returns EntitySchema directly
-            let schema = self.schema_registry
+            let schema = self
+                .schema_registry
                 .get_schema_version(&ctx.database, &ctx.namespace, &entity_type, version)
                 .await
                 .map_err(|e| e.into_status())?;
@@ -78,11 +113,15 @@ impl SchemaService for SchemaServiceImpl {
                         schema: Some(proto_schema),
                     }))
                 }
-                None => Err(Status::not_found(format!("schema '{}' version {} not found", entity_type, version))),
+                None => Err(Status::not_found(format!(
+                    "schema '{}' version {} not found",
+                    entity_type, version
+                ))),
             }
         } else {
             // Get latest version - returns Arc<EntitySchema>
-            let schema = self.schema_registry
+            let schema = self
+                .schema_registry
                 .get_schema(&ctx.database, &ctx.namespace, &entity_type)
                 .await
                 .map_err(|e| e.into_status())?;
@@ -94,7 +133,10 @@ impl SchemaService for SchemaServiceImpl {
                         schema: Some(proto_schema),
                     }))
                 }
-                None => Err(Status::not_found(format!("schema '{}' not found", entity_type))),
+                None => Err(Status::not_found(format!(
+                    "schema '{}' not found",
+                    entity_type
+                ))),
             }
         }
     }
@@ -103,11 +145,24 @@ impl SchemaService for SchemaServiceImpl {
         &self,
         request: Request<ListSchemasRequest>,
     ) -> Result<Response<ListSchemasResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "schema.read",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
 
         // List schema names from FDB
-        let schema_names = self.schema_registry
+        let schema_names = self
+            .schema_registry
             .list_schemas(&ctx.database, &ctx.namespace)
             .await
             .map_err(|e| e.into_status())?;
@@ -115,7 +170,8 @@ impl SchemaService for SchemaServiceImpl {
         // Fetch full schemas for each name
         let mut proto_schemas = Vec::with_capacity(schema_names.len());
         for name in schema_names {
-            if let Some(schema) = self.schema_registry
+            if let Some(schema) = self
+                .schema_registry
                 .get_schema(&ctx.database, &ctx.namespace, &name)
                 .await
                 .map_err(|e| e.into_status())?
@@ -124,7 +180,9 @@ impl SchemaService for SchemaServiceImpl {
             }
         }
 
-        Ok(Response::new(ListSchemasResponse { schemas: proto_schemas }))
+        Ok(Response::new(ListSchemasResponse {
+            schemas: proto_schemas,
+        }))
     }
 }
 

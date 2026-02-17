@@ -6,13 +6,13 @@
 //! - UpdateNode: Update node properties (merge semantics)
 //! - DeleteNode: Delete a node and its edges
 
+use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
 use pelago_proto::{
     node_service_server::NodeService, CreateNodeRequest, CreateNodeResponse, DeleteNodeRequest,
     DeleteNodeResponse, GetNodeRequest, GetNodeResponse, Node, ReadConsistency,
-    UpdateNodeRequest,
-    UpdateNodeResponse,
+    TransferOwnershipRequest, TransferOwnershipResponse, UpdateNodeRequest, UpdateNodeResponse,
 };
 use pelago_storage::{
     CachedReadPath, IdAllocator, NodeStore, PelagoDb, ReadConsistency as CacheReadConsistency,
@@ -23,6 +23,7 @@ use tonic::{Request, Response, Status};
 
 /// Node service implementation
 pub struct NodeServiceImpl {
+    db: PelagoDb,
     node_store: NodeStore,
     cached_read_path: Option<Arc<CachedReadPath>>,
 }
@@ -36,6 +37,7 @@ impl NodeServiceImpl {
         cached_read_path: Option<Arc<CachedReadPath>>,
     ) -> Self {
         Self {
+            db: db.clone(),
             node_store: NodeStore::new(db, schema_registry, id_allocator, site_id),
             cached_read_path,
         }
@@ -48,13 +50,26 @@ impl NodeService for NodeServiceImpl {
         &self,
         request: Request<CreateNodeRequest>,
     ) -> Result<Response<CreateNodeResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "node.write",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
         let properties = proto_to_core_properties(&req.properties);
 
         // Create node in FDB
-        let stored_node = self.node_store
+        let stored_node = self
+            .node_store
             .create_node(&ctx.database, &ctx.namespace, &entity_type, properties)
             .await
             .map_err(|e| e.into_status())?;
@@ -75,10 +90,22 @@ impl NodeService for NodeServiceImpl {
         &self,
         request: Request<GetNodeRequest>,
     ) -> Result<Response<GetNodeResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let node_id = req.node_id;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "node.read",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
 
         let consistency = match ReadConsistency::try_from(req.consistency)
             .unwrap_or(ReadConsistency::Strong)
@@ -116,7 +143,8 @@ impl NodeService for NodeServiceImpl {
                 let properties = if req.fields.is_empty() {
                     core_to_proto_properties(&node.properties)
                 } else {
-                    let filtered: std::collections::HashMap<_, _> = node.properties
+                    let filtered: std::collections::HashMap<_, _> = node
+                        .properties
                         .iter()
                         .filter(|(k, _)| req.fields.contains(k))
                         .map(|(k, v)| (k.clone(), v.clone()))
@@ -135,7 +163,10 @@ impl NodeService for NodeServiceImpl {
                     }),
                 }))
             }
-            None => Err(Status::not_found(format!("node '{}:{}' not found", entity_type, node_id))),
+            None => Err(Status::not_found(format!(
+                "node '{}:{}' not found",
+                entity_type, node_id
+            ))),
         }
     }
 
@@ -143,15 +174,34 @@ impl NodeService for NodeServiceImpl {
         &self,
         request: Request<UpdateNodeRequest>,
     ) -> Result<Response<UpdateNodeResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let node_id = req.node_id;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "node.write",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
         let properties = proto_to_core_properties(&req.properties);
 
         // Update node in FDB
-        let stored_node = self.node_store
-            .update_node(&ctx.database, &ctx.namespace, &entity_type, &node_id, properties)
+        let stored_node = self
+            .node_store
+            .update_node(
+                &ctx.database,
+                &ctx.namespace,
+                &entity_type,
+                &node_id,
+                properties,
+            )
             .await
             .map_err(|e| e.into_status())?;
 
@@ -171,17 +221,72 @@ impl NodeService for NodeServiceImpl {
         &self,
         request: Request<DeleteNodeRequest>,
     ) -> Result<Response<DeleteNodeResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let node_id = req.node_id;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "node.write",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
 
         // Delete node from FDB
-        let deleted = self.node_store
+        let deleted = self
+            .node_store
             .delete_node(&ctx.database, &ctx.namespace, &entity_type, &node_id)
             .await
             .map_err(|e| e.into_status())?;
 
         Ok(Response::new(DeleteNodeResponse { deleted }))
+    }
+
+    async fn transfer_ownership(
+        &self,
+        request: Request<TransferOwnershipRequest>,
+    ) -> Result<Response<TransferOwnershipResponse>, Status> {
+        let principal = principal_from_request(&request);
+        let req = request.into_inner();
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            &self.db,
+            principal.as_ref(),
+            "node.transfer",
+            &ctx.database,
+            &ctx.namespace,
+            &req.entity_type,
+        )
+        .await?;
+        let target_site_id = req
+            .target_site_id
+            .parse::<u8>()
+            .map_err(|_| Status::invalid_argument("target_site_id must be a u8 string"))?;
+
+        let (transferred, previous_site_id, current_site_id) = self
+            .node_store
+            .transfer_ownership(
+                &ctx.database,
+                &ctx.namespace,
+                &req.entity_type,
+                &req.node_id,
+                target_site_id,
+            )
+            .await
+            .map_err(|e| e.into_status())?;
+
+        Ok(Response::new(TransferOwnershipResponse {
+            transferred,
+            previous_site_id: previous_site_id.to_string(),
+            current_site_id: current_site_id.to_string(),
+        }))
     }
 }
