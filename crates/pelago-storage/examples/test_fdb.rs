@@ -26,10 +26,7 @@ async fn main() {
 
     println!("\nInitializing FDB network (API version 730)...");
 
-    let network = match FdbApiBuilder::default()
-        .set_runtime_version(730)
-        .build()
-    {
+    let network = match FdbApiBuilder::default().set_runtime_version(730).build() {
         Ok(n) => n,
         Err(e) => {
             println!("ERROR: Failed to build FDB API: {:?}", e);

@@ -70,6 +70,303 @@ impl NodeStore {
             .build()
     }
 
+    fn local_site_id(&self) -> Option<u8> {
+        self.site_id.parse::<u8>().ok()
+    }
+
+    fn parse_site_id(value: &str, field: &str) -> Result<u8, PelagoError> {
+        value.parse::<u8>().map_err(|_| PelagoError::InvalidValue {
+            field: field.to_string(),
+            reason: format!("'{}' is not a valid site id", value),
+        })
+    }
+
+    fn enforce_local_ownership(
+        &self,
+        entity_type: &str,
+        node_id: &str,
+        owner_site: u8,
+    ) -> Result<(), PelagoError> {
+        if let Some(local_site) = self.local_site_id() {
+            if local_site != owner_site {
+                return Err(PelagoError::VersionConflict {
+                    entity_type: entity_type.to_string(),
+                    node_id: node_id.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply a replicated node creation without emitting CDC.
+    pub async fn apply_replica_node_create(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        properties: HashMap<String, Value>,
+        home_site: &str,
+        event_timestamp: i64,
+        origin_site: &str,
+    ) -> Result<bool, PelagoError> {
+        if home_site != origin_site {
+            return Err(PelagoError::VersionConflict {
+                entity_type: entity_type.to_string(),
+                node_id: node_id.to_string(),
+            });
+        }
+
+        let schema = self
+            .schema_registry
+            .get_schema(database, namespace, entity_type)
+            .await?
+            .ok_or_else(|| PelagoError::UnregisteredType {
+                entity_type: entity_type.to_string(),
+            })?;
+        validate_properties(entity_type, &schema, &properties)?;
+
+        let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
+        let node_id_bytes = parsed_id.to_bytes();
+        let home_site_id = Self::parse_site_id(home_site, "home_site")?;
+
+        let subspace = Subspace::namespace(database, namespace);
+        let data_subspace = subspace.data();
+        let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
+
+        if let Some(existing) = self.db.get(data_key.as_ref()).await? {
+            let existing_data: NodeData = decode_cbor(&existing)?;
+            let is_same =
+                existing_data.locality == home_site_id && existing_data.properties == properties;
+            return Ok(is_same);
+        }
+
+        let index_entries =
+            compute_index_entries(&subspace, entity_type, &node_id_bytes, &schema, &properties)?;
+        let node_data = encode_cbor(&NodeData {
+            properties,
+            locality: home_site_id,
+            created_at: event_timestamp,
+            updated_at: event_timestamp,
+        })?;
+
+        let trx = self.db.create_transaction()?;
+        trx.set(data_key.as_ref(), &node_data);
+        for entry in &index_entries {
+            Self::write_index_entry(&trx, entry)?;
+        }
+        trx.commit().await.map_err(|e| {
+            PelagoError::Internal(format!("Failed to apply replicated node create: {}", e))
+        })?;
+        Ok(true)
+    }
+
+    /// Apply a replicated node update without emitting CDC.
+    pub async fn apply_replica_node_update(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        changed_properties: HashMap<String, Value>,
+        old_properties: HashMap<String, Value>,
+        event_timestamp: i64,
+        origin_site: &str,
+    ) -> Result<bool, PelagoError> {
+        let actor_site = Self::parse_site_id(origin_site, "origin_site")?;
+        let schema = self
+            .schema_registry
+            .get_schema(database, namespace, entity_type)
+            .await?
+            .ok_or_else(|| PelagoError::UnregisteredType {
+                entity_type: entity_type.to_string(),
+            })?;
+
+        let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
+        let node_id_bytes = parsed_id.to_bytes();
+
+        let subspace = Subspace::namespace(database, namespace);
+        let data_subspace = subspace.data();
+        let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
+        let existing_bytes =
+            self.db
+                .get(data_key.as_ref())
+                .await?
+                .ok_or_else(|| PelagoError::NodeNotFound {
+                    entity_type: entity_type.to_string(),
+                    node_id: node_id.to_string(),
+                })?;
+        let existing_data: NodeData = decode_cbor(&existing_bytes)?;
+        let ownership_mismatch = existing_data.locality != actor_site;
+
+        // Owner-wins in normal operation; LWW fallback only when incoming update is newer.
+        if ownership_mismatch && event_timestamp <= existing_data.updated_at {
+            return Ok(false);
+        }
+
+        if existing_data.properties != old_properties && event_timestamp <= existing_data.updated_at
+        {
+            // Divergent old state with stale incoming event.
+            return Ok(false);
+        }
+
+        let mut merged = existing_data.properties.clone();
+        for (k, v) in changed_properties {
+            merged.insert(k, v);
+        }
+        validate_properties(entity_type, &schema, &merged)?;
+
+        let removals = compute_index_removals(
+            &subspace,
+            entity_type,
+            &node_id_bytes,
+            &schema,
+            &existing_data.properties,
+            &merged,
+        )?;
+        let additions =
+            compute_index_entries(&subspace, entity_type, &node_id_bytes, &schema, &merged)?;
+        let updated_data = encode_cbor(&NodeData {
+            properties: merged,
+            locality: if ownership_mismatch {
+                actor_site
+            } else {
+                existing_data.locality
+            },
+            created_at: existing_data.created_at,
+            updated_at: existing_data.updated_at.max(event_timestamp),
+        })?;
+
+        let trx = self.db.create_transaction()?;
+        for entry in &removals {
+            trx.clear(entry.key.as_ref());
+        }
+        for entry in &additions {
+            Self::write_index_entry(&trx, entry)?;
+        }
+        trx.set(data_key.as_ref(), &updated_data);
+        trx.commit().await.map_err(|e| {
+            PelagoError::Internal(format!("Failed to apply replicated node update: {}", e))
+        })?;
+        Ok(true)
+    }
+
+    /// Apply a replicated node deletion without emitting CDC.
+    pub async fn apply_replica_node_delete(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        event_timestamp: i64,
+        origin_site: &str,
+    ) -> Result<bool, PelagoError> {
+        let actor_site = Self::parse_site_id(origin_site, "origin_site")?;
+        let schema = self
+            .schema_registry
+            .get_schema(database, namespace, entity_type)
+            .await?
+            .ok_or_else(|| PelagoError::UnregisteredType {
+                entity_type: entity_type.to_string(),
+            })?;
+
+        let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
+        let node_id_bytes = parsed_id.to_bytes();
+
+        let subspace = Subspace::namespace(database, namespace);
+        let data_subspace = subspace.data();
+        let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
+        let existing_bytes = match self.db.get(data_key.as_ref()).await? {
+            Some(bytes) => bytes,
+            None => return Ok(false),
+        };
+        let existing_data: NodeData = decode_cbor(&existing_bytes)?;
+        if existing_data.locality != actor_site && event_timestamp <= existing_data.updated_at {
+            return Ok(false);
+        }
+
+        let removals = compute_index_entries(
+            &subspace,
+            entity_type,
+            &node_id_bytes,
+            &schema,
+            &existing_data.properties,
+        )?;
+        let trx = self.db.create_transaction()?;
+        trx.clear(data_key.as_ref());
+        for entry in &removals {
+            trx.clear(entry.key.as_ref());
+        }
+        trx.commit().await.map_err(|e| {
+            PelagoError::Internal(format!("Failed to apply replicated node delete: {}", e))
+        })?;
+        Ok(true)
+    }
+
+    /// Apply a replicated ownership transfer without emitting CDC.
+    pub async fn apply_replica_ownership_transfer(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        previous_site_id: &str,
+        current_site_id: &str,
+        event_timestamp: i64,
+        origin_site: &str,
+    ) -> Result<bool, PelagoError> {
+        let actor_site = Self::parse_site_id(origin_site, "origin_site")?;
+        let previous = Self::parse_site_id(previous_site_id, "previous_site_id")?;
+        let current = Self::parse_site_id(current_site_id, "current_site_id")?;
+        if actor_site != previous {
+            return Ok(false);
+        }
+
+        let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
+        let node_id_bytes = parsed_id.to_bytes();
+        let subspace = Subspace::namespace(database, namespace);
+        let data_subspace = subspace.data();
+        let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
+        let existing_bytes =
+            self.db
+                .get(data_key.as_ref())
+                .await?
+                .ok_or_else(|| PelagoError::NodeNotFound {
+                    entity_type: entity_type.to_string(),
+                    node_id: node_id.to_string(),
+                })?;
+        let mut existing_data: NodeData = decode_cbor(&existing_bytes)?;
+
+        if existing_data.locality != previous {
+            if existing_data.updated_at > event_timestamp {
+                // LWW fallback: local projection is newer.
+                return Ok(false);
+            }
+        }
+
+        existing_data.locality = current;
+        existing_data.updated_at = event_timestamp;
+        let node_data = encode_cbor(&existing_data)?;
+
+        let trx = self.db.create_transaction()?;
+        trx.set(data_key.as_ref(), &node_data);
+        trx.commit().await.map_err(|e| {
+            PelagoError::Internal(format!(
+                "Failed to apply replicated ownership transfer: {}",
+                e
+            ))
+        })?;
+        Ok(true)
+    }
+
     /// Create a new node
     pub async fn create_node(
         &self,
@@ -181,11 +478,9 @@ impl NodeStore {
         entity_type: &str,
         node_id: &str,
     ) -> Result<Option<StoredNode>, PelagoError> {
-        let parsed_id: NodeId = node_id
-            .parse()
-            .map_err(|_| PelagoError::InvalidId {
-                value: node_id.to_string(),
-            })?;
+        let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
         let node_id_bytes = parsed_id.to_bytes();
 
         let subspace = Subspace::namespace(database, namespace).data();
@@ -226,11 +521,9 @@ impl NodeStore {
             })?;
 
         // Parse node ID
-        let parsed_id: NodeId = node_id
-            .parse()
-            .map_err(|_| PelagoError::InvalidId {
-                value: node_id.to_string(),
-            })?;
+        let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
         let node_id_bytes = parsed_id.to_bytes();
 
         let subspace = Subspace::namespace(database, namespace);
@@ -238,14 +531,17 @@ impl NodeStore {
         let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
 
         // Read existing node
-        let existing_bytes = self.db.get(data_key.as_ref()).await?.ok_or_else(|| {
-            PelagoError::NodeNotFound {
-                entity_type: entity_type.to_string(),
-                node_id: node_id.to_string(),
-            }
-        })?;
+        let existing_bytes =
+            self.db
+                .get(data_key.as_ref())
+                .await?
+                .ok_or_else(|| PelagoError::NodeNotFound {
+                    entity_type: entity_type.to_string(),
+                    node_id: node_id.to_string(),
+                })?;
 
         let existing_data: NodeData = decode_cbor(&existing_bytes)?;
+        self.enforce_local_ownership(entity_type, node_id, existing_data.locality)?;
         let old_properties = existing_data.properties.clone();
 
         // Merge: start with old properties, overlay new properties
@@ -267,8 +563,13 @@ impl NodeStore {
             &merged_properties,
         )?;
 
-        let additions =
-            compute_index_entries(&subspace, entity_type, &node_id_bytes, &schema, &merged_properties)?;
+        let additions = compute_index_entries(
+            &subspace,
+            entity_type,
+            &node_id_bytes,
+            &schema,
+            &merged_properties,
+        )?;
 
         // Update timestamp
         let now = std::time::SystemTime::now()
@@ -346,11 +647,9 @@ impl NodeStore {
             })?;
 
         // Parse node ID
-        let parsed_id: NodeId = node_id
-            .parse()
-            .map_err(|_| PelagoError::InvalidId {
-                value: node_id.to_string(),
-            })?;
+        let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
         let node_id_bytes = parsed_id.to_bytes();
 
         let subspace = Subspace::namespace(database, namespace);
@@ -364,6 +663,8 @@ impl NodeStore {
         };
 
         let existing_data: NodeData = decode_cbor(&existing_bytes)?;
+
+        self.enforce_local_ownership(entity_type, node_id, existing_data.locality)?;
 
         // Compute index entries to remove
         let removals = compute_index_entries(
@@ -401,6 +702,65 @@ impl NodeStore {
             .map_err(|e| PelagoError::Internal(format!("Failed to delete node: {}", e)))?;
 
         Ok(true)
+    }
+
+    /// Transfer node ownership (locality) to another site.
+    pub async fn transfer_ownership(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        target_site_id: u8,
+    ) -> Result<(bool, u8, u8), PelagoError> {
+        let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
+        let node_id_bytes = parsed_id.to_bytes();
+
+        let subspace = Subspace::namespace(database, namespace);
+        let data_subspace = subspace.data();
+        let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
+
+        let existing_bytes =
+            self.db
+                .get(data_key.as_ref())
+                .await?
+                .ok_or_else(|| PelagoError::NodeNotFound {
+                    entity_type: entity_type.to_string(),
+                    node_id: node_id.to_string(),
+                })?;
+
+        let mut existing_data: NodeData = decode_cbor(&existing_bytes)?;
+        let previous_site_id = existing_data.locality;
+        self.enforce_local_ownership(entity_type, node_id, previous_site_id)?;
+        if previous_site_id == target_site_id {
+            return Ok((false, previous_site_id, target_site_id));
+        }
+
+        existing_data.locality = target_site_id;
+        existing_data.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+
+        let node_data = encode_cbor(&existing_data)?;
+
+        let trx = self.db.create_transaction()?;
+        let mut cdc = CdcAccumulator::new(&self.site_id);
+        trx.set(data_key.as_ref(), &node_data);
+        cdc.push(CdcOperation::OwnershipTransfer {
+            entity_type: entity_type.to_string(),
+            node_id: node_id.to_string(),
+            previous_site_id: previous_site_id.to_string(),
+            current_site_id: target_site_id.to_string(),
+        });
+        cdc.flush(&trx, database, namespace)?;
+        trx.commit()
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Failed to transfer ownership: {}", e)))?;
+
+        Ok((true, previous_site_id, target_site_id))
     }
 
     /// Write an index entry to FDB
@@ -704,9 +1064,6 @@ mod tests {
         apply_defaults(&schema, &mut props);
 
         // Should NOT override existing value
-        assert_eq!(
-            props.get("status"),
-            Some(&Value::String("inactive".into()))
-        );
+        assert_eq!(props.get("status"), Some(&Value::String("inactive".into())));
     }
 }

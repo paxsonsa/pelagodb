@@ -91,8 +91,9 @@ mod versionstamp_serde {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 10], D::Error> {
         let buf = <Vec<u8>>::deserialize(d)?;
-        buf.try_into()
-            .map_err(|v: Vec<u8>| serde::de::Error::custom(format!("expected 10 bytes, got {}", v.len())))
+        buf.try_into().map_err(|v: Vec<u8>| {
+            serde::de::Error::custom(format!("expected 10 bytes, got {}", v.len()))
+        })
     }
 }
 
@@ -155,6 +156,12 @@ pub enum CdcOperation {
     SchemaRegister {
         entity_type: String,
         version: u32,
+    },
+    OwnershipTransfer {
+        entity_type: String,
+        node_id: String,
+        previous_site_id: String,
+        current_site_id: String,
     },
 }
 
@@ -219,21 +226,52 @@ impl CdcAccumulator {
             operations: self.operations,
         };
 
-        let subspace = Subspace::namespace(database, namespace).cdc();
-        let value = encode_cbor(&entry)?;
-
-        // Build key with versionstamp placeholder + offset trailer
-        let prefix = subspace.prefix();
-        let versionstamp_offset = prefix.len() as u32;
-        let mut key = Vec::with_capacity(prefix.len() + 10 + 4);
-        key.extend_from_slice(prefix);
-        key.extend_from_slice(&[0u8; 10]); // versionstamp placeholder
-        key.extend_from_slice(&versionstamp_offset.to_le_bytes()); // offset
-
-        trx.atomic_op(&key, &value, MutationType::SetVersionstampedKey);
-
-        Ok(())
+        write_cdc_entry(trx, database, namespace, &entry)
     }
+}
+
+fn write_cdc_entry(
+    trx: &foundationdb::Transaction,
+    database: &str,
+    namespace: &str,
+    entry: &CdcEntry,
+) -> Result<(), PelagoError> {
+    let subspace = Subspace::namespace(database, namespace).cdc();
+    let value = encode_cbor(entry)?;
+
+    // Build key with versionstamp placeholder + offset trailer
+    let prefix = subspace.prefix();
+    let versionstamp_offset = prefix.len() as u32;
+    let mut key = Vec::with_capacity(prefix.len() + 10 + 4);
+    key.extend_from_slice(prefix);
+    key.extend_from_slice(&[0u8; 10]); // versionstamp placeholder
+    key.extend_from_slice(&versionstamp_offset.to_le_bytes()); // offset
+
+    trx.atomic_op(&key, &value, MutationType::SetVersionstampedKey);
+    Ok(())
+}
+
+/// Append a CDC entry as a standalone transaction.
+///
+/// This is used by system workers (for example, replication) that need to
+/// mirror externally applied mutations into the local CDC stream so local
+/// consumers (cache projector, watchers) converge.
+pub async fn append_cdc_entry(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    entry: CdcEntry,
+) -> Result<(), PelagoError> {
+    if entry.operations.is_empty() {
+        return Ok(());
+    }
+
+    let trx = db.create_transaction()?;
+    write_cdc_entry(&trx, database, namespace, &entry)?;
+    trx.commit()
+        .await
+        .map_err(|e| PelagoError::Internal(format!("Failed to append CDC entry: {}", e)))?;
+    Ok(())
 }
 
 // ─── CDC Reader ──────────────────────────────────────────────────────────
@@ -275,6 +313,24 @@ pub async fn read_cdc_entries(
     }
 
     Ok(entries)
+}
+
+/// Returns true if an exact CDC entry exists at the provided versionstamp.
+pub async fn cdc_position_exists(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    versionstamp: &Versionstamp,
+) -> Result<bool, PelagoError> {
+    if versionstamp.is_zero() {
+        return Ok(true);
+    }
+    let mut key = Subspace::namespace(database, namespace)
+        .cdc()
+        .prefix()
+        .to_vec();
+    key.extend_from_slice(versionstamp.to_bytes());
+    Ok(db.get(&key).await?.is_some())
 }
 
 fn now_micros() -> i64 {
@@ -349,9 +405,10 @@ mod tests {
                 CdcOperation::NodeCreate {
                     entity_type: "User".to_string(),
                     node_id: "1_100".to_string(),
-                    properties: HashMap::from([
-                        ("name".to_string(), Value::String("Alice".to_string())),
-                    ]),
+                    properties: HashMap::from([(
+                        "name".to_string(),
+                        Value::String("Alice".to_string()),
+                    )]),
                     home_site: "1".to_string(),
                 },
                 CdcOperation::EdgeCreate {
@@ -411,6 +468,12 @@ mod tests {
             CdcOperation::SchemaRegister {
                 entity_type: "T".into(),
                 version: 1,
+            },
+            CdcOperation::OwnershipTransfer {
+                entity_type: "T".into(),
+                node_id: "1".into(),
+                previous_site_id: "1".into(),
+                current_site_id: "2".into(),
             },
         ];
 

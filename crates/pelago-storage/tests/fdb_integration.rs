@@ -116,7 +116,10 @@ async fn test_get_range() {
     // Verify order
     for (i, (key, value)) in results.iter().enumerate() {
         let expected_suffix = [b'k', i as u8];
-        assert!(key.ends_with(&expected_suffix), "Key should end with correct suffix");
+        assert!(
+            key.ends_with(&expected_suffix),
+            "Key should end with correct suffix"
+        );
         assert_eq!(value, &vec![b'v', i as u8]);
     }
 
@@ -124,7 +127,10 @@ async fn test_get_range() {
     db.clear_range(&begin, &end).await.expect("clear_range");
 
     // Verify deletion
-    let results = db.get_range(&begin, &end, 10).await.expect("get_range after clear");
+    let results = db
+        .get_range(&begin, &end, 10)
+        .await
+        .expect("get_range after clear");
     assert_eq!(results.len(), 0);
 }
 

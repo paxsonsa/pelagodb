@@ -144,6 +144,31 @@ pub struct ServerConfig {
     #[arg(long, env = "PELAGO_REPLICATION_API_KEY")]
     pub replication_api_key: Option<String>,
 
+    /// Require active lease for replication worker execution
+    #[arg(
+        long,
+        env = "PELAGO_REPLICATION_LEASE_ENABLED",
+        default_value_t = true,
+        action = ArgAction::Set
+    )]
+    pub replication_lease_enabled: bool,
+
+    /// Replicator lease TTL in milliseconds
+    #[arg(
+        long,
+        env = "PELAGO_REPLICATION_LEASE_TTL_MS",
+        default_value_t = 10_000
+    )]
+    pub replication_lease_ttl_ms: u64,
+
+    /// Replicator lease heartbeat period in milliseconds
+    #[arg(
+        long,
+        env = "PELAGO_REPLICATION_LEASE_HEARTBEAT_MS",
+        default_value_t = 2_000
+    )]
+    pub replication_lease_heartbeat_ms: u64,
+
     /// Enable embedded docs HTTP server
     #[arg(
         long,
@@ -230,6 +255,9 @@ impl Default for ServerConfig {
             replication_batch_size: 512,
             replication_poll_ms: 300,
             replication_api_key: None,
+            replication_lease_enabled: true,
+            replication_lease_ttl_ms: 10_000,
+            replication_lease_heartbeat_ms: 2_000,
             docs_enabled: false,
             docs_addr: "127.0.0.1:4070".to_string(),
             docs_dir: "docs".to_string(),

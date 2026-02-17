@@ -1,9 +1,9 @@
-use crate::cdc::CdcOperation;
-use crate::consumer::{CdcConsumer, ConsumerConfig};
-use crate::db::PelagoDb;
-use crate::cdc::Versionstamp;
 use super::config::RocksCacheConfig;
 use super::store::RocksCacheStore;
+use crate::cdc::CdcOperation;
+use crate::cdc::Versionstamp;
+use crate::consumer::{CdcConsumer, ConsumerConfig};
+use crate::db::PelagoDb;
 use pelago_core::PelagoError;
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,8 +88,12 @@ impl CdcProjector {
         let count = entries.len();
 
         for (vs, entry) in &entries {
-            self.cache
-                .apply_cdc_operations(&self.database, &self.namespace, &entry.operations, vs)?;
+            self.cache.apply_cdc_operations(
+                &self.database,
+                &self.namespace,
+                &entry.operations,
+                vs,
+            )?;
         }
 
         Ok(count)
@@ -104,12 +108,9 @@ impl CdcProjector {
             self.database,
             std::process::id()
         );
-        let replay_config = ConsumerConfig::new(
-            &replay_consumer_id,
-            &self.database,
-            &self.namespace,
-        )
-        .with_batch_size(self.batch_size);
+        let replay_config =
+            ConsumerConfig::new(&replay_consumer_id, &self.database, &self.namespace)
+                .with_batch_size(self.batch_size);
         let mut replay_consumer = CdcConsumer::new(self.db.clone(), replay_config).await?;
 
         let mut stats = RebuildStats {
@@ -137,7 +138,8 @@ impl CdcProjector {
                     match op {
                         CdcOperation::NodeCreate { .. }
                         | CdcOperation::NodeUpdate { .. }
-                        | CdcOperation::NodeDelete { .. } => stats.nodes_written += 1,
+                        | CdcOperation::NodeDelete { .. }
+                        | CdcOperation::OwnershipTransfer { .. } => stats.nodes_written += 1,
                         CdcOperation::EdgeCreate { .. } | CdcOperation::EdgeDelete { .. } => {
                             stats.edges_written += 1
                         }

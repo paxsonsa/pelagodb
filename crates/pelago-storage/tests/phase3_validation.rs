@@ -189,10 +189,10 @@ fn phase3_pql_error_handling() {
 
 #[cfg(feature = "cache")]
 mod cache_validation {
-    use pelago_storage::rocks_cache::*;
     use pelago_storage::edge::NodeRef;
-    use pelago_storage::node::StoredNode;
     use pelago_storage::edge::StoredEdge;
+    use pelago_storage::node::StoredNode;
+    use pelago_storage::rocks_cache::*;
     use std::collections::HashMap;
 
     #[test]
@@ -204,7 +204,10 @@ mod cache_validation {
             entity_type: "Person".to_string(),
             properties: {
                 let mut p = HashMap::new();
-                p.insert("name".to_string(), pelago_core::Value::String("Alice".into()));
+                p.insert(
+                    "name".to_string(),
+                    pelago_core::Value::String("Alice".into()),
+                );
                 p.insert("age".to_string(), pelago_core::Value::Int(30));
                 p
             },
@@ -217,15 +220,21 @@ mod cache_validation {
         store.put_node("testdb", "default", &node).unwrap();
 
         // Get
-        let cached = store.get_node("testdb", "default", "Person", "1_42").unwrap();
+        let cached = store
+            .get_node("testdb", "default", "Person", "1_42")
+            .unwrap();
         assert!(cached.is_some());
         let cached = cached.unwrap();
         assert_eq!(cached.id, "1_42");
         assert_eq!(cached.entity_type, "Person");
 
         // Delete
-        store.delete_node("testdb", "default", "Person", "1_42").unwrap();
-        let gone = store.get_node("testdb", "default", "Person", "1_42").unwrap();
+        store
+            .delete_node("testdb", "default", "Person", "1_42")
+            .unwrap();
+        let gone = store
+            .get_node("testdb", "default", "Person", "1_42")
+            .unwrap();
         assert!(gone.is_none());
     }
 

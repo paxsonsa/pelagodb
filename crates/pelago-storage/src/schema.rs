@@ -18,7 +18,7 @@ use crate::jobs::{JobStore, JobType};
 use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
-use pelago_core::schema::{EntitySchema, IndexType};
+use pelago_core::schema::{EntitySchema, IndexType, OwnershipMode};
 use pelago_core::PelagoError;
 use std::sync::Arc;
 
@@ -80,11 +80,7 @@ impl SchemaRegistry {
         }
 
         // Name must be alphanumeric with underscores
-        if !schema
-            .name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_')
-        {
+        if !schema.name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return Err(PelagoError::SchemaValidation {
                 message: format!(
                     "Schema name '{}' contains invalid characters (only alphanumeric and underscore allowed)",
@@ -120,6 +116,17 @@ impl SchemaRegistry {
                         ),
                     });
                 }
+            }
+
+            // Independent edge ownership is intentionally disabled in v1 to
+            // keep single-owner conflict semantics deterministic.
+            if edge_def.ownership == OwnershipMode::Independent {
+                return Err(PelagoError::SchemaValidation {
+                    message: format!(
+                        "Edge '{}' uses ownership=independent, which is not supported in v1",
+                        edge_name
+                    ),
+                });
             }
         }
 
@@ -179,15 +186,13 @@ impl SchemaRegistry {
             .map_err(|e| PelagoError::Internal(format!("Schema registration failed: {}", e)))?;
 
         // Update cache
-        self.cache
-            .insert(database, namespace, schema.clone())
-            .await;
+        self.cache.insert(database, namespace, schema.clone()).await;
 
         // Auto-create IndexBackfill jobs for newly indexed properties on schema updates
         if current_version > 0 {
-            if let Ok(Some(old_schema)) =
-                self.get_schema_version(database, namespace, &schema.name, current_version)
-                    .await
+            if let Ok(Some(old_schema)) = self
+                .get_schema_version(database, namespace, &schema.name, current_version)
+                .await
             {
                 let job_store = JobStore::new(self.db.clone());
                 for (prop_name, new_def) in &schema.properties {
@@ -255,9 +260,7 @@ impl SchemaRegistry {
         let schema: EntitySchema = decode_cbor(&schema_bytes)?;
 
         // Cache it
-        self.cache
-            .insert(database, namespace, schema.clone())
-            .await;
+        self.cache.insert(database, namespace, schema.clone()).await;
 
         Ok(Some(Arc::new(schema)))
     }
@@ -365,7 +368,9 @@ impl SchemaRegistry {
 
     /// Invalidate a cached schema (force reload on next access)
     pub async fn invalidate_cache(&self, database: &str, namespace: &str, entity_type: &str) {
-        self.cache.invalidate(database, namespace, entity_type).await;
+        self.cache
+            .invalidate(database, namespace, entity_type)
+            .await;
     }
 }
 

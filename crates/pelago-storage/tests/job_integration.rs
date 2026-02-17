@@ -5,12 +5,12 @@
 //! Run with:
 //!   LIBRARY_PATH=/usr/local/lib cargo test --test job_integration -- --ignored --nocapture
 
-use pelago_core::schema::{EntitySchema, IndexType, PropertyDef};
+use pelago_core::schema::{EdgeDef, EdgeTarget, EntitySchema, IndexType, PropertyDef};
 use pelago_core::{PropertyType, Value};
 use pelago_storage::job_executor::executor_for_job;
 use pelago_storage::{
-    IdAllocator, JobStatus, JobStore, JobType, NodeStore, PelagoDb, SchemaCache, SchemaRegistry,
-    Subspace,
+    EdgeStore, IdAllocator, JobStatus, JobStore, JobType, NodeRef, NodeStore, PelagoDb,
+    SchemaCache, SchemaRegistry, Subspace,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,7 +60,14 @@ async fn setup() -> (
     ));
     let job_store = JobStore::new(db.clone());
 
-    (db, database, namespace, schema_registry, node_store, job_store)
+    (
+        db,
+        database,
+        namespace,
+        schema_registry,
+        node_store,
+        job_store,
+    )
 }
 
 #[tokio::test]
@@ -311,15 +318,12 @@ async fn test_index_backfill_job() {
             )
         })
         .expect("IndexBackfill job should have been auto-created");
-    println!(
-        "✓ IndexBackfill job auto-created: {}",
-        backfill_job.job_id
-    );
+    println!("✓ IndexBackfill job auto-created: {}", backfill_job.job_id);
 
     // 6. Run the executor to completion
     let mut job = backfill_job.clone();
-    let executor = executor_for_job(&job, Arc::clone(&schema_registry))
-        .expect("Failed to create executor");
+    let executor =
+        executor_for_job(&job, Arc::clone(&schema_registry)).expect("Failed to create executor");
 
     job.status = JobStatus::Running;
     loop {
@@ -557,5 +561,113 @@ async fn test_job_resumes_after_interruption() {
     println!(
         "✓ All {} index entries verified after interrupted+resumed backfill",
         index_entries.len()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires native FDB - run with --ignored --nocapture"]
+async fn test_orphaned_edge_cleanup_job() {
+    let (db, database, namespace, schema_registry, node_store, job_store) = setup().await;
+
+    let deleted_schema = EntitySchema::new("Deleted")
+        .with_property("name", PropertyDef::new(PropertyType::String).required())
+        .with_edge(
+            "LINKED_TO",
+            EdgeDef::new(EdgeTarget::specific("Other")).bidirectional(),
+        );
+    schema_registry
+        .register_schema(&database, &namespace, deleted_schema)
+        .await
+        .unwrap();
+
+    let other_schema = EntitySchema::new("Other")
+        .with_property("name", PropertyDef::new(PropertyType::String).required());
+    schema_registry
+        .register_schema(&database, &namespace, other_schema)
+        .await
+        .unwrap();
+
+    let mut deleted_props = HashMap::new();
+    deleted_props.insert("name".to_string(), Value::String("gone".to_string()));
+    let deleted_node = node_store
+        .create_node(&database, &namespace, "Deleted", deleted_props)
+        .await
+        .unwrap();
+
+    let mut other_props = HashMap::new();
+    other_props.insert("name".to_string(), Value::String("kept".to_string()));
+    let other_node = node_store
+        .create_node(&database, &namespace, "Other", other_props)
+        .await
+        .unwrap();
+
+    let edge_store = EdgeStore::new(
+        db.clone(),
+        Arc::clone(&schema_registry),
+        Arc::new(IdAllocator::new(db.clone(), 1, 100)),
+        Arc::clone(&node_store),
+        "1".to_string(),
+    );
+    edge_store
+        .create_edge(
+            &database,
+            &namespace,
+            NodeRef::new(&database, &namespace, "Deleted", &deleted_node.id),
+            NodeRef::new(&database, &namespace, "Other", &other_node.id),
+            "LINKED_TO",
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let edge_subspace = Subspace::namespace(&database, &namespace).edge();
+    let before = db
+        .get_range(
+            edge_subspace.prefix(),
+            &edge_subspace.range_end().to_vec(),
+            1000,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !before.is_empty(),
+        "edge keys should exist before orphan cleanup"
+    );
+
+    let mut job = job_store
+        .create_job(
+            &database,
+            &namespace,
+            JobType::OrphanedEdgeCleanup {
+                deleted_entity_type: "Deleted".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    let executor = executor_for_job(&job, Arc::clone(&schema_registry)).unwrap();
+
+    job.status = JobStatus::Running;
+    loop {
+        let more = executor.execute_batch(&mut job, &db, 64).await.unwrap();
+        if !more {
+            break;
+        }
+    }
+    assert!(
+        job.processed_items > 0,
+        "cleanup job should process at least one metadata row"
+    );
+
+    let after = db
+        .get_range(
+            edge_subspace.prefix(),
+            &edge_subspace.range_end().to_vec(),
+            1000,
+        )
+        .await
+        .unwrap();
+    assert!(
+        after.is_empty(),
+        "all edge keys should be removed by cleanup"
     );
 }
