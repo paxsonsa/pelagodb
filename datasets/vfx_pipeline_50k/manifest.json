@@ -1,0 +1,105 @@
+{
+  "name": "vfx_pipeline_50k",
+  "description": "Deterministic VFX production graph split across 12 show namespaces.",
+  "entity_types": [
+    "Studio",
+    "Artist",
+    "Department",
+    "Tool",
+    "Show",
+    "Sequence",
+    "Shot",
+    "Task",
+    "Asset",
+    "Reviewable",
+    "Review",
+    "Note"
+  ],
+  "counts": {
+    "shows": 12,
+    "sequences_per_show": 20,
+    "shots_per_sequence": 18,
+    "tasks_per_shot": 4,
+    "assets_per_show": 560,
+    "artists_per_show_base": 300,
+    "first_show_artist_bonus": 152
+  },
+  "load": [
+    {
+      "dataset": "vfx_pipeline_50k/show_001",
+      "namespace": "vfx.show.001",
+      "nodes": 4306,
+      "edges": 13265
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_002",
+      "namespace": "vfx.show.002",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_003",
+      "namespace": "vfx.show.003",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_004",
+      "namespace": "vfx.show.004",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_005",
+      "namespace": "vfx.show.005",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_006",
+      "namespace": "vfx.show.006",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_007",
+      "namespace": "vfx.show.007",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_008",
+      "namespace": "vfx.show.008",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_009",
+      "namespace": "vfx.show.009",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_010",
+      "namespace": "vfx.show.010",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_011",
+      "namespace": "vfx.show.011",
+      "nodes": 4154,
+      "edges": 12809
+    },
+    {
+      "dataset": "vfx_pipeline_50k/show_012",
+      "namespace": "vfx.show.012",
+      "nodes": 4154,
+      "edges": 12809
+    }
+  ],
+  "totals": {
+    "nodes": 50000,
+    "edges": 154164
+  }
+}

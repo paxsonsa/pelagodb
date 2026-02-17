@@ -1,0 +1,360 @@
+[
+  {
+    "name": "Studio",
+    "properties": {
+      "studio_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "region": {
+        "type": "string",
+        "index": "equality"
+      },
+      "active_shows": {
+        "type": "int",
+        "index": "range"
+      }
+    },
+    "edges": {
+      "has_department": {
+        "target": "Department",
+        "direction": "outgoing"
+      },
+      "owns_show": {
+        "target": "Show",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Department",
+    "properties": {
+      "department_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "discipline": {
+        "type": "string",
+        "index": "equality"
+      }
+    },
+    "edges": {
+      "staffed_by": {
+        "target": "Artist",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Artist",
+    "properties": {
+      "badge_id": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "discipline": {
+        "type": "string",
+        "index": "equality"
+      },
+      "seniority": {
+        "type": "string",
+        "index": "equality"
+      },
+      "timezone": {
+        "type": "string",
+        "index": "equality"
+      }
+    },
+    "edges": {
+      "uses_tool": {
+        "target": "Tool",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Tool",
+    "properties": {
+      "tool_id": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "vendor": {
+        "type": "string",
+        "index": "equality"
+      },
+      "major_version": {
+        "type": "int",
+        "index": "range"
+      }
+    }
+  },
+  {
+    "name": "Show",
+    "properties": {
+      "show_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "title": {
+        "type": "string",
+        "required": true
+      },
+      "phase": {
+        "type": "string",
+        "index": "equality"
+      },
+      "priority": {
+        "type": "int",
+        "index": "range"
+      }
+    },
+    "edges": {
+      "has_sequence": {
+        "target": "Sequence",
+        "direction": "outgoing"
+      },
+      "has_asset": {
+        "target": "Asset",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Sequence",
+    "properties": {
+      "sequence_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "order": {
+        "type": "int",
+        "index": "range"
+      }
+    },
+    "edges": {
+      "has_shot": {
+        "target": "Shot",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Shot",
+    "properties": {
+      "shot_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "order": {
+        "type": "int",
+        "index": "range"
+      },
+      "cut_duration_frames": {
+        "type": "int",
+        "index": "range"
+      }
+    },
+    "edges": {
+      "has_task": {
+        "target": "Task",
+        "direction": "outgoing"
+      },
+      "has_reviewable": {
+        "target": "Reviewable",
+        "direction": "outgoing"
+      },
+      "next_shot": {
+        "target": "Shot",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Task",
+    "properties": {
+      "task_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "stage": {
+        "type": "string",
+        "index": "equality"
+      },
+      "status": {
+        "type": "string",
+        "index": "equality"
+      },
+      "priority": {
+        "type": "int",
+        "index": "range"
+      }
+    },
+    "edges": {
+      "depends_on": {
+        "target": "Task",
+        "direction": "outgoing"
+      },
+      "assigned_to": {
+        "target": "Artist",
+        "direction": "outgoing"
+      },
+      "uses_tool": {
+        "target": "Tool",
+        "direction": "outgoing"
+      },
+      "produces_reviewable": {
+        "target": "Reviewable",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Asset",
+    "properties": {
+      "asset_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "name": {
+        "type": "string",
+        "required": true
+      },
+      "kind": {
+        "type": "string",
+        "index": "equality"
+      },
+      "version": {
+        "type": "int",
+        "index": "range"
+      }
+    },
+    "edges": {
+      "created_by": {
+        "target": "Artist",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Reviewable",
+    "properties": {
+      "reviewable_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "kind": {
+        "type": "string",
+        "index": "equality"
+      },
+      "frame_count": {
+        "type": "int",
+        "index": "range"
+      }
+    },
+    "edges": {
+      "uses_asset": {
+        "target": "Asset",
+        "direction": "outgoing"
+      },
+      "has_review": {
+        "target": "Review",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Review",
+    "properties": {
+      "review_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "status": {
+        "type": "string",
+        "index": "equality"
+      },
+      "score": {
+        "type": "int",
+        "index": "range"
+      }
+    },
+    "edges": {
+      "has_note": {
+        "target": "Note",
+        "direction": "outgoing"
+      },
+      "targets_task": {
+        "target": "Task",
+        "direction": "outgoing"
+      }
+    }
+  },
+  {
+    "name": "Note",
+    "properties": {
+      "note_code": {
+        "type": "string",
+        "required": true,
+        "index": "unique"
+      },
+      "severity": {
+        "type": "string",
+        "index": "equality"
+      },
+      "line": {
+        "type": "int",
+        "index": "range"
+      },
+      "message": {
+        "type": "string",
+        "required": true
+      }
+    },
+    "edges": {
+      "authored_by": {
+        "target": "Artist",
+        "direction": "outgoing"
+      }
+    }
+  }
+]
