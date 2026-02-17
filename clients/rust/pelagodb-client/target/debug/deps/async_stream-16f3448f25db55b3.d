@@ -1,0 +1,8 @@
+/Users/apaxson/work/projects/pelagodb/.codex/worktrees/pelagodb-spec-v1/clients/rust/pelagodb-client/target/debug/deps/async_stream-16f3448f25db55b3.d: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/async_stream.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/next.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/yielder.rs
+
+/Users/apaxson/work/projects/pelagodb/.codex/worktrees/pelagodb-spec-v1/clients/rust/pelagodb-client/target/debug/deps/libasync_stream-16f3448f25db55b3.rmeta: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/async_stream.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/next.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/yielder.rs
+
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/lib.rs:
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/async_stream.rs:
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/next.rs:
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-stream-0.3.6/src/yielder.rs:
