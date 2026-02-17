@@ -3,11 +3,7 @@ use pelago_query::pql::*;
 fn person_schema() -> SchemaInfo {
     SchemaInfo {
         entity_type: "Person".to_string(),
-        fields: vec![
-            "name".to_string(),
-            "age".to_string(),
-            "email".to_string(),
-        ],
+        fields: vec!["name".to_string(), "age".to_string(), "email".to_string()],
         edges: vec!["KNOWS".to_string(), "WORKS_AT".to_string()],
         allow_undeclared_edges: false,
     }
@@ -146,9 +142,7 @@ fn test_compile_with_limit_directive() {
     let blocks = resolve_and_compile(input);
 
     match &blocks[0] {
-        CompiledBlock::FindNodes {
-            limit, offset, ..
-        } => {
+        CompiledBlock::FindNodes { limit, offset, .. } => {
             assert_eq!(*limit, Some(10));
             assert_eq!(*offset, Some(5));
         }
@@ -352,9 +346,7 @@ fn test_compile_type_with_limit_only() {
     let blocks = resolve_and_compile(input);
 
     match &blocks[0] {
-        CompiledBlock::FindNodes {
-            limit, offset, ..
-        } => {
+        CompiledBlock::FindNodes { limit, offset, .. } => {
             assert_eq!(*limit, Some(5));
             assert_eq!(*offset, None);
         }

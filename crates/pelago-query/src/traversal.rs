@@ -9,7 +9,9 @@
 
 use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::{PelagoError, Value};
-use pelago_storage::{EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode};
+use pelago_storage::{
+    EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -250,8 +252,16 @@ impl TraversalEngine {
             }
             for entry in state.frontier {
                 // Rebuild the path by fetching each node along the recorded path
-                let first_et = &entry.path_keys.first().map(|(et, _)| et.as_str()).unwrap_or(start_entity_type);
-                let first_id = &entry.path_keys.first().map(|(_, id)| id.as_str()).unwrap_or(start_node_id);
+                let first_et = &entry
+                    .path_keys
+                    .first()
+                    .map(|(et, _)| et.as_str())
+                    .unwrap_or(start_entity_type);
+                let first_id = &entry
+                    .path_keys
+                    .first()
+                    .map(|(_, id)| id.as_str())
+                    .unwrap_or(start_node_id);
                 let path_start = node_store
                     .get_node(database, namespace, first_et, first_id)
                     .await?
@@ -340,14 +350,16 @@ impl TraversalEngine {
             let current_node = current_path.end_node();
 
             // Get edges from current node
-            let edges = self.get_edges_for_hop(
-                &edge_store,
-                database,
-                namespace,
-                &current_node.entity_type,
-                &current_node.id,
-                hop,
-            ).await?;
+            let edges = self
+                .get_edges_for_hop(
+                    &edge_store,
+                    database,
+                    namespace,
+                    &current_node.entity_type,
+                    &current_node.id,
+                    hop,
+                )
+                .await?;
 
             // Filter edges if needed
             let filtered_edges = if let Some(ref filter) = hop.edge_filter {
@@ -382,7 +394,12 @@ impl TraversalEngine {
 
                 // Fetch target node
                 let target_node = match node_store
-                    .get_node(database, namespace, &target_ref.entity_type, &target_ref.node_id)
+                    .get_node(
+                        database,
+                        namespace,
+                        &target_ref.entity_type,
+                        &target_ref.node_id,
+                    )
                     .await?
                 {
                     Some(n) => n,
@@ -415,7 +432,8 @@ impl TraversalEngine {
                     let end = path.end_node();
                     let node_key = format!("{}:{}", end.entity_type, end.id);
                     // Build path keys from the traversal path
-                    let mut path_keys = vec![(path.start.entity_type.clone(), path.start.id.clone())];
+                    let mut path_keys =
+                        vec![(path.start.entity_type.clone(), path.start.id.clone())];
                     for h in &path.hops {
                         path_keys.push((h.node.entity_type.clone(), h.node.id.clone()));
                     }
@@ -475,10 +493,18 @@ impl TraversalEngine {
         let start_node_id = start_node_id.to_string();
 
         tokio::spawn(async move {
-            let engine = TraversalEngine::with_config(db, schema_registry, id_allocator, site_id, config);
+            let engine =
+                TraversalEngine::with_config(db, schema_registry, id_allocator, site_id, config);
 
             match engine
-                .traverse(&database, &namespace, &start_entity_type, &start_node_id, &hops, None)
+                .traverse(
+                    &database,
+                    &namespace,
+                    &start_entity_type,
+                    &start_node_id,
+                    &hops,
+                    None,
+                )
                 .await
             {
                 Ok(results) => {
@@ -518,7 +544,14 @@ impl TraversalEngine {
         };
 
         let edges = edge_store
-            .list_edges(database, namespace, entity_type, node_id, label_filter, 1000)
+            .list_edges(
+                database,
+                namespace,
+                entity_type,
+                node_id,
+                label_filter,
+                1000,
+            )
             .await?;
 
         // Filter by direction and labels
@@ -535,7 +568,8 @@ impl TraversalEngine {
                     }
                     TraversalDirection::Both => {
                         (edge.source.entity_type == entity_type && edge.source.node_id == node_id)
-                            || (edge.target.entity_type == entity_type && edge.target.node_id == node_id)
+                            || (edge.target.entity_type == entity_type
+                                && edge.target.node_id == node_id)
                     }
                 };
 
@@ -571,11 +605,7 @@ impl TraversalEngine {
     }
 
     /// Check if an edge matches a CEL filter
-    fn matches_edge_filter(
-        &self,
-        edge: &StoredEdge,
-        filter: &str,
-    ) -> Result<bool, PelagoError> {
+    fn matches_edge_filter(&self, edge: &StoredEdge, filter: &str) -> Result<bool, PelagoError> {
         use cel_interpreter::{Context, Program, Value as CelValue};
 
         let program = Program::compile(filter).map_err(|e| PelagoError::CelSyntax {
@@ -598,11 +628,7 @@ impl TraversalEngine {
     }
 
     /// Check if a node matches a CEL filter
-    fn matches_node_filter(
-        &self,
-        node: &StoredNode,
-        filter: &str,
-    ) -> Result<bool, PelagoError> {
+    fn matches_node_filter(&self, node: &StoredNode, filter: &str) -> Result<bool, PelagoError> {
         // Simple implementation - compile and evaluate
         // In a full implementation, we'd cache compiled expressions
         use cel_interpreter::{Context, Program, Value as CelValue};

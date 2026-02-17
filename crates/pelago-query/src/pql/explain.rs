@@ -69,7 +69,10 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                 }
                 for (j, step) in steps.iter().enumerate() {
                     output.push_str(&format!("  Step {}:\n", j + 1));
-                    output.push_str(&format!("    Edge: {} {}\n", step.edge_type, step.direction));
+                    output.push_str(&format!(
+                        "    Edge: {} {}\n",
+                        step.edge_type, step.direction
+                    ));
                     if let Some(ef) = &step.edge_filter {
                         output.push_str(&format!("    Edge filter: {}\n", ef));
                     }
@@ -77,10 +80,7 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                         output.push_str(&format!("    Node filter: {}\n", nf));
                     }
                     if !step.fields.is_empty() {
-                        output.push_str(&format!(
-                            "    Fields: [{}]\n",
-                            step.fields.join(", ")
-                        ));
+                        output.push_str(&format!("    Fields: [{}]\n", step.fields.join(", ")));
                     }
                     if !step.edge_fields.is_empty() {
                         output.push_str(&format!(
@@ -94,10 +94,7 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                     if let Some(sort) = &step.sort {
                         let order = if sort.descending { "desc" } else { "asc" };
                         let target = if sort.on_edge { " (on edge)" } else { "" };
-                        output.push_str(&format!(
-                            "    Sort: {} {}{}\n",
-                            sort.field, order, target
-                        ));
+                        output.push_str(&format!("    Sort: {} {}{}\n", sort.field, order, target));
                     }
                 }
             }

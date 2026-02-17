@@ -63,8 +63,7 @@ impl QueryPlanner {
         let predicates = Self::extract_predicates(cel_expression)?;
 
         // Find the best index to use
-        let (primary_plan, used_predicate_idx) =
-            Self::select_best_index(schema, &predicates)?;
+        let (primary_plan, used_predicate_idx) = Self::select_best_index(schema, &predicates)?;
 
         // Build residual filter from remaining predicates
         let residual = Self::build_residual(&predicates, used_predicate_idx, cel_expression);
@@ -143,9 +142,7 @@ impl QueryPlanner {
         let s = s.trim();
 
         // String literal
-        if (s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\''))
-        {
+        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
             return Some(PredicateValue::String(s[1..s.len() - 1].to_string()));
         }
 
@@ -349,9 +346,14 @@ mod tests {
     #[test]
     fn test_plan_unique_index() {
         let schema = make_test_schema();
-        let plan =
-            QueryPlanner::plan("Person", "email == 'alice@example.com'", &schema, None, None)
-                .unwrap();
+        let plan = QueryPlanner::plan(
+            "Person",
+            "email == 'alice@example.com'",
+            &schema,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(matches!(
             plan.primary_plan,
@@ -400,7 +402,12 @@ mod tests {
         .unwrap();
 
         // Should use the unique index on email
-        if let QueryPlan::IndexScan { property, index_type, .. } = &plan.primary_plan {
+        if let QueryPlan::IndexScan {
+            property,
+            index_type,
+            ..
+        } = &plan.primary_plan
+        {
             assert_eq!(property, "email");
             assert_eq!(*index_type, IndexType::Unique);
         } else {

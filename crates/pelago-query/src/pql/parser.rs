@@ -240,53 +240,43 @@ fn parse_root_function(pair: pest::iterators::Pair<Rule>) -> Result<RootFunction
 }
 
 fn parse_qualified_ref(pair: pest::iterators::Pair<Rule>) -> Result<QualifiedRef, PqlParseError> {
-    let mut parts: Vec<String> = Vec::new();
-    for p in pair.into_inner() {
-        match p.as_rule() {
-            Rule::ident | Rule::node_id => parts.push(p.as_str().to_string()),
-            _ => {}
-        }
-    }
-
-    match parts.len() {
-        3 => Ok(QualifiedRef {
-            namespace: Some(parts[0].clone()),
-            entity_type: parts[1].clone(),
-            node_id: parts[2].clone(),
-        }),
-        2 => Ok(QualifiedRef {
+    let raw = pair.as_str();
+    let parts: Vec<&str> = raw.split(':').collect();
+    match parts.as_slice() {
+        [entity_type, node_id] => Ok(QualifiedRef {
             namespace: None,
-            entity_type: parts[0].clone(),
-            node_id: parts[1].clone(),
+            entity_type: (*entity_type).to_string(),
+            node_id: (*node_id).to_string(),
+        }),
+        [namespace, entity_type, node_id] => Ok(QualifiedRef {
+            namespace: Some((*namespace).to_string()),
+            entity_type: (*entity_type).to_string(),
+            node_id: (*node_id).to_string(),
         }),
         _ => Err(PqlParseError::Syntax {
             line: 0,
             col: 0,
-            message: "Invalid qualified reference".to_string(),
+            message: format!("Invalid qualified reference: {}", raw),
         }),
     }
 }
 
 fn parse_qualified_type(pair: pest::iterators::Pair<Rule>) -> Result<QualifiedType, PqlParseError> {
-    let idents: Vec<String> = pair
-        .into_inner()
-        .filter(|p| p.as_rule() == Rule::ident)
-        .map(|p| p.as_str().to_string())
-        .collect();
-
-    match idents.len() {
-        2 => Ok(QualifiedType {
-            namespace: Some(idents[0].clone()),
-            entity_type: idents[1].clone(),
-        }),
-        1 => Ok(QualifiedType {
+    let raw = pair.as_str();
+    let parts: Vec<&str> = raw.split(':').collect();
+    match parts.as_slice() {
+        [entity_type] => Ok(QualifiedType {
             namespace: None,
-            entity_type: idents[0].clone(),
+            entity_type: (*entity_type).to_string(),
+        }),
+        [namespace, entity_type] => Ok(QualifiedType {
+            namespace: Some((*namespace).to_string()),
+            entity_type: (*entity_type).to_string(),
         }),
         _ => Err(PqlParseError::Syntax {
             line: 0,
             col: 0,
-            message: "Invalid qualified type".to_string(),
+            message: format!("Invalid qualified type: {}", raw),
         }),
     }
 }
@@ -323,9 +313,7 @@ fn parse_selection(pair: pest::iterators::Pair<Rule>) -> Result<Selection, PqlPa
     }
 }
 
-fn parse_edge_traversal(
-    pair: pest::iterators::Pair<Rule>,
-) -> Result<EdgeTraversal, PqlParseError> {
+fn parse_edge_traversal(pair: pest::iterators::Pair<Rule>) -> Result<EdgeTraversal, PqlParseError> {
     let mut capture_as = None;
     let mut edge_namespace = None;
     let mut edge_type = String::new();
@@ -347,8 +335,7 @@ fn parse_edge_traversal(
                             let label_parts: Vec<_> = ep.into_inner().collect();
                             if label_parts.len() == 2 {
                                 // ns:TYPE
-                                edge_namespace =
-                                    Some(label_parts[0].as_str().to_string());
+                                edge_namespace = Some(label_parts[0].as_str().to_string());
                                 edge_type = label_parts[1].as_str().to_string();
                             } else {
                                 edge_type = label_parts[0].as_str().to_string();
@@ -395,21 +382,11 @@ fn parse_directive(pair: pest::iterators::Pair<Rule>) -> Result<Directive, PqlPa
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::filter_directive => {
-            let expr = inner
-                .into_inner()
-                .next()
-                .unwrap()
-                .as_str()
-                .to_string();
+            let expr = inner.into_inner().next().unwrap().as_str().to_string();
             Ok(Directive::Filter(expr))
         }
         Rule::edge_directive => {
-            let expr = inner
-                .into_inner()
-                .next()
-                .unwrap()
-                .as_str()
-                .to_string();
+            let expr = inner.into_inner().next().unwrap().as_str().to_string();
             Ok(Directive::Edge(expr))
         }
         Rule::cascade_directive => Ok(Directive::Cascade),
@@ -484,9 +461,7 @@ fn parse_directive(pair: pest::iterators::Pair<Rule>) -> Result<Directive, PqlPa
             Ok(Directive::GroupBy(fields))
         }
         Rule::explain_directive => Ok(Directive::Explain),
-        _ => Err(PqlParseError::InvalidDirective(
-            inner.as_str().to_string(),
-        )),
+        _ => Err(PqlParseError::InvalidDirective(inner.as_str().to_string())),
     }
 }
 

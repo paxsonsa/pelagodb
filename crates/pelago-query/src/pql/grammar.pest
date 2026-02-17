@@ -17,8 +17,8 @@ full_query = { "query" ~ ident? ~ "{" ~ query_block+ ~ "}" }
 // Query block: optional_var_capture block_name(func: root_func) @directives { selections }
 query_block = { (ident ~ "as")? ~ ident ~ "(" ~ "func" ~ ":" ~ root_function ~ ")" ~ directive* ~ selection_block }
 
-// Root functions
-root_function = { uid_var_func | uid_set_func | uid_func | type_func | eq_func | ge_func | le_func | gt_func | lt_func | between_func | has_func | allofterms_func }
+// Root functions (ordered from most-specific to least-specific)
+root_function = { uid_func | uid_set_func | uid_var_func | type_func | eq_func | ge_func | le_func | gt_func | lt_func | between_func | has_func | allofterms_func }
 
 uid_func      = { "uid" ~ "(" ~ qualified_ref ~ ")" }
 uid_var_func   = { "uid" ~ "(" ~ ident ~ ")" }
@@ -34,14 +34,18 @@ has_func      = { "has" ~ "(" ~ ident ~ ")" }
 allofterms_func = { "allofterms" ~ "(" ~ ident ~ "," ~ string_literal ~ ")" }
 
 // Qualified references: ns:Type:id or Type:id
-qualified_ref  = { (ident ~ ":")? ~ ident ~ ":" ~ node_id }
-qualified_type = { (ident ~ ":")? ~ ident }
+qualified_ref  = { qualified_ref_ns | qualified_ref_local }
+qualified_ref_ns = { ident ~ ":" ~ ident ~ ":" ~ node_id }
+qualified_ref_local = { ident ~ ":" ~ node_id }
+qualified_type = { qualified_type_ns | qualified_type_local }
+qualified_type_ns = { ident ~ ":" ~ ident }
+qualified_type_local = { ident }
 
 // Node ID: alphanumeric with underscores and hyphens
 node_id = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
 
-// Selection block
-selection_block = { "{" ~ selection* ~ "}" }
+// Selection block (supports optional commas between selections)
+selection_block = { "{" ~ (selection ~ ","?)* ~ "}" }
 
 // Individual selection
 selection = { value_var | aggregate_expr | edge_traversal | field_name }

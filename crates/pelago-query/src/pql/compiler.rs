@@ -87,7 +87,10 @@ impl PqlCompiler {
                 if has_edge_traversals(&block.selections) {
                     let steps = compile_edge_traversals(&block.selections);
                     let max_depth = self.extract_recurse_depth(&block.directives);
-                    let cascade = block.directives.iter().any(|d| matches!(d, Directive::Cascade));
+                    let cascade = block
+                        .directives
+                        .iter()
+                        .any(|d| matches!(d, Directive::Cascade));
                     let max_results = self.extract_limit(&block.directives).unwrap_or(1000);
                     Ok(CompiledBlock::Traverse {
                         block_name: block.name.clone(),
@@ -258,7 +261,11 @@ fn compile_single_edge(edge: &EdgeTraversal) -> CompiledStep {
             Directive::Edge(expr) => edge_filter = Some(expr.clone()),
             Directive::Filter(expr) => node_filter = Some(expr.clone()),
             Directive::Limit { first, .. } => per_node_limit = Some(*first),
-            Directive::Sort { field, desc, on_edge } => {
+            Directive::Sort {
+                field,
+                desc,
+                on_edge,
+            } => {
                 sort = Some(CompiledSort {
                     field: field.clone(),
                     descending: *desc,

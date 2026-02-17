@@ -193,7 +193,10 @@ impl QueryExecutor {
             self.site_id.clone(),
         );
 
-        match node_store.get_node(database, namespace, entity_type, node_id).await? {
+        match node_store
+            .get_node(database, namespace, entity_type, node_id)
+            .await?
+        {
             Some(node) => Ok(vec![node]),
             None => Ok(vec![]),
         }
@@ -219,7 +222,9 @@ impl QueryExecutor {
             pelago_core::schema::IndexType::Equality => markers::EQUALITY,
             pelago_core::schema::IndexType::Range => markers::RANGE,
             pelago_core::schema::IndexType::None => {
-                return Err(PelagoError::Internal("Cannot scan non-indexed property".into()))
+                return Err(PelagoError::Internal(
+                    "Cannot scan non-indexed property".into(),
+                ))
             }
         };
 
@@ -329,7 +334,8 @@ impl QueryExecutor {
                     // Value is the node_id
                     value
                 }
-                pelago_core::schema::IndexType::Equality | pelago_core::schema::IndexType::Range => {
+                pelago_core::schema::IndexType::Equality
+                | pelago_core::schema::IndexType::Range => {
                     // Node ID is the last component of the key
                     // This is a simplification - proper implementation would parse the tuple
                     extract_node_id_from_index_key(&key)?
@@ -377,10 +383,7 @@ impl QueryExecutor {
         let data_subspace = subspace.data();
 
         // Build key range for all nodes of this type
-        let prefix = data_subspace
-            .pack()
-            .add_string(entity_type)
-            .build();
+        let prefix = data_subspace.pack().add_string(entity_type).build();
 
         let mut range_end = prefix.to_vec();
         range_end.push(0xFF);
@@ -445,7 +448,8 @@ impl QueryExecutor {
         let config = ExecutorConfig::default();
 
         tokio::spawn(async move {
-            let executor = QueryExecutor::with_config(db, schema_registry, id_allocator, site_id, config);
+            let executor =
+                QueryExecutor::with_config(db, schema_registry, id_allocator, site_id, config);
 
             match executor.execute(&database, &namespace, &plan).await {
                 Ok(results) => {

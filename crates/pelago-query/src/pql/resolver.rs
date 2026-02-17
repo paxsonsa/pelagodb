@@ -102,8 +102,7 @@ impl PqlResolver {
 
         // First pass: resolve entity types and register variables
         for (i, block) in query.blocks.iter().enumerate() {
-            let (entity_type, depends_on) =
-                self.resolve_root_function(&block.root, &variables)?;
+            let (entity_type, depends_on) = self.resolve_root_function(&block.root, &variables)?;
 
             // Validate entity type exists in schema
             let schema = schemas
@@ -170,10 +169,7 @@ impl PqlResolver {
                     }
                     deps.push(var.clone());
                 }
-                Ok((
-                    entity_type.unwrap_or_default(),
-                    deps,
-                ))
+                Ok((entity_type.unwrap_or_default(), deps))
             }
             RootFunction::Eq(_, _)
             | RootFunction::Ge(_, _)
@@ -214,9 +210,7 @@ impl PqlResolver {
                     }
                 }
                 Selection::Edge(edge) => {
-                    if !schema.allow_undeclared_edges
-                        && !schema.edges.contains(&edge.edge_type)
-                    {
+                    if !schema.allow_undeclared_edges && !schema.edges.contains(&edge.edge_type) {
                         return Err(PqlError::UnknownEdge {
                             entity_type: schema.entity_type.clone(),
                             edge_type: edge.edge_type.clone(),

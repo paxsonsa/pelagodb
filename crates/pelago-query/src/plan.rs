@@ -15,9 +15,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryPlan {
     /// Direct lookup by node ID
-    PointLookup {
-        node_id: String,
-    },
+    PointLookup { node_id: String },
     /// Index scan (unique, equality, or range)
     IndexScan {
         property: String,
@@ -33,7 +31,11 @@ impl QueryPlan {
     pub fn selectivity(&self) -> f64 {
         match self {
             QueryPlan::PointLookup { .. } => 0.001, // Very selective
-            QueryPlan::IndexScan { index_type, predicate, .. } => {
+            QueryPlan::IndexScan {
+                index_type,
+                predicate,
+                ..
+            } => {
                 let base = index_type.selectivity();
                 // Range predicates are less selective than equality
                 match predicate {
@@ -179,19 +181,37 @@ impl QueryExplanation {
                 steps.push(format!("Point lookup for node '{}'", node_id));
                 index_used = None;
             }
-            QueryPlan::IndexScan { property, index_type, predicate } => {
+            QueryPlan::IndexScan {
+                property,
+                index_type,
+                predicate,
+            } => {
                 let (op, val) = match predicate {
                     IndexPredicate::Equals(v) => ("==".to_string(), format!("{:?}", v)),
                     IndexPredicate::Range { lower, upper } => {
                         let op = match (lower, upper) {
                             (Some(_), Some(_)) => "BETWEEN",
-                            (Some(b), None) => if b.inclusive { ">=" } else { ">" },
-                            (None, Some(b)) => if b.inclusive { "<=" } else { "<" },
+                            (Some(b), None) => {
+                                if b.inclusive {
+                                    ">="
+                                } else {
+                                    ">"
+                                }
+                            }
+                            (None, Some(b)) => {
+                                if b.inclusive {
+                                    "<="
+                                } else {
+                                    "<"
+                                }
+                            }
                             (None, None) => "ANY",
                         };
                         (op.to_string(), "range".to_string())
                     }
-                    IndexPredicate::In(values) => ("IN".to_string(), format!("({} values)", values.len())),
+                    IndexPredicate::In(values) => {
+                        ("IN".to_string(), format!("({} values)", values.len()))
+                    }
                 };
                 steps.push(format!("Index scan on {} {} {}", property, op, val));
                 index_used = Some(IndexUsed {
@@ -221,7 +241,11 @@ impl QueryExplanation {
 
         // Simple cost model: rows * 0.001 for scans, + 0.01 per residual filter application
         let base_cost = estimated_rows * 0.001;
-        let filter_cost = if plan.residual_filter.is_some() { estimated_rows * 0.01 } else { 0.0 };
+        let filter_cost = if plan.residual_filter.is_some() {
+            estimated_rows * 0.01
+        } else {
+            0.0
+        };
 
         QueryExplanation {
             strategy: plan.primary_plan.strategy_name().to_string(),
@@ -240,7 +264,13 @@ mod tests {
 
     #[test]
     fn test_query_plan_selectivity() {
-        assert!(QueryPlan::PointLookup { node_id: "1".into() }.selectivity() < 0.01);
+        assert!(
+            QueryPlan::PointLookup {
+                node_id: "1".into()
+            }
+            .selectivity()
+                < 0.01
+        );
 
         let idx_scan = QueryPlan::IndexScan {
             property: "email".into(),
