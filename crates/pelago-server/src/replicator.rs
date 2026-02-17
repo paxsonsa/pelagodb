@@ -4,10 +4,13 @@ use pelago_proto::cdc_operation_proto::Operation;
 use pelago_proto::replication_service_client::ReplicationServiceClient;
 use pelago_proto::{PullCdcEventsRequest, RequestContext};
 use pelago_storage::{
-    append_audit_record, get_replication_positions, update_replication_position, AuditRecord,
-    EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, Versionstamp,
+    append_audit_record, append_cdc_entry, get_replication_positions_scoped, get_replicator_lease,
+    try_acquire_replicator_lease, update_replication_position_scoped, AuditRecord, CdcEntry,
+    CdcOperation, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry,
+    Versionstamp,
 };
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tonic::metadata::MetadataValue;
 use tonic::Request;
@@ -28,6 +31,9 @@ pub struct ReplicatorConfig {
     pub batch_size: usize,
     pub poll_ms: u64,
     pub api_key: Option<String>,
+    pub lease_enabled: bool,
+    pub lease_ttl_ms: u64,
+    pub lease_heartbeat_ms: u64,
     peers: Vec<ReplicationPeer>,
 }
 
@@ -35,6 +41,11 @@ impl ReplicatorConfig {
     pub fn from_server_config(config: &ServerConfig) -> Self {
         let peers = parse_peers(&config.replication_peers);
         let enabled = config.replication_enabled.unwrap_or(!peers.is_empty());
+        let lease_heartbeat_ms = config.replication_lease_heartbeat_ms.max(200);
+        let lease_ttl_ms = config
+            .replication_lease_ttl_ms
+            .max(1_000)
+            .max(lease_heartbeat_ms.saturating_mul(2));
 
         Self {
             enabled,
@@ -49,6 +60,9 @@ impl ReplicatorConfig {
             batch_size: config.replication_batch_size.max(1),
             poll_ms: config.replication_poll_ms.max(50),
             api_key: config.replication_api_key.clone(),
+            lease_enabled: config.replication_lease_enabled,
+            lease_ttl_ms,
+            lease_heartbeat_ms,
             peers,
         }
     }
@@ -75,6 +89,8 @@ pub fn start_replicators(
         return;
     }
 
+    let holder_id = build_replicator_holder_id();
+
     for peer in config.peers().iter().cloned() {
         let db = db.clone();
         let schema_registry = Arc::clone(&schema_registry);
@@ -82,6 +98,7 @@ pub fn start_replicators(
         let cfg = config.clone();
         let shutdown_rx = shutdown_rx.clone();
         let local_site_id = local_site_id.clone();
+        let holder_id = holder_id.clone();
 
         tokio::spawn(async move {
             run_peer_replicator(
@@ -89,6 +106,7 @@ pub fn start_replicators(
                 schema_registry,
                 id_allocator,
                 local_site_id,
+                holder_id,
                 cfg,
                 peer,
                 shutdown_rx,
@@ -103,6 +121,7 @@ async fn run_peer_replicator(
     schema_registry: Arc<SchemaRegistry>,
     id_allocator: Arc<IdAllocator>,
     local_site_id: String,
+    holder_id: String,
     config: ReplicatorConfig,
     peer: ReplicationPeer,
     shutdown_rx: watch::Receiver<bool>,
@@ -113,8 +132,19 @@ async fn run_peer_replicator(
         peer.remote_site_id, peer_endpoint
     );
 
-    let mut after = load_checkpoint(&db, &peer.remote_site_id).await;
+    let mut after = load_checkpoint(
+        &db,
+        &config.database,
+        &config.namespace,
+        &peer.remote_site_id,
+    )
+    .await;
     let mut conflict_count: i64 = 0;
+    let mut has_lease = !config.lease_enabled;
+    let lease_refresh_interval = Duration::from_millis(config.lease_heartbeat_ms);
+    let mut last_lease_refresh = Instant::now()
+        .checked_sub(lease_refresh_interval)
+        .unwrap_or_else(Instant::now);
 
     loop {
         if *shutdown_rx.borrow() {
@@ -124,6 +154,63 @@ async fn run_peer_replicator(
         if shutdown_rx.has_changed().unwrap_or(false) && *shutdown_rx.borrow() {
             info!("replicator for {} shutting down", peer.remote_site_id);
             break;
+        }
+
+        if config.lease_enabled && last_lease_refresh.elapsed() >= lease_refresh_interval {
+            match try_acquire_replicator_lease(
+                &db,
+                &local_site_id,
+                &config.database,
+                &config.namespace,
+                &holder_id,
+                config.lease_ttl_ms,
+            )
+            .await
+            {
+                Ok(Some(lease)) => {
+                    if !has_lease {
+                        info!(
+                            "replicator lease acquired for {}/{} (epoch {})",
+                            config.database, config.namespace, lease.epoch
+                        );
+                    }
+                    has_lease = true;
+                }
+                Ok(None) => {
+                    if has_lease {
+                        info!(
+                            "replicator lease lost for {}/{}; waiting",
+                            config.database, config.namespace
+                        );
+                    }
+                    has_lease = false;
+                }
+                Err(err) => {
+                    warn!(
+                        "replicator lease check failed for {}/{}: {}",
+                        config.database, config.namespace, err
+                    );
+                    has_lease = match get_replicator_lease(
+                        &db,
+                        &local_site_id,
+                        &config.database,
+                        &config.namespace,
+                    )
+                    .await
+                    {
+                        Ok(Some(lease)) => {
+                            lease.holder_id == holder_id && lease.lease_expires_at > now_micros()
+                        }
+                        _ => false,
+                    };
+                }
+            }
+            last_lease_refresh = Instant::now();
+        }
+
+        if !has_lease {
+            tokio::time::sleep(Duration::from_millis(config.poll_ms)).await;
+            continue;
         }
 
         let mut client = match ReplicationServiceClient::connect(peer_endpoint.clone()).await {
@@ -230,6 +317,14 @@ async fn run_peer_replicator(
                 continue;
             }
 
+            let mut mirrored_ops = Vec::new();
+            let entry_timestamp = entry.timestamp;
+            let entry_batch_id = if entry.batch_id.is_empty() {
+                None
+            } else {
+                Some(entry.batch_id.clone())
+            };
+
             let node_store = Arc::new(NodeStore::new(
                 db.clone(),
                 Arc::clone(&schema_registry),
@@ -256,8 +351,10 @@ async fn run_peer_replicator(
                 )
                 .await;
                 match applied {
-                    Ok(true) => {}
-                    Ok(false) => {
+                    Ok(Some(op)) => {
+                        mirrored_ops.push(op);
+                    }
+                    Ok(None) => {
                         conflict_count += 1;
                         record_replication_conflict(
                             &db,
@@ -282,13 +379,41 @@ async fn run_peer_replicator(
                 }
             }
 
+            if !mirrored_ops.is_empty() {
+                let mirror_entry = CdcEntry {
+                    site: peer.remote_site_id.clone(),
+                    timestamp: entry_timestamp,
+                    batch_id: entry_batch_id,
+                    operations: mirrored_ops,
+                };
+                if let Err(err) =
+                    append_cdc_entry(&db, &config.database, &config.namespace, mirror_entry).await
+                {
+                    conflict_count += 1;
+                    record_replication_conflict(
+                        &db,
+                        &peer.remote_site_id,
+                        &config.database,
+                        &config.namespace,
+                        &format!("failed to append mirrored CDC entry: {}", err),
+                    )
+                    .await;
+                }
+            }
+
             after = Some(vs);
             seen_events += 1;
         }
 
-        if let Err(err) =
-            update_replication_position(&db, &peer.remote_site_id, after.clone(), conflict_count)
-                .await
+        if let Err(err) = update_replication_position_scoped(
+            &db,
+            &config.database,
+            &config.namespace,
+            &peer.remote_site_id,
+            after.clone(),
+            conflict_count,
+        )
+        .await
         {
             warn!(
                 "failed to persist replication position for {}: {}",
@@ -310,45 +435,65 @@ async fn apply_replication_op(
     namespace: &str,
     timestamp: i64,
     operation: Option<Operation>,
-) -> Result<bool, pelago_core::PelagoError> {
+) -> Result<Option<CdcOperation>, pelago_core::PelagoError> {
     let Some(op) = operation else {
-        return Ok(false);
+        return Ok(None);
     };
 
     match op {
         Operation::NodeCreate(op) => {
             let props = proto_to_core_properties(&op.properties);
-            node_store
+            let applied = node_store
                 .apply_replica_node_create(
                     database,
                     namespace,
                     &op.entity_type,
                     &op.node_id,
-                    props,
+                    props.clone(),
                     &op.home_site,
                     timestamp,
                     remote_site_id,
                 )
-                .await
+                .await?;
+            if applied {
+                Ok(Some(CdcOperation::NodeCreate {
+                    entity_type: op.entity_type,
+                    node_id: op.node_id,
+                    properties: props,
+                    home_site: op.home_site,
+                }))
+            } else {
+                Ok(None)
+            }
         }
         Operation::NodeUpdate(op) => {
             let changed = proto_to_core_properties(&op.changed_properties);
             let old = proto_to_core_properties(&op.old_properties);
-            node_store
+            let applied = node_store
                 .apply_replica_node_update(
                     database,
                     namespace,
                     &op.entity_type,
                     &op.node_id,
-                    changed,
-                    old,
+                    changed.clone(),
+                    old.clone(),
                     timestamp,
                     remote_site_id,
                 )
-                .await
+                .await?;
+            if applied {
+                Ok(Some(CdcOperation::NodeUpdate {
+                    entity_type: op.entity_type,
+                    node_id: op.node_id,
+                    changed_properties: changed,
+                    old_properties: old,
+                }))
+            } else {
+                Ok(None)
+            }
         }
         Operation::NodeDelete(op) => {
-            node_store
+            let applied = node_store
                 .apply_replica_node_delete(
                     database,
                     namespace,
@@ -357,10 +502,19 @@ async fn apply_replication_op(
                     timestamp,
                     remote_site_id,
                 )
-                .await
+                .await?;
+            if applied {
+                Ok(Some(CdcOperation::NodeDelete {
+                    entity_type: op.entity_type,
+                    node_id: op.node_id,
+                }))
+            } else {
+                Ok(None)
+            }
         }
         Operation::EdgeCreate(op) => {
-            edge_store
+            let props = proto_to_core_properties(&op.properties);
+            let applied = edge_store
                 .apply_replica_edge_create(
                     database,
                     namespace,
@@ -368,14 +522,27 @@ async fn apply_replication_op(
                     NodeRef::new(database, namespace, &op.target_type, &op.target_id),
                     &op.edge_type,
                     &op.edge_id,
-                    proto_to_core_properties(&op.properties),
+                    props.clone(),
                     timestamp,
                     remote_site_id,
                 )
-                .await
+                .await?;
+            if applied {
+                Ok(Some(CdcOperation::EdgeCreate {
+                    source_type: op.source_type,
+                    source_id: op.source_id,
+                    target_type: op.target_type,
+                    target_id: op.target_id,
+                    edge_type: op.edge_type,
+                    edge_id: op.edge_id,
+                    properties: props,
+                }))
+            } else {
+                Ok(None)
+            }
         }
         Operation::EdgeDelete(op) => {
-            edge_store
+            let applied = edge_store
                 .apply_replica_edge_delete(
                     database,
                     namespace,
@@ -385,14 +552,25 @@ async fn apply_replication_op(
                     timestamp,
                     remote_site_id,
                 )
-                .await
+                .await?;
+            if applied {
+                Ok(Some(CdcOperation::EdgeDelete {
+                    source_type: op.source_type,
+                    source_id: op.source_id,
+                    target_type: op.target_type,
+                    target_id: op.target_id,
+                    edge_type: op.edge_type,
+                }))
+            } else {
+                Ok(None)
+            }
         }
         Operation::SchemaRegister(_op) => {
             // Schema body is not included in CDC operations yet.
-            Ok(false)
+            Ok(None)
         }
         Operation::OwnershipTransfer(op) => {
-            node_store
+            let applied = node_store
                 .apply_replica_ownership_transfer(
                     database,
                     namespace,
@@ -403,13 +581,30 @@ async fn apply_replication_op(
                     timestamp,
                     remote_site_id,
                 )
-                .await
+                .await?;
+            if applied {
+                Ok(Some(CdcOperation::OwnershipTransfer {
+                    entity_type: op.entity_type,
+                    node_id: op.node_id,
+                    previous_site_id: op.previous_site_id,
+                    current_site_id: op.current_site_id,
+                }))
+            } else {
+                Ok(None)
+            }
         }
     }
 }
 
-async fn load_checkpoint(db: &PelagoDb, remote_site_id: &str) -> Option<Versionstamp> {
-    let positions = get_replication_positions(db).await.ok()?;
+async fn load_checkpoint(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    remote_site_id: &str,
+) -> Option<Versionstamp> {
+    let positions = get_replication_positions_scoped(db, database, namespace)
+        .await
+        .ok()?;
     positions
         .into_iter()
         .find(|p| p.remote_site_id == remote_site_id)
@@ -467,6 +662,21 @@ fn normalize_endpoint(endpoint: &str) -> String {
     } else {
         format!("http://{}", endpoint)
     }
+}
+
+fn build_replicator_holder_id() -> String {
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::env::var("HOST").ok())
+        .unwrap_or_else(|| "localhost".to_string());
+    format!("{}:{}:{}", host, std::process::id(), Uuid::now_v7())
+}
+
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as i64
 }
 
 #[cfg(test)]
