@@ -126,7 +126,11 @@ pub async fn run(
 
             format_schema_list(&resp.schemas, format);
         }
-        SchemaCommand::Diff { entity_type, v1, v2 } => {
+        SchemaCommand::Diff {
+            entity_type,
+            v1,
+            v2,
+        } => {
             let mut client = conn.schema_client();
             let left = client
                 .get_schema(GetSchemaRequest {
@@ -168,18 +172,12 @@ fn json_to_proto_schema(
     let mut properties = std::collections::HashMap::new();
     if let Some(props) = json.get("properties").and_then(|v| v.as_object()) {
         for (key, val) in props {
-            let type_str = val
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("string");
+            let type_str = val.get("type").and_then(|v| v.as_str()).unwrap_or("string");
             let required = val
                 .get("required")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let index_str = val
-                .get("index")
-                .and_then(|v| v.as_str())
-                .unwrap_or("none");
+            let index_str = val.get("index").and_then(|v| v.as_str()).unwrap_or("none");
 
             properties.insert(
                 key.clone(),

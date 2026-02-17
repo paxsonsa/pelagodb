@@ -38,10 +38,7 @@ pub fn load_config() -> CliConfig {
                         .get("namespace")
                         .and_then(|v| v.as_str())
                         .map(String::from),
-                    format: doc
-                        .get("format")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
+                    format: doc.get("format").and_then(|v| v.as_str()).map(String::from),
                 }
             } else {
                 CliConfig::default()

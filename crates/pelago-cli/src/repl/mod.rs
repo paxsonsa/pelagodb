@@ -52,10 +52,7 @@ pub async fn run(
     let conn = match GrpcConnection::connect(server).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "Warning: Could not connect to server at {}: {}",
-                server, e
-            );
+            eprintln!("Warning: Could not connect to server at {}: {}", server, e);
             eprintln!("REPL will start in offline mode (parse/explain only).\n");
             return run_offline_repl(&mut context).await;
         }
@@ -75,9 +72,7 @@ pub async fn run(
     }
 
     // Fetch schemas for resolution (cache them)
-    let mut schemas = fetch_schemas(&conn, &context)
-        .await
-        .unwrap_or_default();
+    let mut schemas = fetch_schemas(&conn, &context).await.unwrap_or_default();
 
     loop {
         let prompt = format!("{}:{}> ", context.database, context.namespace);
@@ -122,7 +117,13 @@ pub async fn run(
         };
 
         // Execute PQL
-        execute_pql_input(&apply_params(&input, &context.params), &conn, &context, &schemas).await;
+        execute_pql_input(
+            &apply_params(&input, &context.params),
+            &conn,
+            &context,
+            &schemas,
+        )
+        .await;
     }
 
     // Save history
@@ -281,9 +282,7 @@ fn handle_meta_command(
                 if let Some((name, value)) = assignment.split_once('=') {
                     let name = name.trim().trim_start_matches('$');
                     let value = value.trim();
-                    context
-                        .params
-                        .insert(name.to_string(), value.to_string());
+                    context.params.insert(name.to_string(), value.to_string());
                     println!("Set ${} = {}", name, value);
                 } else {
                     println!("Usage: :param $name = value");
@@ -347,9 +346,7 @@ fn print_help() {
     println!("PQL Examples:");
     println!("  Person {{ name, age }}");
     println!("  Person @filter(age >= 30) {{ name, age }}");
-    println!(
-        "  query {{ start(func: uid(Person:1_42)) {{ name, -[KNOWS]-> {{ name }} }} }}"
-    );
+    println!("  query {{ start(func: uid(Person:1_42)) {{ name, -[KNOWS]-> {{ name }} }} }}");
 }
 
 /// Check if input needs continuation (unbalanced braces)
@@ -398,11 +395,7 @@ fn apply_params(input: &str, params: &HashMap<String, String>) -> String {
     replaced
 }
 
-fn execute_explain_input(
-    input: &str,
-    context: &ReplContext,
-    schemas: &InMemorySchemaProvider,
-) {
+fn execute_explain_input(input: &str, context: &ReplContext, schemas: &InMemorySchemaProvider) {
     let ast = match parse_pql(input) {
         Ok(ast) => ast,
         Err(e) => {
@@ -623,19 +616,12 @@ async fn execute_pql_input(
                         while let Ok(Some(result)) = stream.message().await {
                             results.push(result);
                         }
-                        let block_nodes: Vec<Node> = results
-                            .iter()
-                            .filter_map(|r| r.node.clone())
-                            .collect();
+                        let block_nodes: Vec<Node> =
+                            results.iter().filter_map(|r| r.node.clone()).collect();
                         total_results += block_nodes.len();
                         format_traverse_results(&results, block_name, &context.format);
                         if let Some(var_name) = capture_by_block.get(block_name) {
-                            store_capture(
-                                var_name,
-                                &block_nodes,
-                                context,
-                                &mut captured_variables,
-                            );
+                            store_capture(var_name, &block_nodes, context, &mut captured_variables);
                         }
                     }
                     Err(e) => eprintln!("Error in '{}': {}", block_name, e),
@@ -891,11 +877,7 @@ fn format_result_nodes(nodes: &[Node], block_name: &str, format: &OutputFormat) 
     }
 }
 
-fn format_traverse_results(
-    results: &[TraverseResult],
-    block_name: &str,
-    format: &OutputFormat,
-) {
+fn format_traverse_results(results: &[TraverseResult], block_name: &str, format: &OutputFormat) {
     match format {
         OutputFormat::Json => {
             let json: Vec<serde_json::Value> = results
@@ -1014,9 +996,7 @@ mod tests {
     #[test]
     fn test_needs_continuation() {
         assert!(needs_continuation("Person {"));
-        assert!(needs_continuation(
-            "query { start(func: type(Person)) {"
-        ));
+        assert!(needs_continuation("query { start(func: type(Person)) {"));
         assert!(!needs_continuation("Person { name }"));
         assert!(!needs_continuation(
             "query { start(func: type(Person)) { name } }"

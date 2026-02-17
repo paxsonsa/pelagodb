@@ -169,9 +169,7 @@ pub async fn run(
 fn parse_node_ref(s: &str) -> Result<NodeRef, Box<dyn std::error::Error>> {
     let parts: Vec<&str> = s.splitn(2, ':').collect();
     if parts.len() != 2 {
-        return Err(
-            format!("Invalid node reference '{}'. Expected format: Type:id", s).into(),
-        );
+        return Err(format!("Invalid node reference '{}'. Expected format: Type:id", s).into());
     }
     Ok(NodeRef {
         entity_type: parts[0].to_string(),

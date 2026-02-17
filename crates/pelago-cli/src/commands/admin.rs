@@ -1,8 +1,8 @@
 use crate::connection::GrpcConnection;
 use crate::output::OutputFormat;
 use pelago_proto::{
-    DropEntityTypeRequest, DropNamespaceRequest, GetJobStatusRequest, Job, JobStatus,
-    ListJobsRequest, RequestContext,
+    DropEntityTypeRequest, DropNamespaceRequest, GetJobStatusRequest, GetReplicationStatusRequest,
+    Job, JobStatus, ListJobsRequest, ListSitesRequest, QueryAuditLogRequest, RequestContext,
 };
 
 #[derive(clap::Args)]
@@ -15,6 +15,19 @@ pub struct AdminArgs {
 pub enum AdminCommand {
     /// Job management
     Job(JobArgs),
+    /// List registered sites
+    Sites,
+    /// Show replication status
+    ReplicationStatus,
+    /// Query audit log
+    Audit {
+        #[arg(long, default_value = "")]
+        principal: String,
+        #[arg(long, default_value = "")]
+        action: String,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
     /// Drop all data for an entity type
     DropType {
         /// Entity type to drop
@@ -88,6 +101,160 @@ pub async fn run(
                 format_jobs(&resp.jobs, format);
             }
         },
+        AdminCommand::Sites => {
+            let mut client = conn.admin_client();
+            let resp = client
+                .list_sites(ListSitesRequest {
+                    context: Some(context),
+                })
+                .await?
+                .into_inner();
+
+            match format {
+                OutputFormat::Json => {
+                    let json = resp
+                        .sites
+                        .iter()
+                        .map(|s| {
+                            serde_json::json!({
+                                "site_id": s.site_id,
+                                "site_name": s.site_name,
+                                "status": s.status,
+                                "claimed_at": s.claimed_at,
+                            })
+                        })
+                        .collect();
+                    crate::output::print_json(&serde_json::Value::Array(json));
+                }
+                OutputFormat::Table | OutputFormat::Csv => {
+                    let headers = vec!["Site ID", "Name", "Status", "Claimed At"];
+                    let rows: Vec<Vec<String>> = resp
+                        .sites
+                        .iter()
+                        .map(|s| {
+                            vec![
+                                s.site_id.clone(),
+                                s.site_name.clone(),
+                                s.status.clone(),
+                                s.claimed_at.to_string(),
+                            ]
+                        })
+                        .collect();
+                    match format {
+                        OutputFormat::Table => crate::output::print_table(&headers, &rows),
+                        OutputFormat::Csv => crate::output::print_csv(&headers, &rows),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        AdminCommand::ReplicationStatus => {
+            let mut client = conn.admin_client();
+            let resp = client
+                .get_replication_status(GetReplicationStatusRequest {
+                    context: Some(context),
+                })
+                .await?
+                .into_inner();
+
+            match format {
+                OutputFormat::Json => {
+                    let json = resp
+                        .peers
+                        .iter()
+                        .map(|p| {
+                            serde_json::json!({
+                                "remote_site_id": p.remote_site_id,
+                                "last_applied_versionstamp": format!("{:x?}", p.last_applied_versionstamp),
+                                "lag_events": p.lag_events,
+                                "updated_at": p.updated_at,
+                            })
+                        })
+                        .collect();
+                    crate::output::print_json(&serde_json::Value::Array(json));
+                }
+                OutputFormat::Table | OutputFormat::Csv => {
+                    let headers = vec!["Remote Site", "Lag Events", "Updated At"];
+                    let rows: Vec<Vec<String>> = resp
+                        .peers
+                        .iter()
+                        .map(|p| {
+                            vec![
+                                p.remote_site_id.clone(),
+                                p.lag_events.to_string(),
+                                p.updated_at.to_string(),
+                            ]
+                        })
+                        .collect();
+                    match format {
+                        OutputFormat::Table => crate::output::print_table(&headers, &rows),
+                        OutputFormat::Csv => crate::output::print_csv(&headers, &rows),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        AdminCommand::Audit {
+            principal,
+            action,
+            limit,
+        } => {
+            let mut client = conn.admin_client();
+            let resp = client
+                .query_audit_log(QueryAuditLogRequest {
+                    context: Some(context),
+                    principal_id: principal,
+                    action,
+                    from_timestamp: 0,
+                    to_timestamp: 0,
+                    limit,
+                })
+                .await?
+                .into_inner();
+
+            match format {
+                OutputFormat::Json => {
+                    let json = resp
+                        .events
+                        .iter()
+                        .map(|e| {
+                            serde_json::json!({
+                                "event_id": e.event_id,
+                                "principal_id": e.principal_id,
+                                "action": e.action,
+                                "resource": e.resource,
+                                "allowed": e.allowed,
+                                "reason": e.reason,
+                                "timestamp": e.timestamp,
+                                "metadata": e.metadata,
+                            })
+                        })
+                        .collect();
+                    crate::output::print_json(&serde_json::Value::Array(json));
+                }
+                OutputFormat::Table | OutputFormat::Csv => {
+                    let headers = vec!["Event ID", "Principal", "Action", "Allowed", "Time"];
+                    let rows: Vec<Vec<String>> = resp
+                        .events
+                        .iter()
+                        .map(|e| {
+                            vec![
+                                e.event_id.clone(),
+                                e.principal_id.clone(),
+                                e.action.clone(),
+                                e.allowed.to_string(),
+                                e.timestamp.to_string(),
+                            ]
+                        })
+                        .collect();
+                    match format {
+                        OutputFormat::Table => crate::output::print_table(&headers, &rows),
+                        OutputFormat::Csv => crate::output::print_csv(&headers, &rows),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
         AdminCommand::DropType { entity_type } => {
             let mut client = conn.admin_client();
             let resp = client
