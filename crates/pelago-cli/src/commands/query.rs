@@ -4,6 +4,7 @@ use pelago_proto::{
     ExecutePqlRequest, FindNodesRequest, Node, NodeRef, ReadConsistency, RequestContext,
     TraversalStep, TraverseRequest,
 };
+use std::fmt::Write as _;
 
 #[derive(clap::Args)]
 pub struct QueryArgs {
@@ -20,6 +21,12 @@ pub enum QueryCommand {
         filter: String,
         #[arg(long, default_value_t = 100)]
         limit: u32,
+        /// Hex-encoded cursor for keyset pagination
+        #[arg(long, default_value = "")]
+        cursor_hex: String,
+        /// Print only the response next cursor as hex (for benchmarking/scripts)
+        #[arg(long, default_value_t = false)]
+        next_cursor_only: bool,
     },
     /// Traverse one hop from a start node
     Traverse {
@@ -63,8 +70,11 @@ pub async fn run(
             entity_type,
             filter,
             limit,
+            cursor_hex,
+            next_cursor_only,
         } => {
             let mut client = conn.query_client();
+            let cursor = decode_hex_cursor(&cursor_hex)?;
             let mut stream = client
                 .find_nodes(FindNodesRequest {
                     context: Some(context),
@@ -73,18 +83,26 @@ pub async fn run(
                     consistency: ReadConsistency::Strong as i32,
                     fields: vec![],
                     limit,
-                    cursor: vec![],
+                    cursor,
                 })
                 .await?
                 .into_inner();
 
             let mut nodes = Vec::new();
+            let mut next_cursor = Vec::new();
             while let Some(item) = stream.message().await? {
+                if !item.next_cursor.is_empty() {
+                    next_cursor = item.next_cursor.clone();
+                }
                 if let Some(node) = item.node {
                     nodes.push(node);
                 }
             }
-            format_nodes(&nodes, format);
+            if next_cursor_only {
+                println!("{}", encode_hex_cursor(&next_cursor));
+            } else {
+                format_nodes(&nodes, format);
+            }
         }
         QueryCommand::Traverse {
             start,
@@ -231,6 +249,44 @@ fn format_nodes(nodes: &[Node], format: &OutputFormat) {
     }
 }
 
+fn decode_hex_cursor(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    if raw.len() % 2 != 0 {
+        return Err("cursor hex must have even length".into());
+    }
+
+    let mut out = Vec::with_capacity(raw.len() / 2);
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = decode_hex_nibble(bytes[i])?;
+        let lo = decode_hex_nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Ok(out)
+}
+
+fn encode_hex_cursor(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len() * 2);
+    for byte in input {
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
+}
+
+fn decode_hex_nibble(ch: u8) -> Result<u8, Box<dyn std::error::Error>> {
+    match ch {
+        b'0'..=b'9' => Ok(ch - b'0'),
+        b'a'..=b'f' => Ok(ch - b'a' + 10),
+        b'A'..=b'F' => Ok(ch - b'A' + 10),
+        _ => Err("cursor hex contains invalid character".into()),
+    }
+}
+
 fn proto_value_to_json(v: &pelago_proto::Value) -> serde_json::Value {
     use pelago_proto::value::Kind;
     match &v.kind {
@@ -242,5 +298,28 @@ fn proto_value_to_json(v: &pelago_proto::Value) -> serde_json::Value {
         Some(Kind::BytesValue(b)) => serde_json::json!(b),
         Some(Kind::NullValue(_)) => serde_json::Value::Null,
         None => serde_json::Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cursor_hex_roundtrip() {
+        let raw = vec![0x01, 0x02, 0xab, 0xcd, 0x00];
+        let encoded = encode_hex_cursor(&raw);
+        let decoded = decode_hex_cursor(&encoded).unwrap();
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn test_decode_hex_cursor_empty() {
+        assert_eq!(decode_hex_cursor("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_decode_hex_cursor_invalid_len() {
+        assert!(decode_hex_cursor("abc").is_err());
     }
 }

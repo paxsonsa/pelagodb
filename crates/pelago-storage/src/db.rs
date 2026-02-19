@@ -192,9 +192,11 @@ impl PelagoDb {
             ..RangeOption::from((begin, end))
         };
 
-        // iteration must be >= 1 (it's used for streaming pagination)
+        // iteration influences batch sizing for iterator-mode range reads.
+        // Using the requested limit avoids undersized first-batch results.
+        let iteration = limit.max(1);
         let result = trx
-            .get_range(&range_option, 1, false)
+            .get_range(&range_option, iteration, false)
             .await
             .map_err(|e| PelagoError::Internal(format!("Get range failed: {}", e)))?;
 
@@ -279,10 +281,12 @@ impl PelagoTxn {
             ..RangeOption::from((begin, end))
         };
 
-        // iteration must be >= 1 (it's used for streaming pagination)
+        // iteration influences batch sizing for iterator-mode range reads.
+        // Using the requested limit avoids undersized first-batch results.
+        let iteration = limit.max(1);
         let result = self
             .trx
-            .get_range(&range_option, 1, false)
+            .get_range(&range_option, iteration, false)
             .await
             .map_err(|e| PelagoError::Internal(format!("Get range failed: {}", e)))?;
 

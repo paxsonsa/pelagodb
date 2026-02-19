@@ -8,13 +8,16 @@
 use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use pelago_core::schema::{
-    EntitySchema as CoreSchema, IndexType as CoreIndexType, PropertyDef as CorePropertyDef,
+    EdgeDef as CoreEdgeDef, EdgeDirection as CoreEdgeDirection, EdgeTarget as CoreEdgeTarget,
+    EntitySchema as CoreSchema, ExtrasPolicy as CoreExtrasPolicy, IndexType as CoreIndexType,
+    OwnershipMode as CoreOwnershipMode, PropertyDef as CorePropertyDef, SchemaMeta as CoreSchemaMeta,
 };
 use pelago_core::{PropertyType as CorePropertyType, Value as CoreValue};
 use pelago_proto::{
-    schema_service_server::SchemaService, EntitySchema, GetSchemaRequest, GetSchemaResponse,
-    IndexType, ListSchemasRequest, ListSchemasResponse, PropertyDef, PropertyType,
-    RegisterSchemaRequest, RegisterSchemaResponse, Value,
+    schema_service_server::SchemaService, EdgeDef, EdgeDirectionDef, EdgeTarget, EntitySchema,
+    ExtrasPolicy, GetSchemaRequest, GetSchemaResponse, IndexType, ListSchemasRequest,
+    ListSchemasResponse, OwnershipMode, PropertyDef, PropertyType, RegisterSchemaRequest,
+    RegisterSchemaResponse, SchemaMeta, Value,
 };
 use pelago_storage::{PelagoDb, SchemaRegistry};
 use std::collections::HashMap;
@@ -195,25 +198,135 @@ fn proto_to_core_schema(proto: &EntitySchema) -> Result<CoreSchema, Status> {
         schema = schema.with_property(name, core_prop);
     }
 
+    for (name, edge_def) in &proto.edges {
+        let core_edge = proto_to_core_edge_def(edge_def)?;
+        schema = schema.with_edge(name, core_edge);
+    }
+
+    if let Some(meta) = &proto.meta {
+        schema = schema.with_meta(proto_to_core_schema_meta(meta));
+    }
+
+    // Storage assigns canonical versioning on register; preserve metadata fields for completeness.
+    schema.created_at = proto.created_at;
+    schema.created_by = proto.created_by.clone();
+
     Ok(schema)
 }
 
 /// Convert core EntitySchema to proto EntitySchema
 fn core_to_proto_schema(core: &CoreSchema) -> EntitySchema {
     let mut properties = HashMap::new();
+    let mut edges = HashMap::new();
 
     for (name, prop_def) in &core.properties {
         properties.insert(name.clone(), core_to_proto_property_def(prop_def));
+    }
+
+    for (name, edge_def) in &core.edges {
+        edges.insert(name.clone(), core_to_proto_edge_def(edge_def));
     }
 
     EntitySchema {
         name: core.name.clone(),
         version: core.version,
         properties,
-        edges: HashMap::new(), // Edge definitions handled separately
-        meta: None,
-        created_at: 0,
-        created_by: String::new(),
+        edges,
+        meta: Some(core_to_proto_schema_meta(&core.meta)),
+        created_at: core.created_at,
+        created_by: core.created_by.clone(),
+    }
+}
+
+fn proto_to_core_edge_def(proto: &EdgeDef) -> Result<CoreEdgeDef, Status> {
+    let target_proto = proto
+        .target
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("edge target is required"))?;
+    let mut edge = CoreEdgeDef::new(proto_to_core_edge_target(target_proto)?);
+
+    edge.direction = match EdgeDirectionDef::try_from(proto.direction) {
+        Ok(EdgeDirectionDef::Outgoing) => CoreEdgeDirection::Outgoing,
+        Ok(EdgeDirectionDef::Bidirectional) => CoreEdgeDirection::Bidirectional,
+        _ => CoreEdgeDirection::Outgoing,
+    };
+
+    edge.ownership = match OwnershipMode::try_from(proto.ownership) {
+        Ok(OwnershipMode::SourceSite) => CoreOwnershipMode::SourceSite,
+        Ok(OwnershipMode::Independent) => CoreOwnershipMode::Independent,
+        _ => CoreOwnershipMode::SourceSite,
+    };
+
+    if !proto.sort_key.is_empty() {
+        edge.sort_key = Some(proto.sort_key.clone());
+    }
+
+    for (name, prop_def) in &proto.properties {
+        let core_prop = proto_to_core_property_def(prop_def)?;
+        edge.properties.insert(name.clone(), core_prop);
+    }
+
+    Ok(edge)
+}
+
+fn core_to_proto_edge_def(core: &CoreEdgeDef) -> EdgeDef {
+    let mut properties = HashMap::new();
+    for (name, prop_def) in &core.properties {
+        properties.insert(name.clone(), core_to_proto_property_def(prop_def));
+    }
+
+    EdgeDef {
+        target: Some(core_to_proto_edge_target(&core.target)),
+        direction: match core.direction {
+            CoreEdgeDirection::Outgoing => EdgeDirectionDef::Outgoing as i32,
+            CoreEdgeDirection::Bidirectional => EdgeDirectionDef::Bidirectional as i32,
+        },
+        properties,
+        sort_key: core.sort_key.clone().unwrap_or_default(),
+        ownership: match core.ownership {
+            CoreOwnershipMode::SourceSite => OwnershipMode::SourceSite as i32,
+            CoreOwnershipMode::Independent => OwnershipMode::Independent as i32,
+        },
+    }
+}
+
+fn proto_to_core_edge_target(proto: &EdgeTarget) -> Result<CoreEdgeTarget, Status> {
+    match proto.kind.as_ref() {
+        Some(pelago_proto::edge_target::Kind::SpecificType(name)) => {
+            Ok(CoreEdgeTarget::specific(name.clone()))
+        }
+        Some(pelago_proto::edge_target::Kind::Polymorphic(_)) => Ok(CoreEdgeTarget::polymorphic()),
+        None => Err(Status::invalid_argument("edge target kind is required")),
+    }
+}
+
+fn core_to_proto_edge_target(core: &CoreEdgeTarget) -> EdgeTarget {
+    let kind = match core {
+        CoreEdgeTarget::Specific(name) => pelago_proto::edge_target::Kind::SpecificType(name.clone()),
+        CoreEdgeTarget::Polymorphic => pelago_proto::edge_target::Kind::Polymorphic(true),
+    };
+    EdgeTarget { kind: Some(kind) }
+}
+
+fn proto_to_core_schema_meta(proto: &SchemaMeta) -> CoreSchemaMeta {
+    CoreSchemaMeta {
+        allow_undeclared_edges: proto.allow_undeclared_edges,
+        extras_policy: match ExtrasPolicy::try_from(proto.extras_policy) {
+            Ok(ExtrasPolicy::Allow) => CoreExtrasPolicy::Allow,
+            Ok(ExtrasPolicy::Warn) => CoreExtrasPolicy::Warn,
+            _ => CoreExtrasPolicy::Reject,
+        },
+    }
+}
+
+fn core_to_proto_schema_meta(core: &CoreSchemaMeta) -> SchemaMeta {
+    SchemaMeta {
+        allow_undeclared_edges: core.allow_undeclared_edges,
+        extras_policy: match core.extras_policy {
+            CoreExtrasPolicy::Reject => ExtrasPolicy::Reject as i32,
+            CoreExtrasPolicy::Allow => ExtrasPolicy::Allow as i32,
+            CoreExtrasPolicy::Warn => ExtrasPolicy::Warn as i32,
+        },
     }
 }
 

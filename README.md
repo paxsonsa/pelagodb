@@ -183,3 +183,115 @@ Open `http://127.0.0.1:4070/docs/`
 ```bash
 ./scripts/stop-fdb.sh
 ```
+
+## Latest Performance Snapshot
+Local benchmark snapshot from **February 19, 2026** using:
+- single API node (`127.0.0.1:27615`)
+- local FDB test container
+- Context benchmark profile (`scripts/perf-benchmark.py`)
+- dataset: `benchmark` namespace with `Context` records (`show_001`, `scheme=main`)
+
+Command:
+```bash
+python3 scripts/perf-benchmark.py \
+  --pelago-bin target/debug/pelago \
+  --server http://127.0.0.1:27615 \
+  --database default \
+  --namespace benchmark \
+  --profile context \
+  --entity-type Context \
+  --seed-node-id 1_0 \
+  --context-show show_001 \
+  --context-scheme main \
+  --context-shot shot_001 \
+  --context-shot-alt shot_002 \
+  --context-sequence seq_001 \
+  --context-task fx \
+  --context-label default \
+  --context-page-size 20 \
+  --context-deep-pages 5 \
+  --runs 10 \
+  --warmup 2 \
+  --output-json .tmp/bench/context-latest.json
+```
+
+Results (ms):
+
+| Case | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| `context_point_lookup` | 36.026 | 36.843 | 36.847 |
+| `context_show_shot` | 96.259 | 101.597 | 102.504 |
+| `context_show_shot_task_label` | 64.957 | 68.897 | 69.156 |
+| `context_or_shots` | 93.845 | 102.122 | 102.768 |
+| `context_deep_page` | 88.450 | 95.417 | 95.456 |
+
+Artifact:
+- `.tmp/bench/context-latest.json`
+
+## Single-Node VFX Baseline Snapshot
+Local baseline snapshot from **February 19, 2026** using:
+- single API node (`127.0.0.1:27615`)
+- single local FoundationDB test node/container
+- dataset: `vfx_pipeline_50k/show_001` loaded into namespace `vfx.show.001.full`
+
+Dataset load command:
+```bash
+PYTHONPATH=clients/python/pelagodb/generated:clients/python \
+python3 datasets/load_dataset.py vfx_pipeline_50k/show_001 \
+  --endpoint 127.0.0.1:27615 \
+  --database default \
+  --namespace vfx.show.001.full
+```
+
+### CLI Harness Results (`scripts/perf-benchmark.py`)
+Notes:
+- these include per-request CLI process startup cost
+- warmup/runs varied by case as shown in artifact files
+
+| Case | p50 (ms) | p95 (ms) | p99 (ms) |
+|---|---:|---:|---:|
+| `node_get` (`Task:1_0`, unique-filter run) | 32.128 | 35.402 | 37.048 |
+| `query_find` (`task_code == 'S001-TSK-001-001-01'`) | 39.508 | 43.471 | 46.529 |
+| `query_find` (`stage == 'comp'`) | 743.499 | 925.431 | 1182.810 |
+| `query_find` (`stage == 'comp' || stage == 'fx'`) | 1072.159 | 1155.109 | 1198.310 |
+| `query_traverse` (`Shot:1_0`, `has_task`, depth 2) | 54.667 | 61.533 | 62.124 |
+
+Artifacts:
+- `.tmp/bench/vfx-show001-unique.json`
+- `.tmp/bench/vfx-show001-stage-comp.json`
+- `.tmp/bench/vfx-show001-stage-or.json`
+- `.tmp/bench/vfx-show001-shot-traverse.json`
+
+### Direct gRPC Results (Persistent Client)
+Notes:
+- persistent gRPC channel, no CLI spawn overhead
+- includes p90 and tighter estimate of server/query path latency
+
+| Case | p50 (ms) | p90 (ms) | p95 (ms) | p99 (ms) |
+|---|---:|---:|---:|---:|
+| `grpc_node_get_task_1_0` | 3.268 | 5.170 | 5.642 | 6.668 |
+| `grpc_find_task_unique_code` | 9.592 | 12.744 | 14.223 | 17.275 |
+| `grpc_find_task_stage_comp` | 828.053 | 903.877 | 943.520 | 997.301 |
+| `grpc_find_task_stage_or` | 1141.298 | 1218.957 | 1254.694 | 1316.191 |
+
+Artifact:
+- `.tmp/bench/vfx-show001-direct-grpc.json`
+
+### Parallel Operation Checks (Single Query Node)
+Mixed-operation parallel checks using direct gRPC against `vfx.show.001.full`.
+
+1) Selective mix (point + unique-equality find):
+- 32 workers, 800 total ops (400 point + 400 find)
+- throughput: ~3961 ops/sec
+- point p50/p95/p99: 5.492 / 9.954 / 11.551 ms
+- find p50/p95/p99: 9.606 / 11.631 / 13.590 ms
+
+2) Broad-filter mix (point + `stage == 'comp'` find):
+- 16 workers, 240 total ops (120 point + 120 find)
+- throughput: ~29.45 ops/sec
+- point p50/p95/p99: 4.919 / 9.125 / 9.753 ms
+- find p50/p95/p99: 1011.736 / 1169.336 / 1173.376 ms
+
+Artifacts:
+- `.tmp/bench/vfx-show001-parallel-ops.json`
+- `.tmp/bench/vfx-show001-parallel-ops-broad.json`

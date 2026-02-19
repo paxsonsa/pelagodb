@@ -24,6 +24,7 @@ pub mod rocks_cache;
 pub mod schema;
 pub mod security;
 pub mod subspace;
+pub mod term_index;
 
 pub use cache::SchemaCache;
 pub use cdc::{

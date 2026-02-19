@@ -17,6 +17,10 @@ use crate::db::PelagoDb;
 use crate::ids::IdAllocator;
 use crate::index::{compute_index_entries, compute_index_removals, IndexEntry, IndexEntryType};
 use crate::schema::SchemaRegistry;
+use crate::term_index::{
+    apply_term_posting_changes, compute_term_posting_changes, compute_term_postings,
+    TermPostingChanges,
+};
 use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
@@ -145,6 +149,12 @@ impl NodeStore {
 
         let index_entries =
             compute_index_entries(&subspace, entity_type, &node_id_bytes, &schema, &properties)?;
+        let term_additions =
+            compute_term_postings(&subspace, entity_type, &node_id_bytes, &properties)?;
+        let term_changes = TermPostingChanges {
+            additions: term_additions,
+            removals: Vec::new(),
+        };
         let node_data = encode_cbor(&NodeData {
             properties,
             locality: home_site_id,
@@ -157,6 +167,7 @@ impl NodeStore {
         for entry in &index_entries {
             Self::write_index_entry(&trx, entry)?;
         }
+        apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, 1).await?;
         trx.commit().await.map_err(|e| {
             PelagoError::Internal(format!("Failed to apply replicated node create: {}", e))
         })?;
@@ -230,6 +241,13 @@ impl NodeStore {
         )?;
         let additions =
             compute_index_entries(&subspace, entity_type, &node_id_bytes, &schema, &merged)?;
+        let term_changes = compute_term_posting_changes(
+            &subspace,
+            entity_type,
+            &node_id_bytes,
+            &existing_data.properties,
+            &merged,
+        )?;
         let updated_data = encode_cbor(&NodeData {
             properties: merged,
             locality: if ownership_mismatch {
@@ -248,6 +266,7 @@ impl NodeStore {
         for entry in &additions {
             Self::write_index_entry(&trx, entry)?;
         }
+        apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, 0).await?;
         trx.set(data_key.as_ref(), &updated_data);
         trx.commit().await.map_err(|e| {
             PelagoError::Internal(format!("Failed to apply replicated node update: {}", e))
@@ -298,11 +317,22 @@ impl NodeStore {
             &schema,
             &existing_data.properties,
         )?;
+        let term_removals = compute_term_postings(
+            &subspace,
+            entity_type,
+            &node_id_bytes,
+            &existing_data.properties,
+        )?;
+        let term_changes = TermPostingChanges {
+            additions: Vec::new(),
+            removals: term_removals,
+        };
         let trx = self.db.create_transaction()?;
         trx.clear(data_key.as_ref());
         for entry in &removals {
             trx.clear(entry.key.as_ref());
         }
+        apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, -1).await?;
         trx.commit().await.map_err(|e| {
             PelagoError::Internal(format!("Failed to apply replicated node delete: {}", e))
         })?;
@@ -428,6 +458,12 @@ impl NodeStore {
         let subspace = Subspace::namespace(database, namespace);
         let index_entries =
             compute_index_entries(&subspace, entity_type, &node_id_bytes, &schema, &properties)?;
+        let term_additions =
+            compute_term_postings(&subspace, entity_type, &node_id_bytes, &properties)?;
+        let term_changes = TermPostingChanges {
+            additions: term_additions,
+            removals: Vec::new(),
+        };
 
         // Encode node data
         let node_data = encode_cbor(&NodeData {
@@ -450,6 +486,7 @@ impl NodeStore {
         for entry in &index_entries {
             Self::write_index_entry(&trx, entry)?;
         }
+        apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, 1).await?;
 
         // Accumulate CDC operation
         cdc.push(CdcOperation::NodeCreate {
@@ -570,6 +607,13 @@ impl NodeStore {
             &schema,
             &merged_properties,
         )?;
+        let term_changes = compute_term_posting_changes(
+            &subspace,
+            entity_type,
+            &node_id_bytes,
+            &old_properties,
+            &merged_properties,
+        )?;
 
         // Update timestamp
         let now = std::time::SystemTime::now()
@@ -599,6 +643,7 @@ impl NodeStore {
         for entry in &additions {
             Self::write_index_entry(&trx, entry)?;
         }
+        apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, 0).await?;
 
         // Update data
         trx.set(data_key.as_ref(), &node_data);
@@ -674,6 +719,16 @@ impl NodeStore {
             &schema,
             &existing_data.properties,
         )?;
+        let term_removals = compute_term_postings(
+            &subspace,
+            entity_type,
+            &node_id_bytes,
+            &existing_data.properties,
+        )?;
+        let term_changes = TermPostingChanges {
+            additions: Vec::new(),
+            removals: term_removals,
+        };
 
         // Delete in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
@@ -686,6 +741,7 @@ impl NodeStore {
         for entry in &removals {
             trx.clear(entry.key.as_ref());
         }
+        apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, -1).await?;
 
         // Accumulate CDC operation
         cdc.push(CdcOperation::NodeDelete {

@@ -47,6 +47,7 @@ def load_dataset(
     namespace: str,
     api_key: str | None,
     bearer_token: str | None,
+    skip_edges: bool,
 ) -> None:
     schemas_path = dataset_dir / "schemas.json"
     nodes_path = dataset_dir / "nodes.jsonl"
@@ -85,17 +86,20 @@ def load_dataset(
             node_count += 1
 
         edge_count = 0
-        print(f"Loading edges from {edges_path}...")
-        for edge_record in iter_jsonl(edges_path):
-            source_alias = edge_record["source"]
-            target_alias = edge_record["target"]
-            label = edge_record["label"]
-            props = edge_record.get("properties", {})
+        if skip_edges:
+            print(f"Skipping edges from {edges_path} (--skip-edges)")
+        else:
+            print(f"Loading edges from {edges_path}...")
+            for edge_record in iter_jsonl(edges_path):
+                source_alias = edge_record["source"]
+                target_alias = edge_record["target"]
+                label = edge_record["label"]
+                props = edge_record.get("properties", {})
 
-            source_type, source_id = alias_to_node[source_alias]
-            target_type, target_id = alias_to_node[target_alias]
-            client.create_edge(source_type, source_id, label, target_type, target_id, props)
-            edge_count += 1
+                source_type, source_id = alias_to_node[source_alias]
+                target_type, target_id = alias_to_node[target_alias]
+                client.create_edge(source_type, source_id, label, target_type, target_id, props)
+                edge_count += 1
 
         print("Done")
         print(f"Dataset: {dataset_dir.name}")
@@ -120,6 +124,11 @@ def main() -> None:
     parser.add_argument("--namespace", default="default")
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--bearer-token", default=None)
+    parser.add_argument(
+        "--skip-edges",
+        action="store_true",
+        help="Load schemas and nodes only (skip edge creation)",
+    )
     args = parser.parse_args()
 
     dataset_dir = ROOT / "datasets" / args.dataset
@@ -133,6 +142,7 @@ def main() -> None:
         namespace=args.namespace,
         api_key=args.api_key,
         bearer_token=args.bearer_token,
+        skip_edges=args.skip_edges,
     )
 
 

@@ -30,6 +30,13 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
 const OFFSET_CURSOR_LEN: usize = 8;
+const NODE_ID_CURSOR_LEN: usize = 9;
+const KEYSET_CURSOR_VERSION: u8 = 1;
+
+enum FindNodesCursor {
+    Offset(usize),
+    Keyset(Option<Vec<u8>>),
+}
 
 /// Query service implementation
 pub struct QueryServiceImpl {
@@ -91,20 +98,7 @@ impl QueryService for QueryServiceImpl {
         } else {
             1000
         };
-        let cursor_offset = decode_offset_cursor(&req.cursor)?;
-        let fetch_limit = cursor_offset
-            .saturating_add(page_size)
-            .saturating_add(1)
-            .min(u32::MAX as usize) as u32;
-        let limit = Some(fetch_limit);
-
-        // Get schema for planning
-        let schema = self
-            .schema_registry
-            .get_schema(&ctx.database, &ctx.namespace, &entity_type)
-            .await
-            .map_err(|e| e.into_status())?
-            .ok_or_else(|| Status::not_found(format!("schema '{}' not found", entity_type)))?;
+        let cursor_mode = decode_find_nodes_cursor(&req.cursor)?;
 
         // Build execution plan
         let projection = if req.fields.is_empty() {
@@ -113,34 +107,136 @@ impl QueryService for QueryServiceImpl {
             Some(req.fields.into_iter().collect())
         };
 
-        let plan = QueryPlanner::plan(&entity_type, &cel_expression, &schema, projection, limit)
-            .map_err(|e| e.into_status())?;
+        let (page_nodes, next_cursor) = match cursor_mode {
+            // Legacy compatibility path for older offset cursors.
+            FindNodesCursor::Offset(cursor_offset) => {
+                let fetch_limit = cursor_offset
+                    .saturating_add(page_size)
+                    .saturating_add(1)
+                    .min(u32::MAX as usize) as u32;
+                let limit = Some(fetch_limit);
 
-        // Execute query
-        let results = self
-            .query_executor
-            .execute(&ctx.database, &ctx.namespace, &plan)
-            .await
-            .map_err(|e| e.into_status())?;
+                let maybe_term_results = self
+                    .query_executor
+                    .execute_term_expression(
+                        &ctx.database,
+                        &ctx.namespace,
+                        &entity_type,
+                        &cel_expression,
+                        projection.clone(),
+                        limit,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| e.into_status())?;
 
-        let total = results.nodes.len();
-        let start = cursor_offset.min(total);
-        let end = start.saturating_add(page_size).min(total);
-        let has_more = total > end;
-        let next_cursor = if has_more {
-            encode_offset_cursor(end)
-        } else {
-            Vec::new()
+                let results = if let Some(results) = maybe_term_results {
+                    results
+                } else {
+                    let schema = self
+                        .schema_registry
+                        .get_schema(&ctx.database, &ctx.namespace, &entity_type)
+                        .await
+                        .map_err(|e| e.into_status())?
+                        .ok_or_else(|| {
+                            Status::not_found(format!("schema '{}' not found", entity_type))
+                        })?;
+
+                    let plan = QueryPlanner::plan(
+                        &entity_type,
+                        &cel_expression,
+                        &schema,
+                        projection.clone(),
+                        limit,
+                    )
+                    .map_err(|e| e.into_status())?;
+
+                    self.query_executor
+                        .execute(&ctx.database, &ctx.namespace, &plan)
+                        .await
+                        .map_err(|e| e.into_status())?
+                };
+
+                let total = results.nodes.len();
+                let start = cursor_offset.min(total);
+                let end = start.saturating_add(page_size).min(total);
+                let has_more = total > end;
+                let next_cursor = if has_more {
+                    encode_offset_cursor(end)
+                } else {
+                    Vec::new()
+                };
+                let page_nodes: Vec<_> = results
+                    .nodes
+                    .into_iter()
+                    .skip(start)
+                    .take(page_size)
+                    .collect();
+                (page_nodes, next_cursor)
+            }
+            // Default path: keyset cursor by node id bytes.
+            FindNodesCursor::Keyset(cursor_node_id) => {
+                let fetch_limit = page_size.saturating_add(1).min(u32::MAX as usize) as u32;
+                let limit = Some(fetch_limit);
+
+                let maybe_term_results = self
+                    .query_executor
+                    .execute_term_expression(
+                        &ctx.database,
+                        &ctx.namespace,
+                        &entity_type,
+                        &cel_expression,
+                        projection.clone(),
+                        limit,
+                        cursor_node_id.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| e.into_status())?;
+
+                let results = if let Some(results) = maybe_term_results {
+                    results
+                } else {
+                    let schema = self
+                        .schema_registry
+                        .get_schema(&ctx.database, &ctx.namespace, &entity_type)
+                        .await
+                        .map_err(|e| e.into_status())?
+                        .ok_or_else(|| {
+                            Status::not_found(format!("schema '{}' not found", entity_type))
+                        })?;
+
+                    let mut plan = QueryPlanner::plan(
+                        &entity_type,
+                        &cel_expression,
+                        &schema,
+                        projection.clone(),
+                        limit,
+                    )
+                    .map_err(|e| e.into_status())?;
+                    if let Some(cursor) = cursor_node_id {
+                        plan = plan.with_cursor(cursor);
+                    }
+
+                    self.query_executor
+                        .execute(&ctx.database, &ctx.namespace, &plan)
+                        .await
+                        .map_err(|e| e.into_status())?
+                };
+
+                let next_cursor = if results.has_more {
+                    results
+                        .cursor
+                        .as_ref()
+                        .map(|raw| encode_keyset_cursor(raw))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                (results.nodes, next_cursor)
+            }
         };
-        let page_nodes: Vec<_> = results
-            .nodes
-            .into_iter()
-            .skip(start)
-            .take(page_size)
-            .collect();
         let last_idx = page_nodes.len().saturating_sub(1);
 
-        // Convert to stream
         let stream =
             tokio_stream::iter(page_nodes.into_iter().enumerate().map(move |(idx, node)| {
                 let item_cursor = if idx == last_idx {
@@ -643,6 +739,35 @@ fn apply_params(input: &str, params: &std::collections::HashMap<String, String>)
     replaced
 }
 
+fn decode_find_nodes_cursor(cursor: &[u8]) -> Result<FindNodesCursor, Status> {
+    if cursor.is_empty() {
+        return Ok(FindNodesCursor::Keyset(None));
+    }
+
+    if cursor.first() == Some(&KEYSET_CURSOR_VERSION) {
+        if cursor.len() < 2 {
+            return Err(Status::invalid_argument(format!(
+                "invalid keyset cursor: expected non-empty payload, got {} bytes",
+                cursor.len().saturating_sub(1),
+            )));
+        }
+        return Ok(FindNodesCursor::Keyset(Some(cursor[1..].to_vec())));
+    }
+
+    if cursor.len() == OFFSET_CURSOR_LEN {
+        return Ok(FindNodesCursor::Offset(decode_offset_cursor(cursor)?));
+    }
+
+    if cursor.len() == NODE_ID_CURSOR_LEN {
+        return Ok(FindNodesCursor::Keyset(Some(cursor.to_vec())));
+    }
+
+    Err(Status::invalid_argument(format!(
+        "invalid cursor: unsupported length {}",
+        cursor.len()
+    )))
+}
+
 fn decode_offset_cursor(cursor: &[u8]) -> Result<usize, Status> {
     if cursor.is_empty() {
         return Ok(0);
@@ -665,6 +790,13 @@ fn encode_offset_cursor(offset: usize) -> Vec<u8> {
     offset.to_be_bytes().to_vec()
 }
 
+fn encode_keyset_cursor(cursor: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(cursor.len() + 1);
+    out.push(KEYSET_CURSOR_VERSION);
+    out.extend_from_slice(cursor);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +817,51 @@ mod tests {
     fn test_offset_cursor_invalid_length() {
         let err = decode_offset_cursor(&[1, 2, 3]).unwrap_err();
         assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_decode_find_nodes_cursor_defaults_to_keyset() {
+        match decode_find_nodes_cursor(&[]).unwrap() {
+            FindNodesCursor::Keyset(None) => {}
+            _ => panic!("expected keyset-none for empty cursor"),
+        }
+    }
+
+    #[test]
+    fn test_decode_find_nodes_cursor_legacy_offset() {
+        let cursor = encode_offset_cursor(7);
+        match decode_find_nodes_cursor(&cursor).unwrap() {
+            FindNodesCursor::Offset(7) => {}
+            _ => panic!("expected legacy offset cursor"),
+        }
+    }
+
+    #[test]
+    fn test_keyset_cursor_roundtrip() {
+        let node_cursor = [1, 0, 0, 0, 0, 0, 0, 0, 9];
+        let encoded = encode_keyset_cursor(&node_cursor);
+        match decode_find_nodes_cursor(&encoded).unwrap() {
+            FindNodesCursor::Keyset(Some(raw)) => assert_eq!(raw, node_cursor.to_vec()),
+            _ => panic!("expected keyset cursor"),
+        }
+    }
+
+    #[test]
+    fn test_keyset_cursor_supports_variable_payload_length() {
+        let index_cursor = b"index:key:cursor".to_vec();
+        let encoded = encode_keyset_cursor(&index_cursor);
+        match decode_find_nodes_cursor(&encoded).unwrap() {
+            FindNodesCursor::Keyset(Some(raw)) => assert_eq!(raw, index_cursor),
+            _ => panic!("expected variable-length keyset cursor"),
+        }
+    }
+
+    #[test]
+    fn test_keyset_cursor_prefix_takes_precedence_over_offset_shape() {
+        let encoded = vec![KEYSET_CURSOR_VERSION, 1, 2, 3, 4, 5, 6, 7];
+        match decode_find_nodes_cursor(&encoded).unwrap() {
+            FindNodesCursor::Keyset(Some(raw)) => assert_eq!(raw, vec![1, 2, 3, 4, 5, 6, 7]),
+            _ => panic!("expected keyset cursor when version prefix is present"),
+        }
     }
 }

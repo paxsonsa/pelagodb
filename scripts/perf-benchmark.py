@@ -69,6 +69,13 @@ def run_timed(cmd: List[str]) -> float:
     return elapsed_ns / 1_000_000.0
 
 
+def run_capture(cmd: List[str]) -> str:
+    completed = subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True
+    )
+    return completed.stdout
+
+
 def run_case(name: str, cmd: List[str], warmup: int, runs: int) -> BenchResult:
     for _ in range(warmup):
         run_timed(cmd)
@@ -138,12 +145,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server", default=os.getenv("PELAGO_SERVER", "http://127.0.0.1:27615"))
     parser.add_argument("--database", default=os.getenv("PELAGO_DATABASE", "default"))
     parser.add_argument("--namespace", default=os.getenv("PELAGO_NAMESPACE", "default"))
+    parser.add_argument(
+        "--profile",
+        choices=["default", "context"],
+        default="default",
+        help="Benchmark profile: generic defaults or context-centric query shapes",
+    )
 
     parser.add_argument("--entity-type", default="Person")
     parser.add_argument("--seed-node-id", default="1_0")
     parser.add_argument("--edge-label", default="follows")
     parser.add_argument("--filter", default="age >= 30")
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--context-show", default="show_001")
+    parser.add_argument("--context-scheme", default="main")
+    parser.add_argument("--context-shot", default="shot_0001")
+    parser.add_argument("--context-shot-alt", default="shot_0002")
+    parser.add_argument("--context-sequence", default="seq_001")
+    parser.add_argument("--context-task", default="fx")
+    parser.add_argument("--context-label", default="default")
+    parser.add_argument("--context-page-size", type=int, default=500)
+    parser.add_argument(
+        "--context-deep-pages",
+        type=int,
+        default=20,
+        help="Number of pages to walk before deep-page benchmark (context profile)",
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--runs", type=int, default=30)
     parser.add_argument(
@@ -171,6 +198,30 @@ def parse_args() -> argparse.Namespace:
         help="P99 target for traversal (phase target: <100ms)",
     )
     parser.add_argument(
+        "--target-context-show-shot-ms",
+        type=float,
+        default=50.0,
+        help="P99 target for Context show+shot lookups",
+    )
+    parser.add_argument(
+        "--target-context-template-ms",
+        type=float,
+        default=50.0,
+        help="P99 target for Context show+shot+task+label lookups",
+    )
+    parser.add_argument(
+        "--target-context-or-ms",
+        type=float,
+        default=80.0,
+        help="P99 target for Context OR query lookups",
+    )
+    parser.add_argument(
+        "--target-context-deep-page-ms",
+        type=float,
+        default=80.0,
+        help="P99 target for Context deep keyset page lookups",
+    )
+    parser.add_argument(
         "--enforce-targets",
         action="store_true",
         help="Exit non-zero if any P99 target is missed",
@@ -179,72 +230,246 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def context_filter_show_shot(args: argparse.Namespace) -> str:
+    return (
+        f"show == '{args.context_show}'"
+        f" && scheme == '{args.context_scheme}'"
+        f" && shot == '{args.context_shot}'"
+        f" && sequence == '{args.context_sequence}'"
+    )
+
+
+def context_filter_template(args: argparse.Namespace) -> str:
+    return (
+        f"{context_filter_show_shot(args)}"
+        f" && task == '{args.context_task}'"
+        f" && label == '{args.context_label}'"
+    )
+
+
+def context_filter_show_scheme(args: argparse.Namespace) -> str:
+    return f"show == '{args.context_show}' && scheme == '{args.context_scheme}'"
+
+
+def context_filter_or_shots(args: argparse.Namespace) -> str:
+    left = (
+        f"show == '{args.context_show}'"
+        f" && scheme == '{args.context_scheme}'"
+        f" && shot == '{args.context_shot}'"
+        f" && sequence == '{args.context_sequence}'"
+    )
+    right = (
+        f"show == '{args.context_show}'"
+        f" && scheme == '{args.context_scheme}'"
+        f" && shot == '{args.context_shot_alt}'"
+        f" && sequence == '{args.context_sequence}'"
+    )
+    return f"{left} || {right}"
+
+
+def next_cursor_hex_for_find(
+    base: List[str], entity_type: str, cel_filter: str, limit: int, cursor_hex: str
+) -> str:
+    cmd = (
+        base
+        + [
+            "query",
+            "find",
+            entity_type,
+            "--filter",
+            cel_filter,
+            "--limit",
+            str(limit),
+            "--cursor-hex",
+            cursor_hex,
+            "--next-cursor-only",
+        ]
+    )
+    return run_capture(cmd).strip()
+
+
+def compute_deep_cursor_hex(
+    base: List[str], entity_type: str, cel_filter: str, page_size: int, pages: int
+) -> str:
+    cursor_hex = ""
+    for _ in range(max(pages, 0)):
+        next_hex = next_cursor_hex_for_find(base, entity_type, cel_filter, page_size, cursor_hex)
+        if not next_hex:
+            return ""
+        cursor_hex = next_hex
+    return cursor_hex
+
+
 def main() -> int:
     args = parse_args()
     maybe_build_cli(args.pelago_bin, args.build_cli)
 
     base = base_cmd(args)
+    cases: List[tuple[str, List[str]]] = []
+    targets: Dict[str, float] = {}
 
-    cases = [
-        (
-            "node_get",
-            base
-            + [
-                "node",
-                "get",
-                args.entity_type,
-                args.seed_node_id,
-                "--format",
-                "json",
-            ],
-        ),
-        (
-            "query_find",
-            base
-            + [
-                "query",
-                "find",
-                args.entity_type,
-                "--filter",
-                args.filter,
-                "--limit",
-                str(args.limit),
-                "--format",
-                "json",
-            ],
-        ),
-    ]
-
-    if not args.skip_traverse:
-        cases.append(
+    if args.profile == "default":
+        cases = [
             (
-                "query_traverse",
+                "node_get",
+                base
+                + [
+                    "node",
+                    "get",
+                    args.entity_type,
+                    args.seed_node_id,
+                    "--format",
+                    "json",
+                ],
+            ),
+            (
+                "query_find",
                 base
                 + [
                     "query",
-                    "traverse",
-                    f"{args.entity_type}:{args.seed_node_id}",
-                    args.edge_label,
-                    "--max-depth",
-                    "2",
-                    "--max-results",
+                    "find",
+                    args.entity_type,
+                    "--filter",
+                    args.filter,
+                    "--limit",
                     str(args.limit),
                     "--format",
                     "json",
                 ],
+            ),
+        ]
+        targets = {
+            "node_get": args.target_get_ms,
+            "query_find": args.target_find_ms,
+        }
+
+        if not args.skip_traverse:
+            cases.append(
+                (
+                    "query_traverse",
+                    base
+                    + [
+                        "query",
+                        "traverse",
+                        f"{args.entity_type}:{args.seed_node_id}",
+                        args.edge_label,
+                        "--max-depth",
+                        "2",
+                        "--max-results",
+                        str(args.limit),
+                        "--format",
+                        "json",
+                    ],
+                )
             )
-        )
+            targets["query_traverse"] = args.target_traverse_ms
+    else:
+        show_shot_filter = context_filter_show_shot(args)
+        template_filter = context_filter_template(args)
+        or_filter = context_filter_or_shots(args)
+        show_scheme_filter = context_filter_show_scheme(args)
+        page_size = max(args.context_page_size, 1)
+
+        cases = [
+            (
+                "context_point_lookup",
+                base
+                + [
+                    "node",
+                    "get",
+                    args.entity_type,
+                    args.seed_node_id,
+                    "--format",
+                    "json",
+                ],
+            ),
+            (
+                "context_show_shot",
+                base
+                + [
+                    "query",
+                    "find",
+                    args.entity_type,
+                    "--filter",
+                    show_shot_filter,
+                    "--limit",
+                    str(page_size),
+                    "--format",
+                    "json",
+                ],
+            ),
+            (
+                "context_show_shot_task_label",
+                base
+                + [
+                    "query",
+                    "find",
+                    args.entity_type,
+                    "--filter",
+                    template_filter,
+                    "--limit",
+                    str(page_size),
+                    "--format",
+                    "json",
+                ],
+            ),
+            (
+                "context_or_shots",
+                base
+                + [
+                    "query",
+                    "find",
+                    args.entity_type,
+                    "--filter",
+                    or_filter,
+                    "--limit",
+                    str(page_size),
+                    "--format",
+                    "json",
+                ],
+            ),
+        ]
+        targets = {
+            "context_point_lookup": args.target_get_ms,
+            "context_show_shot": args.target_context_show_shot_ms,
+            "context_show_shot_task_label": args.target_context_template_ms,
+            "context_or_shots": args.target_context_or_ms,
+        }
+
+        if args.context_deep_pages > 0:
+            deep_cursor_hex = compute_deep_cursor_hex(
+                base, args.entity_type, show_scheme_filter, page_size, args.context_deep_pages
+            )
+            if deep_cursor_hex:
+                cases.append(
+                    (
+                        "context_deep_page",
+                        base
+                        + [
+                            "query",
+                            "find",
+                            args.entity_type,
+                            "--filter",
+                            show_scheme_filter,
+                            "--limit",
+                            str(page_size),
+                            "--cursor-hex",
+                            deep_cursor_hex,
+                            "--format",
+                            "json",
+                        ],
+                    )
+                )
+                targets["context_deep_page"] = args.target_context_deep_page_ms
+            else:
+                print(
+                    "Skipping context_deep_page: unable to walk requested deep pages (insufficient result depth)."
+                )
 
     results: List[BenchResult] = []
     for name, cmd in cases:
         print(f"Running {name} ({args.runs} samples, warmup {args.warmup})...")
         results.append(run_case(name, cmd, args.warmup, args.runs))
-
-    targets = {
-        "node_get": args.target_get_ms,
-        "query_find": args.target_find_ms,
-        "query_traverse": args.target_traverse_ms,
-    }
 
     exit_code = print_summary(results, targets, args.enforce_targets)
 
@@ -253,6 +478,7 @@ def main() -> int:
             "server": args.server,
             "database": args.database,
             "namespace": args.namespace,
+            "profile": args.profile,
             "runs": args.runs,
             "warmup": args.warmup,
             "results": [

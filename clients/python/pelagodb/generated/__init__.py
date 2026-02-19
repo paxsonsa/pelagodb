@@ -1,1 +1,1 @@
-# Generated protobuf/grpc modules are created by scripts/generate_proto.sh
+# Generated package marker for pelago protobuf/grpc modules.

@@ -5,7 +5,6 @@
 ### Application Developer Path
 - `docs/01-getting-started.md`
 - `docs/14-data-modeling-and-scaling.md`
-- `docs/18-query-indexing-checklist-matrix.md`
 - `docs/16-when-to-use-pelagodb.md`
 - `docs/02-cli-reference.md`
 - `docs/03-api-grpc.md`
@@ -18,7 +17,6 @@
 - `docs/06-replication-and-multi-site.md`
 - `docs/13-centralized-replication-and-scaling.md`
 - `docs/15-architecture-and-design.md`
-- `docs/18-query-indexing-checklist-matrix.md`
 - `docs/17-watch-and-streaming.md`
 - `docs/09-operations-playbook.md`
 - `docs/11-troubleshooting.md`
@@ -34,7 +32,6 @@
 ## Start Here
 - `docs/01-getting-started.md`
 - `docs/14-data-modeling-and-scaling.md`
-- `docs/18-query-indexing-checklist-matrix.md`
 - `docs/16-when-to-use-pelagodb.md`
 - `docs/02-cli-reference.md`
 
@@ -51,7 +48,6 @@
 - `docs/09-operations-playbook.md`
 - `docs/13-centralized-replication-and-scaling.md`
 - `docs/15-architecture-and-design.md`
-- `docs/18-query-indexing-checklist-matrix.md`
 - `docker-compose.multisite.yml`
 - `deploy/k8s/README.md`
 
