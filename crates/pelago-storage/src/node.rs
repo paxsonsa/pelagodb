@@ -539,6 +539,54 @@ impl NodeStore {
         }
     }
 
+    /// Get multiple nodes by ID using a single read transaction.
+    ///
+    /// Results preserve the same order as `node_ids`.
+    pub async fn get_nodes_batch(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_ids: &[String],
+    ) -> Result<Vec<Option<StoredNode>>, PelagoError> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let data_subspace = Subspace::namespace(database, namespace).data();
+        let trx = self.db.create_transaction()?;
+        let mut out = Vec::with_capacity(node_ids.len());
+
+        for node_id in node_ids {
+            let parsed_id: NodeId = node_id
+                .parse()
+                .map_err(|_| PelagoError::InvalidId { value: node_id.clone() })?;
+            let node_id_bytes = parsed_id.to_bytes();
+            let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
+
+            match trx
+                .get(data_key.as_ref(), false)
+                .await
+                .map_err(|e| PelagoError::Internal(format!("Get failed: {}", e)))?
+            {
+                Some(bytes) => {
+                    let data: NodeData = decode_cbor(&bytes)?;
+                    out.push(Some(StoredNode {
+                        id: node_id.clone(),
+                        entity_type: entity_type.to_string(),
+                        properties: data.properties,
+                        locality: data.locality,
+                        created_at: data.created_at,
+                        updated_at: data.updated_at,
+                    }));
+                }
+                None => out.push(None),
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Update a node's properties
     pub async fn update_node(
         &self,

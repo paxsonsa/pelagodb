@@ -2,8 +2,8 @@
 //!
 //! FDB Key Layout:
 //! ```text
-//! Forward:  (db, ns, edge, f, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id)
-//! Metadata: (db, ns, edge, m, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id) → CBOR props
+//! Forward:  (db, ns, edge, f, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id) → CBOR edge data
+//! Metadata: (db, ns, edge, m, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id) → CBOR edge data (compat)
 //! Reverse:  (db, ns, edge, r, tgt_db, tgt_ns, tgt_type, tgt_id, label, src_type, src_id)
 //! ```
 //!
@@ -232,11 +232,11 @@ impl EdgeStore {
         let edge_bytes = encode_cbor(&edge_data)?;
 
         let trx = self.db.create_transaction()?;
-        trx.set(keys.forward_key.as_ref(), &[]);
+        trx.set(keys.forward_key.as_ref(), &edge_bytes);
         trx.set(keys.meta_key.as_ref(), &edge_bytes);
         trx.set(keys.reverse_key.as_ref(), &[]);
         if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
-            trx.set(rev_forward.as_ref(), &[]);
+            trx.set(rev_forward.as_ref(), &edge_bytes);
             trx.set(rev_reverse.as_ref(), &[]);
         }
         trx.commit().await.map_err(|e| {
@@ -409,8 +409,8 @@ impl EdgeStore {
         let trx = self.db.create_transaction()?;
         let mut cdc = CdcAccumulator::new(&self.site_id);
 
-        // Write forward key (empty value - just existence)
-        trx.set(keys.forward_key.as_ref(), &[]);
+        // Write forward key with edge data so scans avoid N+1 metadata fetches.
+        trx.set(keys.forward_key.as_ref(), &edge_bytes);
 
         // Write metadata key (edge properties)
         trx.set(keys.meta_key.as_ref(), &edge_bytes);
@@ -420,7 +420,7 @@ impl EdgeStore {
 
         // Write bidirectional keys if needed
         if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
-            trx.set(rev_forward.as_ref(), &[]);
+            trx.set(rev_forward.as_ref(), &edge_bytes);
             trx.set(rev_reverse.as_ref(), &[]);
         }
 
@@ -569,9 +569,26 @@ impl EdgeStore {
 
         // The marker position is right after the edge subspace prefix
         let marker_pos = subspace.prefix().len();
+        let needs_legacy_meta = results.iter().any(|(_, value)| value.is_empty());
+        let mut legacy_meta_by_key: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+
+        if needs_legacy_meta {
+            let mut meta_start = range_start.to_vec();
+            if meta_start.len() > marker_pos {
+                meta_start[marker_pos] = edge_markers::FORWARD_META;
+            }
+            let mut meta_end = meta_start.clone();
+            meta_end.push(0xFF);
+
+            let meta_rows = self
+                .db
+                .get_range(meta_start.as_ref(), &meta_end, limit)
+                .await?;
+            legacy_meta_by_key.extend(meta_rows);
+        }
 
         // For each forward key, fetch the corresponding metadata
-        for (key, _) in results {
+        for (key, forward_value) in results {
             // Convert forward key to metadata key (change marker from 'f' to 'm')
             let mut meta_key = key.clone();
             // Replace the marker at the known position (not searching - 'f' may appear in strings!)
@@ -579,30 +596,45 @@ impl EdgeStore {
                 meta_key[marker_pos] = edge_markers::FORWARD_META;
             }
 
-            if let Some(meta_bytes) = self.db.get(&meta_key).await? {
-                let edge_data: EdgeData = decode_cbor(&meta_bytes)?;
-                let label = edge_data
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| label_filter.unwrap_or("unknown").to_string());
-                let source = edge_data
-                    .source
-                    .clone()
-                    .unwrap_or_else(|| NodeRef::new(database, namespace, entity_type, node_id));
-                let target = edge_data
-                    .target
-                    .clone()
-                    .unwrap_or_else(|| NodeRef::new(database, namespace, "Unknown", "Unknown"));
+            let edge_data = if !forward_value.is_empty() {
+                decode_cbor::<EdgeData>(&forward_value).ok()
+            } else {
+                None
+            };
 
-                edges.push(StoredEdge {
-                    edge_id: edge_data.edge_id,
-                    source,
-                    target,
-                    label,
-                    properties: edge_data.properties,
-                    created_at: edge_data.created_at,
-                });
-            }
+            let edge_data = match edge_data {
+                Some(data) => Some(data),
+                None => legacy_meta_by_key
+                    .get(&meta_key)
+                    .map(|meta_bytes| decode_cbor::<EdgeData>(meta_bytes))
+                    .transpose()?,
+            };
+
+            let Some(edge_data) = edge_data else {
+                continue;
+            };
+
+            let label = edge_data
+                .label
+                .clone()
+                .unwrap_or_else(|| label_filter.unwrap_or("unknown").to_string());
+            let source = edge_data
+                .source
+                .clone()
+                .unwrap_or_else(|| NodeRef::new(database, namespace, entity_type, node_id));
+            let target = edge_data
+                .target
+                .clone()
+                .unwrap_or_else(|| NodeRef::new(database, namespace, "Unknown", "Unknown"));
+
+            edges.push(StoredEdge {
+                edge_id: edge_data.edge_id,
+                source,
+                target,
+                label,
+                properties: edge_data.properties,
+                created_at: edge_data.created_at,
+            });
         }
 
         Ok(edges)

@@ -183,27 +183,44 @@ impl PelagoDb {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, PelagoError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let trx = self.fdb.create_trx().map_err(|e| {
             PelagoError::FdbUnavailable(format!("Failed to create transaction: {}", e))
         })?;
 
-        let range_option = RangeOption {
+        let mut range_option = RangeOption {
             limit: Some(limit),
             ..RangeOption::from((begin, end))
         };
 
-        // iteration influences batch sizing for iterator-mode range reads.
-        // Using the requested limit avoids undersized first-batch results.
-        let iteration = limit.max(1);
-        let result = trx
-            .get_range(&range_option, iteration, false)
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Get range failed: {}", e)))?;
+        // `Transaction::get_range` may return a partial batch even when `limit`
+        // is higher (byte-based batching). Continue until `more == false` or the
+        // requested limit is satisfied.
+        let mut out = Vec::with_capacity(limit);
+        let mut iteration = 1usize;
+        loop {
+            let batch = trx
+                .get_range(&range_option, iteration, false)
+                .await
+                .map_err(|e| PelagoError::Internal(format!("Get range failed: {}", e)))?;
 
-        Ok(result
-            .iter()
-            .map(|kv| (kv.key().to_vec(), kv.value().to_vec()))
-            .collect())
+            out.extend(
+                batch
+                    .iter()
+                    .map(|kv| (kv.key().to_vec(), kv.value().to_vec())),
+            );
+
+            let Some(next_range) = range_option.next_range(&batch) else {
+                break;
+            };
+            range_option = next_range;
+            iteration += 1;
+        }
+
+        Ok(out)
     }
 
     /// Get underlying FDB database for advanced operations
@@ -276,24 +293,38 @@ impl PelagoTxn {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, PelagoError> {
-        let range_option = RangeOption {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut range_option = RangeOption {
             limit: Some(limit),
             ..RangeOption::from((begin, end))
         };
 
-        // iteration influences batch sizing for iterator-mode range reads.
-        // Using the requested limit avoids undersized first-batch results.
-        let iteration = limit.max(1);
-        let result = self
-            .trx
-            .get_range(&range_option, iteration, false)
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Get range failed: {}", e)))?;
+        let mut out = Vec::with_capacity(limit);
+        let mut iteration = 1usize;
+        loop {
+            let batch = self
+                .trx
+                .get_range(&range_option, iteration, false)
+                .await
+                .map_err(|e| PelagoError::Internal(format!("Get range failed: {}", e)))?;
 
-        Ok(result
-            .iter()
-            .map(|kv| (kv.key().to_vec(), kv.value().to_vec()))
-            .collect())
+            out.extend(
+                batch
+                    .iter()
+                    .map(|kv| (kv.key().to_vec(), kv.value().to_vec())),
+            );
+
+            let Some(next_range) = range_option.next_range(&batch) else {
+                break;
+            };
+            range_option = next_range;
+            iteration += 1;
+        }
+
+        Ok(out)
     }
 
     /// Get access to underlying transaction for advanced operations
