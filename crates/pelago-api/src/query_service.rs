@@ -8,6 +8,8 @@
 use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::core_to_proto_properties;
+use cel_interpreter::{Context as CelContext, Program as CelProgram, Value as CelValue};
+use pelago_core::Value as CoreValue;
 use pelago_proto::{
     query_service_server::QueryService, Edge, EdgeDirection, ExecutePqlRequest, ExplainRequest,
     ExplainResponse, FindNodesRequest, IndexOperation, Node, NodeRef as ProtoNodeRef, NodeResult,
@@ -16,14 +18,15 @@ use pelago_proto::{
 use pelago_query::plan::QueryExplanation;
 use pelago_query::planner::QueryPlanner;
 use pelago_query::pql::{
-    explain_query, parse_pql, InMemorySchemaProvider, PqlCompiler, PqlResolver, SchemaInfo,
+    explain_query, parse_pql, InMemorySchemaProvider, PqlCompiler, PqlParseError, PqlResolver,
+    SchemaInfo, SetOp,
 };
 use pelago_query::traversal::{TraversalConfig, TraversalDirection, TraversalEngine, TraversalHop};
 use pelago_query::QueryExecutor;
 use pelago_storage::{
     IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
@@ -463,7 +466,7 @@ impl QueryService for QueryServiceImpl {
         .await?;
         let input = apply_params(&req.pql, &req.params);
 
-        let ast = parse_pql(&input).map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let ast = parse_pql(&input).map_err(pql_parse_error_to_status)?;
         let schemas = self
             .build_pql_schema_provider(&ctx.database, &ctx.namespace)
             .await
@@ -627,20 +630,40 @@ impl QueryService for QueryServiceImpl {
                     }
                 }
                 pelago_query::pql::CompiledBlock::VariableRef {
-                    variable, fields, ..
+                    variable,
+                    filter,
+                    fields,
+                    limit,
+                    offset,
+                    ..
                 } => {
                     if let Some(nodes) = variables.get(variable) {
-                        block_nodes = nodes
-                            .iter()
-                            .map(|n| {
-                                let mut n2 = n.clone();
-                                if !fields.is_empty() {
-                                    n2.properties.retain(|k, _| fields.contains(k));
-                                }
-                                n2
-                            })
-                            .collect();
+                        block_nodes = apply_variable_nodes_pipeline(
+                            nodes.clone(),
+                            filter.as_deref(),
+                            fields,
+                            *limit,
+                            *offset,
+                        )?;
                     }
+                }
+                pelago_query::pql::CompiledBlock::VariableSet {
+                    variables: variable_names,
+                    set_op,
+                    filter,
+                    fields,
+                    limit,
+                    offset,
+                    ..
+                } => {
+                    let merged = merge_variable_sets(&variables, variable_names, set_op);
+                    block_nodes = apply_variable_nodes_pipeline(
+                        merged,
+                        filter.as_deref(),
+                        fields,
+                        *limit,
+                        *offset,
+                    )?;
                 }
             }
 
@@ -731,12 +754,186 @@ impl QueryServiceImpl {
     }
 }
 
-fn apply_params(input: &str, params: &std::collections::HashMap<String, String>) -> String {
-    let mut replaced = input.to_string();
-    for (key, value) in params {
-        replaced = replaced.replace(&format!("${}", key), value);
+fn apply_params(input: &str, params: &HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '$' && i + 1 < chars.len() && is_ident_start(chars[i + 1]) {
+            let start = i + 1;
+            let mut j = start + 1;
+            while j < chars.len() && is_ident_continue(chars[j]) {
+                j += 1;
+            }
+            let key: String = chars[start..j].iter().collect();
+            if let Some(value) = params.get(&key) {
+                out.push_str(value);
+            } else {
+                out.push('$');
+                out.push_str(&key);
+            }
+            i = j;
+            continue;
+        }
+
+        out.push(ch);
+        i += 1;
     }
-    replaced
+
+    out
+}
+
+fn apply_variable_nodes_pipeline(
+    mut nodes: Vec<StoredNode>,
+    filter: Option<&str>,
+    fields: &[String],
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<StoredNode>, Status> {
+    if let Some(filter_expr) = filter {
+        let program = CelProgram::compile(filter_expr).map_err(|e| {
+            Status::invalid_argument(format!("invalid variable filter '{}': {}", filter_expr, e))
+        })?;
+        nodes.retain(|node| evaluate_node_filter(&program, node));
+    }
+
+    if !fields.is_empty() {
+        for node in &mut nodes {
+            node.properties.retain(|k, _| fields.contains(k));
+        }
+    }
+
+    let skip = offset.unwrap_or(0) as usize;
+    if skip > 0 {
+        nodes = nodes.into_iter().skip(skip).collect();
+    }
+    if let Some(max) = limit {
+        nodes = nodes.into_iter().take(max as usize).collect();
+    }
+
+    Ok(nodes)
+}
+
+fn evaluate_node_filter(program: &CelProgram, node: &StoredNode) -> bool {
+    let mut context = CelContext::default();
+    for (key, value) in &node.properties {
+        context.add_variable(key, core_value_to_cel(value)).ok();
+    }
+
+    match program.execute(&context) {
+        Ok(CelValue::Bool(matched)) => matched,
+        Ok(CelValue::Null) => false,
+        Ok(_) => false,
+        Err(_) => false,
+    }
+}
+
+fn core_value_to_cel(value: &CoreValue) -> CelValue {
+    match value {
+        CoreValue::String(s) => CelValue::String(Arc::new(s.clone())),
+        CoreValue::Int(n) => CelValue::Int(*n),
+        CoreValue::Float(f) => CelValue::Float(*f),
+        CoreValue::Bool(b) => CelValue::Bool(*b),
+        CoreValue::Timestamp(t) => CelValue::Int(*t),
+        CoreValue::Bytes(b) => CelValue::Bytes(Arc::new(b.clone())),
+        CoreValue::Null => CelValue::Null,
+    }
+}
+
+fn merge_variable_sets(
+    variables: &HashMap<String, Vec<StoredNode>>,
+    variable_names: &[String],
+    set_op: &SetOp,
+) -> Vec<StoredNode> {
+    if variable_names.is_empty() {
+        return Vec::new();
+    }
+
+    let first = variables
+        .get(&variable_names[0])
+        .cloned()
+        .unwrap_or_default();
+
+    match set_op {
+        SetOp::Union => {
+            let mut seen: HashSet<(String, String)> = HashSet::new();
+            let mut merged = Vec::new();
+            for name in variable_names {
+                if let Some(nodes) = variables.get(name) {
+                    for node in nodes {
+                        let key = node_identity(node);
+                        if seen.insert(key) {
+                            merged.push(node.clone());
+                        }
+                    }
+                }
+            }
+            merged
+        }
+        SetOp::Intersect => {
+            if variable_names.len() == 1 {
+                return first;
+            }
+            let other_sets: Vec<HashSet<(String, String)>> = variable_names[1..]
+                .iter()
+                .map(|name| {
+                    variables
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|node| node_identity(&node))
+                        .collect()
+                })
+                .collect();
+
+            first
+                .into_iter()
+                .filter(|node| {
+                    let key = node_identity(node);
+                    other_sets.iter().all(|s| s.contains(&key))
+                })
+                .collect()
+        }
+        SetOp::Difference => {
+            if variable_names.len() == 1 {
+                return first;
+            }
+            let mut excluded: HashSet<(String, String)> = HashSet::new();
+            for name in &variable_names[1..] {
+                if let Some(nodes) = variables.get(name) {
+                    for node in nodes {
+                        excluded.insert(node_identity(node));
+                    }
+                }
+            }
+            first
+                .into_iter()
+                .filter(|node| !excluded.contains(&node_identity(node)))
+                .collect()
+        }
+    }
+}
+
+fn node_identity(node: &StoredNode) -> (String, String) {
+    (node.entity_type.clone(), node.id.clone())
+}
+
+fn pql_parse_error_to_status(err: PqlParseError) -> Status {
+    match err {
+        PqlParseError::UnsupportedFeature(msg) => Status::failed_precondition(msg),
+        other => Status::invalid_argument(other.to_string()),
+    }
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn decode_find_nodes_cursor(cursor: &[u8]) -> Result<FindNodesCursor, Status> {
@@ -800,6 +997,8 @@ fn encode_keyset_cursor(cursor: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pelago_core::Value;
+    use pelago_query::pql::CompiledBlock;
     use tonic::Code;
 
     #[test]
@@ -863,5 +1062,183 @@ mod tests {
             FindNodesCursor::Keyset(Some(raw)) => assert_eq!(raw, vec![1, 2, 3, 4, 5, 6, 7]),
             _ => panic!("expected keyset cursor when version prefix is present"),
         }
+    }
+
+    #[test]
+    fn test_apply_params_token_aware_replacement() {
+        let mut params = HashMap::new();
+        params.insert("a".to_string(), "1".to_string());
+        params.insert("age".to_string(), "30".to_string());
+        params.insert("name".to_string(), "\"Alice\"".to_string());
+
+        let input = r#"query { q(func: type(Person)) @filter(age >= $age && score >= $a && name == $name && other == $missing) { name } }"#;
+        let output = apply_params(input, &params);
+
+        assert!(output.contains("age >= 30"));
+        assert!(output.contains("score >= 1"));
+        assert!(output.contains("name == \"Alice\""));
+        assert!(output.contains("other == $missing"));
+    }
+
+    #[test]
+    fn test_pql_parse_error_status_mapping() {
+        let unsupported = pql_parse_error_to_status(PqlParseError::UnsupportedFeature(
+            "upsert not implemented".to_string(),
+        ));
+        assert_eq!(unsupported.code(), Code::FailedPrecondition);
+
+        let syntax = pql_parse_error_to_status(PqlParseError::Syntax {
+            line: 1,
+            col: 1,
+            message: "bad token".to_string(),
+        });
+        assert_eq!(syntax.code(), Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_merge_variable_sets_operations() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "a".to_string(),
+            vec![test_node("1", 20), test_node("2", 30)],
+        );
+        vars.insert(
+            "b".to_string(),
+            vec![test_node("2", 30), test_node("3", 40)],
+        );
+
+        let union = merge_variable_sets(&vars, &["a".into(), "b".into()], &SetOp::Union);
+        assert_eq!(
+            union.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+            vec!["1", "2", "3"]
+        );
+
+        let intersect = merge_variable_sets(&vars, &["a".into(), "b".into()], &SetOp::Intersect);
+        assert_eq!(
+            intersect.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+            vec!["2"]
+        );
+
+        let difference = merge_variable_sets(&vars, &["a".into(), "b".into()], &SetOp::Difference);
+        assert_eq!(
+            difference.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+            vec!["1"]
+        );
+    }
+
+    #[test]
+    fn test_variable_pipeline_filter_projection_and_paging() {
+        let nodes = vec![test_node("1", 20), test_node("2", 30), test_node("3", 40)];
+        let out = apply_variable_nodes_pipeline(
+            nodes,
+            Some("age >= 30"),
+            &["age".to_string()],
+            Some(1),
+            Some(1),
+        )
+        .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "3");
+        assert_eq!(out[0].properties.len(), 1);
+        assert_eq!(out[0].properties.get("age"), Some(&Value::Int(40)));
+    }
+
+    #[test]
+    fn test_multi_block_setop_runtime_pipeline_from_compiled_query() {
+        let pql = r#"query {
+            friends as friends(func: type(Person)) {
+                name
+                age
+            }
+            coworkers as coworkers(func: type(Person)) {
+                name
+                age
+            }
+            mutual as mutual(func: uid(friends, coworkers, intersect)) @filter(age >= 30) @limit(first: 10) {
+                name
+                age
+            }
+            narrowed(func: uid(mutual)) @filter(name == "p2") {
+                name
+            }
+        }"#;
+
+        let ast = parse_pql(pql).unwrap();
+        let mut schemas = InMemorySchemaProvider::new();
+        schemas.add_schema(SchemaInfo {
+            entity_type: "Person".to_string(),
+            fields: vec!["name".to_string(), "age".to_string()],
+            edges: vec![],
+            allow_undeclared_edges: false,
+        });
+        let resolved = PqlResolver::new().resolve(&ast, &schemas).unwrap();
+        let compiled = PqlCompiler::new().compile(&resolved).unwrap();
+
+        let mut variables: HashMap<String, Vec<StoredNode>> = HashMap::new();
+        variables.insert(
+            "friends".to_string(),
+            vec![test_node("1", 25), test_node("2", 35), test_node("3", 40)],
+        );
+        variables.insert(
+            "coworkers".to_string(),
+            vec![test_node("2", 35), test_node("3", 28), test_node("4", 50)],
+        );
+
+        let mutual_nodes = match &compiled[2] {
+            CompiledBlock::VariableSet {
+                variables: names,
+                set_op,
+                filter,
+                fields,
+                limit,
+                offset,
+                ..
+            } => {
+                let merged = merge_variable_sets(&variables, names, set_op);
+                apply_variable_nodes_pipeline(merged, filter.as_deref(), fields, *limit, *offset)
+                    .unwrap()
+            }
+            other => panic!("expected VariableSet at block 3, got {:?}", other),
+        };
+        assert_eq!(
+            mutual_nodes
+                .iter()
+                .map(|n| n.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2", "3"]
+        );
+        variables.insert("mutual".to_string(), mutual_nodes);
+
+        let narrowed_nodes = match &compiled[3] {
+            CompiledBlock::VariableRef {
+                variable,
+                filter,
+                fields,
+                limit,
+                offset,
+                ..
+            } => {
+                let seed = variables.get(variable).cloned().unwrap_or_default();
+                apply_variable_nodes_pipeline(seed, filter.as_deref(), fields, *limit, *offset)
+                    .unwrap()
+            }
+            other => panic!("expected VariableRef at block 4, got {:?}", other),
+        };
+
+        assert_eq!(narrowed_nodes.len(), 1);
+        assert_eq!(narrowed_nodes[0].id, "2");
+        assert_eq!(narrowed_nodes[0].properties.len(), 1);
+        assert_eq!(
+            narrowed_nodes[0].properties.get("name"),
+            Some(&Value::String("p2".to_string()))
+        );
+    }
+
+    fn test_node(id: &str, age: i64) -> StoredNode {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), Value::String(format!("p{}", id)));
+        props.insert("age".to_string(), Value::Int(age));
+        StoredNode::new(id.to_string(), "Person".to_string(), props, 1)
     }
 }

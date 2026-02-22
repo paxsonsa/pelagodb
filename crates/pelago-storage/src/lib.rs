@@ -25,11 +25,12 @@ pub mod schema;
 pub mod security;
 pub mod subspace;
 pub mod term_index;
+pub mod watch_state;
 
 pub use cache::SchemaCache;
 pub use cdc::{
-    append_cdc_entry, cdc_position_exists, read_cdc_entries, CdcAccumulator, CdcEntry,
-    CdcOperation, Versionstamp,
+    append_cdc_entry, cdc_position_exists, oldest_cdc_position, read_cdc_entries, CdcAccumulator,
+    CdcEntry, CdcOperation, Versionstamp,
 };
 pub use consumer::{fetch_all_checkpoints, CdcConsumer, ConsumerConfig};
 pub use db::{init_fdb_network, PelagoDb, PelagoTxn};
@@ -46,9 +47,15 @@ pub use replication::{
 pub use schema::SchemaRegistry;
 pub use security::{
     append_audit_record, check_permission, cleanup_audit_records, delete_policy, get_policy,
-    list_policies, query_audit_records, upsert_policy, AuditRecord, AuthPolicy, PolicyPermission,
+    get_token_session_by_access, get_token_session_by_refresh, list_policies, query_audit_records,
+    revoke_access_token, revoke_refresh_token, upsert_policy, upsert_token_session, AuditRecord,
+    AuthPolicy, AuthTokenSession, PolicyPermission,
 };
 pub use subspace::Subspace;
+pub use watch_state::{
+    cleanup_query_watch_states, delete_query_watch_state, get_query_watch_state,
+    upsert_query_watch_state, QueryWatchState,
+};
 
 #[cfg(feature = "cache")]
 pub use rocks_cache::{

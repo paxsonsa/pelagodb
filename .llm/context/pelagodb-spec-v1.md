@@ -3757,6 +3757,10 @@ query {
 
 PQL supports atomic query-then-mutate operations within a single FDB transaction.
 
+**Implementation status (February 22, 2026):** Upsert blocks are deferred in the current runtime.
+`ExecutePQL` rejects queries containing `upsert` with an explicit unsupported-feature error.
+This section remains the target design for the later upsert phase.
+
 #### 17.10.1 Upsert Block Syntax
 
 ```
@@ -4093,6 +4097,8 @@ pelago-query/src/
 - [ ] UpsertRequest proto
 - [ ] Atomic query-then-mutate in single FDB transaction
 
+Current runtime behavior: deferred; parser/API returns unsupported-feature for `upsert`.
+
 ### 17.15 Comparison: PQL vs DQL
 
 | Feature | DQL | PQL | Rationale |
@@ -4105,7 +4111,7 @@ pelago-query/src/
 | @facets | Yes (inline) | Yes (with directive) | Direct inspiration |
 | @recurse | Yes (depth-limited) | Yes (with cycle detection) | Added cycle detection |
 | @groupby | Yes | Yes | Direct inspiration |
-| Upsert blocks | Yes | Yes | Direct inspiration, single FDB txn |
+| Upsert blocks | Yes | Deferred (unsupported in current runtime) | Target is DQL-like upsert in a future phase |
 | Set operations | No (manual) | Yes | Useful for mutual-friends pattern |
 | Sort | `orderasc`/`orderdesc` | `@sort(field: asc/desc)` | Cleaner directive syntax |
 | Per-hop limit | No built-in | `@limit` on edge blocks | Critical for traversal explosion |

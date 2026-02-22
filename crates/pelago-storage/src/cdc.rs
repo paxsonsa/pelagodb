@@ -333,6 +333,26 @@ pub async fn cdc_position_exists(
     Ok(db.get(&key).await?.is_some())
 }
 
+/// Returns the oldest available CDC versionstamp for a namespace.
+pub async fn oldest_cdc_position(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+) -> Result<Option<Versionstamp>, PelagoError> {
+    let subspace = Subspace::namespace(database, namespace).cdc();
+    let start = subspace.prefix().to_vec();
+    let end = subspace.range_end().to_vec();
+    let rows = db.get_range(&start, &end, 1).await?;
+    let Some((key, _)) = rows.first() else {
+        return Ok(None);
+    };
+    let prefix_len = subspace.prefix().len();
+    if key.len() < prefix_len + 10 {
+        return Ok(None);
+    }
+    Ok(Versionstamp::from_bytes(&key[prefix_len..prefix_len + 10]))
+}
+
 fn now_micros() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

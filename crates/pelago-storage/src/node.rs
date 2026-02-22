@@ -558,9 +558,9 @@ impl NodeStore {
         let mut out = Vec::with_capacity(node_ids.len());
 
         for node_id in node_ids {
-            let parsed_id: NodeId = node_id
-                .parse()
-                .map_err(|_| PelagoError::InvalidId { value: node_id.clone() })?;
+            let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+                value: node_id.clone(),
+            })?;
             let node_id_bytes = parsed_id.to_bytes();
             let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
 

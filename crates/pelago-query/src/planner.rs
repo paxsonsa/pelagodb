@@ -267,15 +267,37 @@ impl QueryPlanner {
             return None;
         }
 
-        // If we used an index, the remaining predicates become residual
-        // For simplicity, if we used one predicate, return the original expression
-        // A proper implementation would reconstruct the expression without the used predicate
         match used_idx {
-            Some(_idx) if predicates.len() > 1 => {
-                // Multiple predicates - return original (simplified approach)
-                Some(original_expression.to_string())
+            Some(idx) => {
+                if predicates.len() == 1 {
+                    return None;
+                }
+
+                // Preserve simple conjunction semantics by dropping the
+                // predicate chosen as the primary index scan.
+                let conjuncts: Vec<String> = original_expression
+                    .split("&&")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+                if conjuncts.len() == predicates.len() && idx < conjuncts.len() {
+                    let residual_parts: Vec<String> = conjuncts
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(i, part)| (i != idx).then_some(part))
+                        .collect();
+                    if residual_parts.is_empty() {
+                        None
+                    } else {
+                        Some(residual_parts.join(" && "))
+                    }
+                } else {
+                    // If we cannot safely map back to conjunction parts, keep
+                    // the original expression to preserve correctness.
+                    Some(original_expression.to_string())
+                }
             }
-            Some(_) => None, // Single predicate fully covered by index
             None => Some(original_expression.to_string()), // Full scan needs all predicates
         }
     }
@@ -413,5 +435,57 @@ mod tests {
         } else {
             panic!("Expected IndexScan");
         }
+    }
+
+    #[test]
+    fn test_residual_filter_kept_for_mixed_indexed_and_non_indexed_predicates() {
+        let schema = make_test_schema();
+        let expression = "age >= 30 && bio == 'writer'";
+        let plan = QueryPlanner::plan("Person", expression, &schema, None, None).unwrap();
+
+        assert!(matches!(
+            plan.primary_plan,
+            QueryPlan::IndexScan { property, .. } if property == "age"
+        ));
+        assert_eq!(plan.residual_filter.as_deref(), Some("bio == 'writer'"));
+    }
+
+    #[test]
+    fn test_residual_filter_absent_when_single_indexed_predicate_is_fully_covered() {
+        let schema = make_test_schema();
+        let plan = QueryPlanner::plan("Person", "status == 'active'", &schema, None, None).unwrap();
+
+        assert!(matches!(
+            plan.primary_plan,
+            QueryPlan::IndexScan { property, .. } if property == "status"
+        ));
+        assert!(plan.residual_filter.is_none());
+    }
+
+    #[test]
+    fn test_residual_filter_kept_for_full_scan() {
+        let schema = make_test_schema();
+        let expression = "bio == 'writer' && unknown == 5";
+        let plan = QueryPlanner::plan("Person", expression, &schema, None, None).unwrap();
+
+        assert!(matches!(plan.primary_plan, QueryPlan::FullScan));
+        assert_eq!(plan.residual_filter.as_deref(), Some(expression));
+    }
+
+    #[test]
+    fn test_residual_filter_removes_only_primary_index_predicate() {
+        let schema = make_test_schema();
+        let expression = "email == 'a@b.com' && status == 'active' && bio == 'writer'";
+        let plan = QueryPlanner::plan("Person", expression, &schema, None, None).unwrap();
+
+        // Unique email should be the primary path; status+bio stay residual.
+        assert!(matches!(
+            plan.primary_plan,
+            QueryPlan::IndexScan { property, .. } if property == "email"
+        ));
+        assert_eq!(
+            plan.residual_filter.as_deref(),
+            Some("status == 'active' && bio == 'writer'")
+        );
     }
 }

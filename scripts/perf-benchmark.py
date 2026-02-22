@@ -171,6 +171,11 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Number of pages to walk before deep-page benchmark (context profile)",
     )
+    parser.add_argument(
+        "--require-deep-page",
+        action="store_true",
+        help="Fail when deep-page cursor walk cannot reach requested depth",
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--runs", type=int, default=30)
     parser.add_argument(
@@ -292,10 +297,15 @@ def compute_deep_cursor_hex(
     base: List[str], entity_type: str, cel_filter: str, page_size: int, pages: int
 ) -> str:
     cursor_hex = ""
+    seen: set[str] = set()
     for _ in range(max(pages, 0)):
         next_hex = next_cursor_hex_for_find(base, entity_type, cel_filter, page_size, cursor_hex)
         if not next_hex:
             return ""
+        if next_hex in seen:
+            # Cursor loop indicates unstable keyset progression.
+            return ""
+        seen.add(next_hex)
         cursor_hex = next_hex
     return cursor_hex
 
@@ -462,9 +472,14 @@ def main() -> int:
                 )
                 targets["context_deep_page"] = args.target_context_deep_page_ms
             else:
-                print(
-                    "Skipping context_deep_page: unable to walk requested deep pages (insufficient result depth)."
+                msg = (
+                    "unable to walk requested deep pages "
+                    "(insufficient result depth or unstable keyset cursor progression)"
                 )
+                if args.require_deep_page:
+                    print(f"context_deep_page gate failed: {msg}")
+                    return 2
+                print(f"Skipping context_deep_page: {msg}.")
 
     results: List[BenchResult] = []
     for name, cmd in cases:

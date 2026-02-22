@@ -24,13 +24,15 @@ use pelago_proto::{
     schema_service_server::SchemaServiceServer, watch_service_server::WatchServiceServer,
 };
 use pelago_storage::{
-    claim_site, cleanup_audit_records, CachedReadPath, CdcProjector, IdAllocator, JobWorker,
-    NodeStore, PelagoDb, RocksCacheConfig, RocksCacheStore, SchemaCache, SchemaRegistry,
+    claim_site, cleanup_audit_records, cleanup_query_watch_states, CachedReadPath, CdcProjector,
+    IdAllocator, JobWorker, NodeStore, PelagoDb, RocksCacheConfig, RocksCacheStore, SchemaCache,
+    SchemaRegistry,
 };
 use replicator::{start_replicators, ReplicatorConfig};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tonic::transport::Server;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Status};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -153,10 +155,14 @@ async fn main() -> Result<()> {
         Arc::clone(&schema_registry),
         watch_registry.clone(),
     );
-    let auth_runtime = AuthRuntime::new();
+    let auth_runtime = AuthRuntime::with_db(db.clone());
     let auth_service = AuthServiceImpl::new(db.clone(), auth_runtime);
     let auth_required = config.auth_required;
-    let interceptor = auth_interceptor(auth_required, auth_service.runtime());
+    let interceptor = auth_interceptor(
+        auth_required,
+        auth_service.runtime(),
+        config.mtls_subject_header.clone(),
+    );
 
     // Start background job worker
     let job_worker = JobWorker::new(db.clone(), Arc::clone(&schema_registry));
@@ -235,6 +241,38 @@ async fn main() -> Result<()> {
         });
     }
 
+    if config.watch_state_retention_enabled {
+        let watch_state_db = db.clone();
+        let retention_days = config.watch_state_retention_days.max(1);
+        let sweep_secs = config.watch_state_retention_sweep_secs.max(10);
+        let batch_limit = config.watch_state_retention_batch.max(1);
+        let shutdown_for_watch_state = shutdown_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                if *shutdown_for_watch_state.borrow() {
+                    break;
+                }
+                if shutdown_for_watch_state.has_changed().unwrap_or(false)
+                    && *shutdown_for_watch_state.borrow()
+                {
+                    break;
+                }
+                let retention_secs = retention_days.saturating_mul(86_400);
+                match cleanup_query_watch_states(&watch_state_db, retention_secs, batch_limit).await
+                {
+                    Ok(deleted) if deleted > 0 => {
+                        info!("watch state retention removed {} records", deleted);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("watch state retention sweep failed: {}", e);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(sweep_secs)).await;
+            }
+        });
+    }
+
     start_replicators(
         db.clone(),
         Arc::clone(&schema_registry),
@@ -271,8 +309,19 @@ async fn main() -> Result<()> {
 
     info!("Starting gRPC server on {}", addr);
 
+    let mut server = Server::builder();
+    if let Some(tls_config) = build_server_tls_config(&config)? {
+        info!(
+            client_auth = %config.tls_client_auth,
+            "gRPC TLS transport enabled"
+        );
+        server = server
+            .tls_config(tls_config)
+            .context("failed to apply gRPC TLS configuration")?;
+    }
+
     // Build and start the gRPC server
-    Server::builder()
+    server
         .add_service(SchemaServiceServer::with_interceptor(
             schema_service,
             interceptor.clone(),
@@ -319,6 +368,24 @@ async fn main() -> Result<()> {
 fn apply_cli_env_overrides(config: &ServerConfig) {
     // These subsystems still read env directly; map parsed CLI/env config into env.
     set_env_if_some("PELAGO_API_KEYS", config.api_keys.clone());
+    set_env_if_some("PELAGO_MTLS_ENABLED", Some(config.mtls_enabled));
+    set_env_if_some(
+        "PELAGO_MTLS_SUBJECT_HEADER",
+        Some(config.mtls_subject_header.clone()),
+    );
+    set_env_if_some("PELAGO_MTLS_SUBJECTS", config.mtls_subjects.clone());
+    set_env_if_some("PELAGO_MTLS_FINGERPRINTS", config.mtls_fingerprints.clone());
+    set_env_if_some(
+        "PELAGO_MTLS_DEFAULT_ROLE",
+        Some(config.mtls_default_role.clone()),
+    );
+    set_env_if_some("PELAGO_TLS_CERT", config.tls_cert.clone());
+    set_env_if_some("PELAGO_TLS_KEY", config.tls_key.clone());
+    set_env_if_some("PELAGO_TLS_CA", config.tls_ca.clone());
+    set_env_if_some(
+        "PELAGO_TLS_CLIENT_AUTH",
+        Some(config.tls_client_auth.clone()),
+    );
     set_env_if_some(
         "PELAGO_WATCH_MAX_SUBSCRIPTIONS",
         config.watch_max_subscriptions,
@@ -484,6 +551,15 @@ fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
         ),
         ("auth_required", "PELAGO_AUTH_REQUIRED"),
         ("api_keys", "PELAGO_API_KEYS"),
+        ("mtls_enabled", "PELAGO_MTLS_ENABLED"),
+        ("mtls_subject_header", "PELAGO_MTLS_SUBJECT_HEADER"),
+        ("mtls_subjects", "PELAGO_MTLS_SUBJECTS"),
+        ("mtls_fingerprints", "PELAGO_MTLS_FINGERPRINTS"),
+        ("mtls_default_role", "PELAGO_MTLS_DEFAULT_ROLE"),
+        ("tls_cert", "PELAGO_TLS_CERT"),
+        ("tls_key", "PELAGO_TLS_KEY"),
+        ("tls_ca", "PELAGO_TLS_CA"),
+        ("tls_client_auth", "PELAGO_TLS_CLIENT_AUTH"),
         ("audit_enabled", "PELAGO_AUDIT_ENABLED"),
         ("audit_retention_days", "PELAGO_AUDIT_RETENTION_DAYS"),
         (
@@ -530,6 +606,22 @@ fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
             "watch_max_dropped_events",
             "PELAGO_WATCH_MAX_DROPPED_EVENTS",
         ),
+        (
+            "watch_state_retention_enabled",
+            "PELAGO_WATCH_STATE_RETENTION_ENABLED",
+        ),
+        (
+            "watch_state_retention_days",
+            "PELAGO_WATCH_STATE_RETENTION_DAYS",
+        ),
+        (
+            "watch_state_retention_sweep_secs",
+            "PELAGO_WATCH_STATE_RETENTION_SWEEP_SECS",
+        ),
+        (
+            "watch_state_retention_batch",
+            "PELAGO_WATCH_STATE_RETENTION_BATCH",
+        ),
     ]
 }
 
@@ -554,10 +646,30 @@ fn resolve_fdb_cluster_file(configured: &str) -> String {
 fn auth_interceptor(
     auth_required: bool,
     runtime: AuthRuntime,
+    mtls_subject_header: String,
 ) -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
+    let mtls_subject_header = mtls_subject_header.to_ascii_lowercase();
     move |mut req: Request<()>| {
         if !auth_required {
             return Ok(req);
+        }
+
+        if let Some(fingerprint) = request_peer_cert_fingerprint(&req) {
+            if let Some(principal) = runtime.principal_for_mtls_fingerprint(&fingerprint) {
+                req.extensions_mut().insert(principal);
+                return Ok(req);
+            }
+        }
+
+        if let Some(subject) = req
+            .metadata()
+            .get(mtls_subject_header.as_str())
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(principal) = runtime.principal_for_mtls_subject(subject) {
+                req.extensions_mut().insert(principal);
+                return Ok(req);
+            }
         }
 
         if let Some(key) = req
@@ -577,14 +689,114 @@ fn auth_interceptor(
             .and_then(|v| v.to_str().ok())
         {
             let token = auth.strip_prefix("Bearer ").unwrap_or(auth);
-            if let Some(principal) = runtime.validate_bearer_token_sync(token) {
+            if let Some(principal) = runtime.validate_bearer_token_blocking(token) {
                 req.extensions_mut().insert(principal);
                 return Ok(req);
             }
         }
 
         Err(Status::unauthenticated(
-            "authentication required: provide bearer token or x-api-key",
+            "authentication required: provide mTLS client cert, bearer token, or x-api-key",
         ))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TlsClientAuthMode {
+    None,
+    Request,
+    Require,
+}
+
+impl TlsClientAuthMode {
+    fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "request" => Ok(Self::Request),
+            "require" => Ok(Self::Require),
+            other => Err(anyhow::anyhow!(
+                "invalid PELAGO_TLS_CLIENT_AUTH value '{}'; expected one of: none, request, require",
+                other
+            )),
+        }
+    }
+}
+
+fn build_server_tls_config(config: &ServerConfig) -> Result<Option<ServerTlsConfig>> {
+    let tls_cert = config
+        .tls_cert
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let tls_key = config
+        .tls_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let tls_ca = config
+        .tls_ca
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if tls_cert.is_none() && tls_key.is_none() && tls_ca.is_none() {
+        return Ok(None);
+    }
+
+    let cert_path = tls_cert.ok_or_else(|| {
+        anyhow::anyhow!("PELAGO_TLS_CERT is required when TLS configuration is enabled")
+    })?;
+    let key_path = tls_key.ok_or_else(|| {
+        anyhow::anyhow!("PELAGO_TLS_KEY is required when TLS configuration is enabled")
+    })?;
+
+    let cert_pem = std::fs::read(cert_path)
+        .with_context(|| format!("failed to read TLS cert '{}'", cert_path))?;
+    let key_pem = std::fs::read(key_path)
+        .with_context(|| format!("failed to read TLS key '{}'", key_path))?;
+
+    let mode = TlsClientAuthMode::parse(&config.tls_client_auth)?;
+    let mut tls = ServerTlsConfig::new().identity(Identity::from_pem(cert_pem, key_pem));
+    match mode {
+        TlsClientAuthMode::None => {
+            if tls_ca.is_some() {
+                warn!(
+                    "PELAGO_TLS_CA is set but PELAGO_TLS_CLIENT_AUTH=none; client certificate auth is disabled"
+                );
+            }
+        }
+        TlsClientAuthMode::Request | TlsClientAuthMode::Require => {
+            let ca_path = tls_ca.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "PELAGO_TLS_CA is required when PELAGO_TLS_CLIENT_AUTH is '{}'",
+                    config.tls_client_auth
+                )
+            })?;
+            let ca_pem = std::fs::read(ca_path)
+                .with_context(|| format!("failed to read TLS CA cert '{}'", ca_path))?;
+            tls = tls.client_ca_root(Certificate::from_pem(ca_pem));
+            if mode == TlsClientAuthMode::Request {
+                tls = tls.client_auth_optional(true);
+            }
+        }
+    }
+
+    Ok(Some(tls))
+}
+
+fn request_peer_cert_fingerprint(req: &Request<()>) -> Option<String> {
+    let certs = req.peer_certs()?;
+    let first = certs.first()?;
+    Some(sha256_fingerprint(first.as_ref()))
+}
+
+fn sha256_fingerprint(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::from("sha256:");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for b in digest {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }

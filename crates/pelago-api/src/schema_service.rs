@@ -10,7 +10,8 @@ use crate::error::ToStatus;
 use pelago_core::schema::{
     EdgeDef as CoreEdgeDef, EdgeDirection as CoreEdgeDirection, EdgeTarget as CoreEdgeTarget,
     EntitySchema as CoreSchema, ExtrasPolicy as CoreExtrasPolicy, IndexType as CoreIndexType,
-    OwnershipMode as CoreOwnershipMode, PropertyDef as CorePropertyDef, SchemaMeta as CoreSchemaMeta,
+    OwnershipMode as CoreOwnershipMode, PropertyDef as CorePropertyDef,
+    SchemaMeta as CoreSchemaMeta,
 };
 use pelago_core::{PropertyType as CorePropertyType, Value as CoreValue};
 use pelago_proto::{
@@ -302,7 +303,9 @@ fn proto_to_core_edge_target(proto: &EdgeTarget) -> Result<CoreEdgeTarget, Statu
 
 fn core_to_proto_edge_target(core: &CoreEdgeTarget) -> EdgeTarget {
     let kind = match core {
-        CoreEdgeTarget::Specific(name) => pelago_proto::edge_target::Kind::SpecificType(name.clone()),
+        CoreEdgeTarget::Specific(name) => {
+            pelago_proto::edge_target::Kind::SpecificType(name.clone())
+        }
         CoreEdgeTarget::Polymorphic => pelago_proto::edge_target::Kind::Polymorphic(true),
     };
     EdgeTarget { kind: Some(kind) }

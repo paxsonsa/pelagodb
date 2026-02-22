@@ -14,9 +14,14 @@ use pelago_core::{NodeId, PelagoError, Value};
 use pelago_storage::index::markers;
 use pelago_storage::term_index;
 use pelago_storage::{IdAllocator, NodeStore, PelagoDb, SchemaRegistry, StoredNode, Subspace};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+const NODE_BATCH_FETCH_SIZE: usize = 256;
+const TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE: &str = "__tpl_show_scheme_shot_sequence";
+const TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE_TASK_LABEL: &str =
+    "__tpl_show_scheme_shot_sequence_task_label";
 
 /// Query executor configuration
 pub struct ExecutorConfig {
@@ -250,6 +255,7 @@ impl QueryExecutor {
             Some(p) => p,
             None => return Ok(None),
         };
+        let groups = rewrite_template_term_groups(parsed.groups);
 
         let effective_limit = limit
             .unwrap_or(self.config.default_limit)
@@ -262,25 +268,15 @@ impl QueryExecutor {
                 database,
                 namespace,
                 entity_type,
-                &parsed.groups,
+                &groups,
                 cursor_node_id.as_ref(),
                 fetch_limit,
             )
             .await?;
         let candidate_count = node_ids.len();
 
-        let node_store = NodeStore::new(
-            self.db.clone(),
-            Arc::clone(&self.schema_registry),
-            Arc::clone(&self.id_allocator),
-            self.site_id.clone(),
-        );
-
-        let mut nodes = Vec::new();
+        let mut ordered_node_ids = Vec::with_capacity(node_ids.len());
         for node_id_bytes in node_ids {
-            if nodes.len() >= fetch_limit {
-                break;
-            }
             if node_id_bytes.len() != 9 {
                 continue;
             }
@@ -290,16 +286,20 @@ impl QueryExecutor {
                 }
             }
             let arr: [u8; 9] = node_id_bytes.try_into().unwrap();
-            let node_id = NodeId::from_bytes(&arr).to_string();
-            if let Some(mut node) = node_store
-                .get_node(database, namespace, entity_type, &node_id)
-                .await?
-            {
-                if let Some(ref fields) = projection {
-                    node = project_node(node, fields);
-                }
-                nodes.push(node);
+            ordered_node_ids.push(NodeId::from_bytes(&arr).to_string());
+            if ordered_node_ids.len() >= fetch_limit {
+                break;
             }
+        }
+
+        let mut nodes = self
+            .fetch_nodes_in_order(database, namespace, entity_type, &ordered_node_ids)
+            .await?;
+        if let Some(ref fields) = projection {
+            nodes = nodes
+                .into_iter()
+                .map(|node| project_node(node, fields))
+                .collect();
         }
 
         let has_more = nodes.len() > effective_limit;
@@ -315,7 +315,7 @@ impl QueryExecutor {
         tracing::debug!(
             entity_type,
             expression,
-            groups = parsed.groups.len(),
+            groups = groups.len(),
             candidates_scanned = candidate_count,
             rows_returned = nodes.len(),
             has_more,
@@ -383,8 +383,8 @@ impl QueryExecutor {
                 ))
             }
         };
-
-        let (mut range_start, range_end) = match predicate {
+        let mut keyed_node_ids: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        match predicate {
             IndexPredicate::Equals(value) => {
                 let encoded_value = encode_predicate_value(value)?;
                 let key_prefix = idx_subspace
@@ -395,13 +395,30 @@ impl QueryExecutor {
                     .add_raw_bytes(&encoded_value)
                     .build();
 
-                // For equality, scan the exact prefix
-                let mut end = key_prefix.to_vec();
-                end.push(0xFF);
-                (key_prefix.to_vec(), end)
+                let mut range_start = key_prefix.to_vec();
+                let mut range_end = key_prefix.to_vec();
+                range_end.push(0xFF);
+                if let Some(cursor) = cursor {
+                    range_start = make_exclusive_start(cursor);
+                }
+                let index_results = self
+                    .db
+                    .get_range(&range_start, &range_end, limit.max(1))
+                    .await?;
+                for (key, value) in index_results {
+                    let node_id = match index_type {
+                        pelago_core::schema::IndexType::Unique => value,
+                        pelago_core::schema::IndexType::Equality
+                        | pelago_core::schema::IndexType::Range => {
+                            extract_node_id_from_index_key(&key)?
+                        }
+                        pelago_core::schema::IndexType::None => unreachable!(),
+                    };
+                    keyed_node_ids.push((key, node_id));
+                }
             }
             IndexPredicate::Range { lower, upper } => {
-                let start = match lower {
+                let mut range_start = match lower {
                     Some(bound) => {
                         let encoded = encode_predicate_value(&bound.value)?;
                         let key_builder = idx_subspace
@@ -424,8 +441,7 @@ impl QueryExecutor {
                         .build()
                         .to_vec(),
                 };
-
-                let end = match upper {
+                let range_end = match upper {
                     Some(bound) => {
                         let encoded = encode_predicate_value(&bound.value)?;
                         let key_builder = idx_subspace
@@ -453,85 +469,100 @@ impl QueryExecutor {
                     }
                 };
 
-                (start, end)
+                if let Some(cursor) = cursor {
+                    range_start = make_exclusive_start(cursor);
+                }
+                let index_results = self
+                    .db
+                    .get_range(&range_start, &range_end, limit.max(1))
+                    .await?;
+                for (key, value) in index_results {
+                    let node_id = match index_type {
+                        pelago_core::schema::IndexType::Unique => value,
+                        pelago_core::schema::IndexType::Equality
+                        | pelago_core::schema::IndexType::Range => {
+                            extract_node_id_from_index_key(&key)?
+                        }
+                        pelago_core::schema::IndexType::None => unreachable!(),
+                    };
+                    keyed_node_ids.push((key, node_id));
+                }
             }
             IndexPredicate::In(values) => {
-                // For IN, we need to do multiple scans
-                // For simplicity, just do the first value and filter the rest
                 if values.is_empty() {
                     return Ok(Vec::new());
                 }
-                let encoded_value = encode_predicate_value(&values[0])?;
-                let key_prefix = idx_subspace
-                    .pack()
-                    .add_string(entity_type)
-                    .add_string(property)
-                    .add_marker(marker)
-                    .add_raw_bytes(&encoded_value)
-                    .build();
 
-                let mut end = key_prefix.to_vec();
-                end.push(0xFF);
-                (key_prefix.to_vec(), end)
-            }
-        };
+                let cursor_node_id = cursor.map(parse_node_cursor).transpose()?;
+                let hard_cap = limit.max(1).saturating_mul(8).max(512);
+                let per_value_limit = (hard_cap / values.len().max(1)).max(limit.max(1));
+                let mut merged_by_node_id: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
 
-        if let Some(cursor) = cursor {
-            range_start = make_exclusive_start(cursor);
-        }
+                for value in values {
+                    let encoded_value = encode_predicate_value(value)?;
+                    let key_prefix = idx_subspace
+                        .pack()
+                        .add_string(entity_type)
+                        .add_string(property)
+                        .add_marker(marker)
+                        .add_raw_bytes(&encoded_value)
+                        .build();
+                    let mut end = key_prefix.to_vec();
+                    end.push(0xFF);
 
-        // Scan index keys
-        let index_results = self
-            .db
-            .get_range(&range_start, &range_end, limit.max(1))
-            .await?;
-
-        // Extract node IDs from index entries
-        let mut keyed_node_ids: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        for (key, value) in index_results {
-            let node_id = match index_type {
-                pelago_core::schema::IndexType::Unique => {
-                    // Value is the node_id
-                    value
+                    let rows = self
+                        .db
+                        .get_range(&key_prefix, &end, per_value_limit.max(1))
+                        .await?;
+                    for (key, value_bytes) in rows {
+                        let node_id = match index_type {
+                            pelago_core::schema::IndexType::Unique => value_bytes,
+                            pelago_core::schema::IndexType::Equality
+                            | pelago_core::schema::IndexType::Range => {
+                                extract_node_id_from_index_key(&key)?
+                            }
+                            pelago_core::schema::IndexType::None => unreachable!(),
+                        };
+                        if node_id.len() != 9 {
+                            continue;
+                        }
+                        if let Some(cursor_id) = cursor_node_id.as_ref() {
+                            if node_id.as_slice() <= cursor_id.as_slice() {
+                                continue;
+                            }
+                        }
+                        // For IN scans we keyset-page by node_id bytes to keep
+                        // ordering stable across multiple per-value scans.
+                        merged_by_node_id
+                            .entry(node_id.clone())
+                            .or_insert_with(|| node_id.clone());
+                        if merged_by_node_id.len() >= hard_cap {
+                            break;
+                        }
+                    }
+                    if merged_by_node_id.len() >= hard_cap {
+                        break;
+                    }
                 }
-                pelago_core::schema::IndexType::Equality
-                | pelago_core::schema::IndexType::Range => {
-                    // Node ID is the last component of the key
-                    // This is a simplification - proper implementation would parse the tuple
-                    extract_node_id_from_index_key(&key)?
-                }
-                pelago_core::schema::IndexType::None => unreachable!(),
-            };
-            keyed_node_ids.push((key, node_id));
-        }
 
-        // Fetch full nodes
-        let node_store = NodeStore::new(
-            self.db.clone(),
-            Arc::clone(&self.schema_registry),
-            Arc::clone(&self.id_allocator),
-            self.site_id.clone(),
-        );
-        let mut nodes = Vec::new();
-        for (index_key, node_id_bytes) in keyed_node_ids {
-            // Parse node ID from bytes (must be exactly 9 bytes)
-            if node_id_bytes.len() == 9 {
-                let arr: [u8; 9] = node_id_bytes.try_into().unwrap();
-                let node_id = NodeId::from_bytes(&arr);
-                let id_str = node_id.to_string();
-                if let Ok(Some(node)) = node_store
-                    .get_node(database, namespace, entity_type, &id_str)
-                    .await
-                {
-                    nodes.push(ScanCandidate {
-                        node,
-                        cursor_key: Some(index_key),
-                    });
-                }
+                keyed_node_ids.extend(
+                    merged_by_node_id
+                        .into_iter()
+                        .map(|(node_id, cursor_key)| (cursor_key, node_id)),
+                );
             }
         }
 
-        Ok(nodes)
+        let mut keyed_node_ids_text = Vec::with_capacity(keyed_node_ids.len());
+        for (cursor_key, node_id_bytes) in keyed_node_ids {
+            if node_id_bytes.len() != 9 {
+                continue;
+            }
+            let arr: [u8; 9] = node_id_bytes.try_into().unwrap();
+            keyed_node_ids_text.push((cursor_key, NodeId::from_bytes(&arr).to_string()));
+        }
+        self.fetch_scan_candidates_in_order(database, namespace, entity_type, &keyed_node_ids_text)
+            .await
     }
 
     async fn execute_term_groups(
@@ -665,7 +696,31 @@ impl QueryExecutor {
             .get_range(&range_start, &range_end, limit.max(1))
             .await?;
 
-        // Create NodeStore to decode results
+        let mut keyed_node_ids = Vec::with_capacity(results.len());
+        for (key, _value) in results {
+            if let Ok(node_id_bytes) = extract_node_id_from_data_key(&key) {
+                if node_id_bytes.len() == 9 {
+                    let arr: [u8; 9] = node_id_bytes.try_into().unwrap();
+                    keyed_node_ids.push((key, NodeId::from_bytes(&arr).to_string()));
+                }
+            }
+        }
+
+        self.fetch_scan_candidates_in_order(database, namespace, entity_type, &keyed_node_ids)
+            .await
+    }
+
+    async fn fetch_nodes_in_order(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_ids: &[String],
+    ) -> Result<Vec<StoredNode>, PelagoError> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let node_store = NodeStore::new(
             self.db.clone(),
             Arc::clone(&self.schema_registry),
@@ -673,29 +728,58 @@ impl QueryExecutor {
             self.site_id.clone(),
         );
 
-        // Decode nodes - need to fetch them individually since results are raw KV
-        let mut nodes = Vec::new();
-        for (key, _value) in results {
-            // Extract node ID from key
-            if let Ok(node_id_bytes) = extract_node_id_from_data_key(&key) {
-                if node_id_bytes.len() == 9 {
-                    let arr: [u8; 9] = node_id_bytes.try_into().unwrap();
-                    let node_id = NodeId::from_bytes(&arr);
-                    let id_str = node_id.to_string();
-                    if let Ok(Some(node)) = node_store
-                        .get_node(database, namespace, entity_type, &id_str)
-                        .await
-                    {
-                        nodes.push(ScanCandidate {
-                            node,
-                            cursor_key: Some(key),
-                        });
-                    }
+        let mut out = Vec::with_capacity(node_ids.len());
+        for chunk in node_ids.chunks(NODE_BATCH_FETCH_SIZE) {
+            let ids: Vec<String> = chunk.to_vec();
+            let rows = node_store
+                .get_nodes_batch(database, namespace, entity_type, &ids)
+                .await?;
+            for row in rows {
+                if let Some(node) = row {
+                    out.push(node);
                 }
             }
         }
 
-        Ok(nodes)
+        Ok(out)
+    }
+
+    async fn fetch_scan_candidates_in_order(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        keyed_node_ids: &[(Vec<u8>, String)],
+    ) -> Result<Vec<ScanCandidate>, PelagoError> {
+        if keyed_node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let node_store = NodeStore::new(
+            self.db.clone(),
+            Arc::clone(&self.schema_registry),
+            Arc::clone(&self.id_allocator),
+            self.site_id.clone(),
+        );
+
+        let mut out = Vec::with_capacity(keyed_node_ids.len());
+        for chunk in keyed_node_ids.chunks(NODE_BATCH_FETCH_SIZE) {
+            let ids: Vec<String> = chunk.iter().map(|(_, id)| id.clone()).collect();
+            let rows = node_store
+                .get_nodes_batch(database, namespace, entity_type, &ids)
+                .await?;
+
+            for ((cursor_key, _), row) in chunk.iter().zip(rows.into_iter()) {
+                if let Some(node) = row {
+                    out.push(ScanCandidate {
+                        node,
+                        cursor_key: Some(cursor_key.clone()),
+                    });
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     /// Execute a streaming query that yields results via channel
@@ -947,6 +1031,78 @@ fn parse_term_value(raw: &str) -> Option<Value> {
     None
 }
 
+fn rewrite_template_term_groups(groups: Vec<Vec<TermPredicate>>) -> Vec<Vec<TermPredicate>> {
+    groups
+        .into_iter()
+        .map(rewrite_template_term_group)
+        .collect()
+}
+
+fn rewrite_template_term_group(group: Vec<TermPredicate>) -> Vec<TermPredicate> {
+    let mut string_values: HashMap<String, String> = HashMap::new();
+    for term in &group {
+        let Value::String(s) = &term.value else {
+            continue;
+        };
+        if let Some(existing) = string_values.get(&term.field) {
+            if existing != s {
+                // Conflicting equality terms; keep original group unchanged.
+                return group;
+            }
+        } else {
+            string_values.insert(term.field.clone(), s.clone());
+        }
+    }
+
+    let show = string_values.get("show");
+    let scheme = string_values.get("scheme");
+    let shot = string_values.get("shot");
+    let sequence = string_values.get("sequence");
+
+    let mut consumed = HashSet::new();
+    let mut synthetic = Vec::new();
+    if let (Some(show), Some(scheme), Some(shot), Some(sequence)) = (show, scheme, shot, sequence) {
+        if let (Some(task), Some(label)) = (string_values.get("task"), string_values.get("label")) {
+            synthetic.push(TermPredicate {
+                field: TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE_TASK_LABEL.to_string(),
+                value: Value::String(format!("{show}|{scheme}|{shot}|{sequence}|{task}|{label}")),
+            });
+            consumed.extend([
+                "show".to_string(),
+                "scheme".to_string(),
+                "shot".to_string(),
+                "sequence".to_string(),
+                "task".to_string(),
+                "label".to_string(),
+            ]);
+        } else {
+            synthetic.push(TermPredicate {
+                field: TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE.to_string(),
+                value: Value::String(format!("{show}|{scheme}|{shot}|{sequence}")),
+            });
+            consumed.extend([
+                "show".to_string(),
+                "scheme".to_string(),
+                "shot".to_string(),
+                "sequence".to_string(),
+            ]);
+        }
+    }
+
+    if synthetic.is_empty() {
+        return group;
+    }
+
+    let mut out = Vec::with_capacity(group.len() + synthetic.len());
+    out.extend(synthetic);
+    out.extend(
+        group
+            .into_iter()
+            .filter(|term| !consumed.contains(&term.field)),
+    );
+    out
+}
+
 fn estimate_posting_fetch_limit(df: u64, target_limit: usize, hard_cap: usize) -> usize {
     let baseline = target_limit.saturating_mul(16).max(1024);
     let estimated = if df >= (u64::MAX / 8) {
@@ -1005,5 +1161,43 @@ mod tests {
     #[test]
     fn test_parse_term_expression_rejects_non_equality() {
         assert!(parse_term_expression("age >= 30").is_none());
+    }
+
+    #[test]
+    fn test_parse_term_expression_accepts_context_template_shape() {
+        let parsed = parse_term_expression(
+            "show == 'show_001' && scheme == 'main' && shot == 'shot_0001' && task == 'fx' && label == 'default'",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.groups.len(), 1);
+        assert_eq!(parsed.groups[0].len(), 5);
+        assert_eq!(parsed.groups[0][0].field, "show");
+        assert_eq!(parsed.groups[0][4].field, "label");
+    }
+
+    #[test]
+    fn test_rewrite_template_term_group_collapses_context_template() {
+        let parsed = parse_term_expression(
+            "show == 'show_001' && scheme == 'main' && shot == 'shot_0001' && sequence == 'seq_001' && task == 'fx' && label == 'default' && status == 'active'",
+        )
+        .unwrap();
+        let rewritten = rewrite_template_term_groups(parsed.groups);
+        assert_eq!(rewritten.len(), 1);
+        assert_eq!(rewritten[0].len(), 2);
+        assert_eq!(
+            rewritten[0][0].field,
+            TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE_TASK_LABEL
+        );
+        assert_eq!(rewritten[0][1].field, "status");
+    }
+
+    #[test]
+    fn test_estimate_posting_fetch_limit_respects_hard_cap() {
+        let limit = estimate_posting_fetch_limit(10_000_000, 100, 4096);
+        assert_eq!(limit, 4096);
+
+        let minimum = estimate_posting_fetch_limit(1, 0, 128);
+        assert_eq!(minimum, 128);
     }
 }

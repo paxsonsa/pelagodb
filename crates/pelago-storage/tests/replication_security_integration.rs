@@ -88,6 +88,7 @@ async fn test_policy_check_and_audit_query() {
             namespace: "ns1".to_string(),
             entity_type: "Person".to_string(),
             actions: vec!["read".to_string(), "write".to_string()],
+            path: String::new(),
         }],
         created_at: 0,
     };

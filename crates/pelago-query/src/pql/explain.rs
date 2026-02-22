@@ -103,6 +103,8 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                 variable,
                 filter,
                 fields,
+                limit,
+                offset,
             } => {
                 output.push_str(&format!("\"{}\":\n", block_name));
                 output.push_str("  Strategy: variable_ref\n");
@@ -112,6 +114,43 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                 }
                 if !fields.is_empty() {
                     output.push_str(&format!("  Fields: [{}]\n", fields.join(", ")));
+                }
+                if let Some(lim) = limit {
+                    output.push_str(&format!("  Limit: {}\n", lim));
+                }
+                if let Some(off) = offset {
+                    output.push_str(&format!("  Offset: {}\n", off));
+                }
+            }
+            CompiledBlock::VariableSet {
+                block_name,
+                variables,
+                set_op,
+                filter,
+                fields,
+                limit,
+                offset,
+            } => {
+                output.push_str(&format!("\"{}\":\n", block_name));
+                output.push_str("  Strategy: variable_set\n");
+                output.push_str(&format!("  Variables: [{}]\n", variables.join(", ")));
+                let op = match set_op {
+                    super::ast::SetOp::Union => "union",
+                    super::ast::SetOp::Intersect => "intersect",
+                    super::ast::SetOp::Difference => "difference",
+                };
+                output.push_str(&format!("  Set op: {}\n", op));
+                if let Some(f) = filter {
+                    output.push_str(&format!("  Filter: {}\n", f));
+                }
+                if !fields.is_empty() {
+                    output.push_str(&format!("  Fields: [{}]\n", fields.join(", ")));
+                }
+                if let Some(lim) = limit {
+                    output.push_str(&format!("  Limit: {}\n", lim));
+                }
+                if let Some(off) = offset {
+                    output.push_str(&format!("  Offset: {}\n", off));
                 }
             }
         }

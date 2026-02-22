@@ -143,6 +143,28 @@ fn test_parse_root_functions() {
     let pql = "query { start(func: has(email)) { name } }";
     let ast = parse_pql(pql).unwrap();
     assert!(matches!(&ast.blocks[0].root, RootFunction::Has(_)));
+
+    // uid set ops
+    let pql = "query { s(func: uid(a, b, intersect)) { name } }";
+    let ast = parse_pql(pql).unwrap();
+    assert!(matches!(
+        &ast.blocks[0].root,
+        RootFunction::UidSet(vars, SetOp::Intersect) if vars == &vec!["a".to_string(), "b".to_string()]
+    ));
+
+    let pql = "query { s(func: uid(a, b, difference)) { name } }";
+    let ast = parse_pql(pql).unwrap();
+    assert!(matches!(
+        &ast.blocks[0].root,
+        RootFunction::UidSet(vars, SetOp::Difference) if vars == &vec!["a".to_string(), "b".to_string()]
+    ));
+
+    let pql = "query { s(func: uid(a, b, c)) { name } }";
+    let ast = parse_pql(pql).unwrap();
+    assert!(matches!(
+        &ast.blocks[0].root,
+        RootFunction::UidSet(vars, SetOp::Union) if vars == &vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    ));
 }
 
 #[test]
@@ -150,6 +172,12 @@ fn test_parse_errors() {
     assert!(parse_pql("Person {").is_err());
     assert!(parse_pql("").is_err());
     assert!(parse_pql("{ }").is_err());
+
+    let err = parse_pql("upsert { query { q(func: type(Person)) { uid } } }").unwrap_err();
+    assert!(matches!(err, PqlParseError::UnsupportedFeature(_)));
+
+    let err = parse_pql("UPSERT { query { q(func: type(Person)) { uid } } }").unwrap_err();
+    assert!(matches!(err, PqlParseError::UnsupportedFeature(_)));
 }
 
 #[test]

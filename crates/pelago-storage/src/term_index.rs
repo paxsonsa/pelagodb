@@ -12,7 +12,11 @@ use bytes::Bytes;
 use foundationdb::Transaction;
 use pelago_core::encoding::encode_value_for_index;
 use pelago_core::{PelagoError, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+const TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE: &str = "__tpl_show_scheme_shot_sequence";
+const TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE_TASK_LABEL: &str =
+    "__tpl_show_scheme_shot_sequence_task_label";
 
 pub mod markers {
     pub const TERM_POSTING: u8 = b't';
@@ -70,6 +74,14 @@ pub fn compute_term_postings(
         });
     }
 
+    append_template_postings(
+        &idx_subspace,
+        entity_type,
+        node_id,
+        properties,
+        &mut postings,
+    )?;
+
     Ok(postings)
 }
 
@@ -80,61 +92,26 @@ pub fn compute_term_posting_changes(
     old_properties: &HashMap<String, Value>,
     new_properties: &HashMap<String, Value>,
 ) -> Result<TermPostingChanges, PelagoError> {
-    let mut additions = Vec::new();
-    let mut removals = Vec::new();
-    let idx_subspace = subspace.index();
+    let old_postings = compute_term_postings(subspace, entity_type, node_id, old_properties)?;
+    let new_postings = compute_term_postings(subspace, entity_type, node_id, new_properties)?;
 
-    let fields: HashSet<&str> = old_properties
-        .keys()
-        .map(String::as_str)
-        .chain(new_properties.keys().map(String::as_str))
+    let old_map: HashMap<Vec<u8>, TermPosting> = old_postings
+        .into_iter()
+        .map(|posting| (posting.key.to_vec(), posting))
+        .collect();
+    let new_map: HashMap<Vec<u8>, TermPosting> = new_postings
+        .into_iter()
+        .map(|posting| (posting.key.to_vec(), posting))
         .collect();
 
-    for field in fields {
-        let old_value = old_properties.get(field);
-        let new_value = new_properties.get(field);
-
-        let old_encoded = old_value.map(encode_term_value).transpose()?.flatten();
-        let new_encoded = new_value.map(encode_term_value).transpose()?.flatten();
-
-        match (old_encoded, new_encoded) {
-            (Some(old), Some(new)) if old != new => {
-                removals.push(build_posting(
-                    &idx_subspace,
-                    entity_type,
-                    field,
-                    &old,
-                    node_id,
-                ));
-                additions.push(build_posting(
-                    &idx_subspace,
-                    entity_type,
-                    field,
-                    &new,
-                    node_id,
-                ));
-            }
-            (Some(old), None) => {
-                removals.push(build_posting(
-                    &idx_subspace,
-                    entity_type,
-                    field,
-                    &old,
-                    node_id,
-                ));
-            }
-            (None, Some(new)) => {
-                additions.push(build_posting(
-                    &idx_subspace,
-                    entity_type,
-                    field,
-                    &new,
-                    node_id,
-                ));
-            }
-            _ => {}
-        }
-    }
+    let additions = new_map
+        .iter()
+        .filter_map(|(key, posting)| (!old_map.contains_key(key)).then_some(posting.clone()))
+        .collect();
+    let removals = old_map
+        .iter()
+        .filter_map(|(key, posting)| (!new_map.contains_key(key)).then_some(posting.clone()))
+        .collect();
 
     Ok(TermPostingChanges {
         additions,
@@ -357,6 +334,64 @@ fn build_posting(
     }
 }
 
+fn append_template_postings(
+    idx_subspace: &Subspace,
+    entity_type: &str,
+    node_id: &[u8],
+    properties: &HashMap<String, Value>,
+    postings: &mut Vec<TermPosting>,
+) -> Result<(), PelagoError> {
+    let Some(show) = extract_string(properties, "show") else {
+        return Ok(());
+    };
+    let Some(scheme) = extract_string(properties, "scheme") else {
+        return Ok(());
+    };
+    let Some(shot) = extract_string(properties, "shot") else {
+        return Ok(());
+    };
+    let Some(sequence) = extract_string(properties, "sequence") else {
+        return Ok(());
+    };
+
+    let shot_sequence_value = format!("{show}|{scheme}|{shot}|{sequence}");
+    let encoded = encode_term_value(&Value::String(shot_sequence_value))?
+        .expect("string values must always encode for term index");
+    postings.push(build_posting(
+        idx_subspace,
+        entity_type,
+        TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE,
+        &encoded,
+        node_id,
+    ));
+
+    let (Some(task), Some(label)) = (
+        extract_string(properties, "task"),
+        extract_string(properties, "label"),
+    ) else {
+        return Ok(());
+    };
+    let full_template_value = format!("{show}|{scheme}|{shot}|{sequence}|{task}|{label}");
+    let encoded = encode_term_value(&Value::String(full_template_value))?
+        .expect("string values must always encode for term index");
+    postings.push(build_posting(
+        idx_subspace,
+        entity_type,
+        TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE_TASK_LABEL,
+        &encoded,
+        node_id,
+    ));
+
+    Ok(())
+}
+
+fn extract_string<'a>(properties: &'a HashMap<String, Value>, field: &str) -> Option<&'a str> {
+    match properties.get(field) {
+        Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
+        _ => None,
+    }
+}
+
 fn encode_term_value(value: &Value) -> Result<Option<Vec<u8>>, PelagoError> {
     match value {
         Value::Null => Ok(None),
@@ -436,5 +471,27 @@ mod tests {
                 .unwrap();
         assert_eq!(changes.additions.len(), 2);
         assert_eq!(changes.removals.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_term_postings_adds_context_template_terms() {
+        let subspace = Subspace::namespace("db", "ns");
+        let node_id = NodeId::new(1, 9).to_bytes();
+        let props = HashMap::from([
+            ("show".to_string(), Value::String("show_001".to_string())),
+            ("scheme".to_string(), Value::String("main".to_string())),
+            ("shot".to_string(), Value::String("shot_010".to_string())),
+            ("sequence".to_string(), Value::String("seq_020".to_string())),
+            ("task".to_string(), Value::String("fx".to_string())),
+            ("label".to_string(), Value::String("default".to_string())),
+        ]);
+
+        let postings = compute_term_postings(&subspace, "Context", &node_id, &props).unwrap();
+        assert!(postings
+            .iter()
+            .any(|p| p.term.field == TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE));
+        assert!(postings
+            .iter()
+            .any(|p| p.term.field == TEMPLATE_FIELD_SHOW_SCHEME_SHOT_SEQUENCE_TASK_LABEL));
     }
 }

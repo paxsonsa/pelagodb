@@ -675,6 +675,7 @@ enum WatchEventType {
   WATCH_EVENT_TYPE_UPDATE = 2;
   WATCH_EVENT_TYPE_EXIT = 3;
   WATCH_EVENT_TYPE_DELETE = 4;
+  WATCH_EVENT_TYPE_HEARTBEAT = 5;
 }
 
 enum WatchSubscriptionType {
@@ -688,6 +689,21 @@ message WatchOptions {
   bool include_initial = 1;
   uint32 ttl_secs = 2;
   uint32 max_queue_size = 3;
+  uint32 heartbeat_secs = 4;
+  bool initial_snapshot = 5;
+}
+
+message NodeWatch {
+  string entity_type = 1;
+  string node_id = 2;
+  repeated string properties = 3;
+}
+
+message EdgeWatch {
+  NodeRef source = 1;
+  string label = 2;
+  NodeRef target = 3;
+  EdgeDirection direction = 4;
 }
 
 message WatchPointRequest {
@@ -696,6 +712,8 @@ message WatchPointRequest {
   string node_id = 3;
   WatchOptions options = 4;
   bytes resume_after = 5;
+  repeated NodeWatch nodes = 6;
+  repeated EdgeWatch edges = 7;
 }
 
 message WatchQueryRequest {
@@ -756,6 +774,9 @@ service AuthService {
   rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
   rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
   rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+  rpc IssueServiceToken(IssueServiceTokenRequest) returns (IssueServiceTokenResponse);
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+  rpc IntrospectToken(IntrospectTokenRequest) returns (IntrospectTokenResponse);
   rpc CreatePolicy(CreatePolicyRequest) returns (CreatePolicyResponse);
   rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
   rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
@@ -789,6 +810,7 @@ message RefreshTokenRequest {
 message RefreshTokenResponse {
   string access_token = 1;
   int64 expires_at = 2;
+  string refresh_token = 3;
 }
 
 message ValidateTokenRequest {
@@ -801,11 +823,48 @@ message ValidateTokenResponse {
   int64 expires_at = 3;
 }
 
+message IssueServiceTokenRequest {
+  RequestContext context = 1;
+  string principal_id = 2;
+  repeated string roles = 3;
+  int64 ttl_secs = 4;
+}
+
+message IssueServiceTokenResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+  int64 expires_at = 3;
+  Principal principal = 4;
+}
+
+message RevokeTokenRequest {
+  RequestContext context = 1;
+  string access_token = 2;
+  string refresh_token = 3;
+}
+
+message RevokeTokenResponse {
+  bool revoked = 1;
+}
+
+message IntrospectTokenRequest {
+  RequestContext context = 1;
+  string token = 2;
+}
+
+message IntrospectTokenResponse {
+  bool active = 1;
+  Principal principal = 2;
+  int64 expires_at = 3;
+  string reason = 4;
+}
+
 message Permission {
   string database = 1;
   string namespace = 2;
   string entity_type = 3;
   repeated string actions = 4;
+  string path = 5;
 }
 
 message Policy {

@@ -95,6 +95,52 @@ pub struct ServerConfig {
     #[arg(long, env = "PELAGO_API_KEYS")]
     pub api_keys: Option<String>,
 
+    /// Enable mTLS subject-based principal extraction (usually from a trusted proxy header)
+    #[arg(
+        long,
+        env = "PELAGO_MTLS_ENABLED",
+        default_value_t = false,
+        action = ArgAction::Set
+    )]
+    pub mtls_enabled: bool,
+
+    /// Metadata header containing mTLS subject identity
+    #[arg(
+        long,
+        env = "PELAGO_MTLS_SUBJECT_HEADER",
+        default_value = "x-mtls-subject"
+    )]
+    pub mtls_subject_header: String,
+
+    /// Optional mTLS subject->principal mappings (`subject=principal,subject2=principal2`)
+    #[arg(long, env = "PELAGO_MTLS_SUBJECTS")]
+    pub mtls_subjects: Option<String>,
+
+    /// Optional mTLS certificate fingerprint->principal mappings
+    /// (`sha256:hex=principal,sha256:hex2=principal2`)
+    #[arg(long, env = "PELAGO_MTLS_FINGERPRINTS")]
+    pub mtls_fingerprints: Option<String>,
+
+    /// Default role assigned to mTLS-authenticated principals
+    #[arg(long, env = "PELAGO_MTLS_DEFAULT_ROLE", default_value = "service")]
+    pub mtls_default_role: String,
+
+    /// Server TLS certificate (PEM). Required when TLS is enabled.
+    #[arg(long, env = "PELAGO_TLS_CERT")]
+    pub tls_cert: Option<String>,
+
+    /// Server TLS private key (PEM). Required when TLS is enabled.
+    #[arg(long, env = "PELAGO_TLS_KEY")]
+    pub tls_key: Option<String>,
+
+    /// Optional CA certificate bundle used for client certificate validation.
+    #[arg(long, env = "PELAGO_TLS_CA")]
+    pub tls_ca: Option<String>,
+
+    /// TLS client authentication mode: `none`, `request`, or `require`.
+    #[arg(long, env = "PELAGO_TLS_CLIENT_AUTH", default_value = "none")]
+    pub tls_client_auth: String,
+
     /// Enable audit retention sweeps
     #[arg(
         long,
@@ -221,6 +267,35 @@ pub struct ServerConfig {
     /// Max dropped events before terminating a watch stream
     #[arg(long, env = "PELAGO_WATCH_MAX_DROPPED_EVENTS")]
     pub watch_max_dropped_events: Option<u32>,
+
+    /// Enable retention cleanup for durable query-watch state
+    #[arg(
+        long,
+        env = "PELAGO_WATCH_STATE_RETENTION_ENABLED",
+        default_value_t = true,
+        action = ArgAction::Set
+    )]
+    pub watch_state_retention_enabled: bool,
+
+    /// Query-watch state retention in days
+    #[arg(long, env = "PELAGO_WATCH_STATE_RETENTION_DAYS", default_value_t = 7)]
+    pub watch_state_retention_days: u64,
+
+    /// Query-watch state retention sweep interval in seconds
+    #[arg(
+        long,
+        env = "PELAGO_WATCH_STATE_RETENTION_SWEEP_SECS",
+        default_value_t = 300
+    )]
+    pub watch_state_retention_sweep_secs: u64,
+
+    /// Max query-watch state rows deleted per sweep
+    #[arg(
+        long,
+        env = "PELAGO_WATCH_STATE_RETENTION_BATCH",
+        default_value_t = 1000
+    )]
+    pub watch_state_retention_batch: usize,
 }
 
 impl Default for ServerConfig {
@@ -244,6 +319,15 @@ impl Default for ServerConfig {
             cache_projector_batch_size: 1000,
             auth_required: false,
             api_keys: None,
+            mtls_enabled: false,
+            mtls_subject_header: "x-mtls-subject".to_string(),
+            mtls_subjects: None,
+            mtls_fingerprints: None,
+            mtls_default_role: "service".to_string(),
+            tls_cert: None,
+            tls_key: None,
+            tls_ca: None,
+            tls_client_auth: "none".to_string(),
             audit_enabled: true,
             audit_retention_days: 90,
             audit_retention_sweep_secs: 300,
@@ -269,6 +353,10 @@ impl Default for ServerConfig {
             watch_max_ttl_secs: None,
             watch_max_queue_size: None,
             watch_max_dropped_events: None,
+            watch_state_retention_enabled: true,
+            watch_state_retention_days: 7,
+            watch_state_retention_sweep_secs: 300,
+            watch_state_retention_batch: 1000,
         }
     }
 }

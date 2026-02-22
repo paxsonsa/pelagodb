@@ -1,0 +1,9 @@
+{
+  "name": "grpc_traverse_1hop_has_asset_from_Show_1_0",
+  "count": 50,
+  "mean_ms": 1701.23709006,
+  "p50_ms": 1609.2596254999999,
+  "p95_ms": 2206.2472915499993,
+  "p99_ms": 2754.1132310099997,
+  "result_count_mean": 500.0
+}

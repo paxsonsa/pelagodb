@@ -1,0 +1,11 @@
+{
+  "result": {
+    "name": "grpc_traverse_1hop_has_task_from_Shot_1_0",
+    "count": 200,
+    "mean_ms": 22.604865035,
+    "p50_ms": 22.7373955,
+    "p95_ms": 29.931205899999988,
+    "p99_ms": 34.15172232999999,
+    "result_count_mean": 4.0
+  }
+}

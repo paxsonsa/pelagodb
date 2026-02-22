@@ -37,7 +37,8 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 run "$PYTHON_BIN" -m py_compile \
   clients/python/pelagodb/client.py \
   datasets/load_dataset.py \
-  scripts/perf-benchmark.py
+  scripts/perf-benchmark.py \
+  scripts/query-scaleout-check.py
 
 echo "[7/7] rust client sdk compile"
 run cargo check --manifest-path clients/rust/pelagodb-client/Cargo.toml

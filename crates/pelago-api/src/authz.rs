@@ -19,7 +19,17 @@ pub async fn authorize(
         return Ok(());
     };
 
-    let resource = format!("{}/{}/{}", database, namespace, entity_type);
+    let resource = if entity_type.is_empty() {
+        format!("{}/{}/{}", database, namespace, action_scope(action))
+    } else {
+        format!(
+            "{}/{}/{}/{}",
+            database,
+            namespace,
+            action_scope(action),
+            entity_type
+        )
+    };
     let allowed = if has_admin_role(&principal.roles) {
         true
     } else if has_namespace_admin_role(&principal.roles, database, namespace) {
@@ -114,7 +124,24 @@ fn is_read_action(action: &str) -> bool {
         || action == "admin.read"
         || action == "auth.policy.read"
         || action == "auth.policy.check"
+        || action == "auth.token.read"
         || action == "replication.pull"
+}
+
+fn action_scope(action: &str) -> &'static str {
+    if action.starts_with("schema.") {
+        "_schema"
+    } else if action.starts_with("edge.") {
+        "edge"
+    } else if action.starts_with("auth.policy.") {
+        "_sys/policies"
+    } else if action.starts_with("auth.token.") {
+        "_sys/tokens"
+    } else if action.starts_with("replication.") {
+        "_replication"
+    } else {
+        "data"
+    }
 }
 
 #[cfg(test)]

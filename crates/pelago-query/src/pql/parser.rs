@@ -19,6 +19,8 @@ pub enum PqlParseError {
     InvalidRootFunction(String),
     #[error("Invalid directive: {0}")]
     InvalidDirective(String),
+    #[error("Unsupported feature: {0}")]
+    UnsupportedFeature(String),
     #[error("Empty query")]
     EmptyQuery,
 }
@@ -41,6 +43,12 @@ pub fn parse_pql(input: &str) -> Result<PqlQuery, PqlParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(PqlParseError::EmptyQuery);
+    }
+    if contains_word_ignore_ascii_case(trimmed, "upsert") {
+        return Err(PqlParseError::UnsupportedFeature(
+            "upsert blocks are deferred to a later phase and not available in the current runtime"
+                .to_string(),
+        ));
     }
 
     let pairs = PqlParser::parse(Rule::query, trimmed)?;
@@ -173,12 +181,21 @@ fn parse_root_function(pair: pest::iterators::Pair<Rule>) -> Result<RootFunction
             Ok(RootFunction::UidVar(var))
         }
         Rule::uid_set_func => {
-            let vars: Vec<String> = inner
+            let mut vars: Vec<String> = inner
                 .into_inner()
                 .filter(|p| p.as_rule() == Rule::ident)
                 .map(|p| p.as_str().to_string())
                 .collect();
-            Ok(RootFunction::UidSet(vars, SetOp::Union))
+            let mut set_op = SetOp::Union;
+            if vars.len() >= 3 {
+                if let Some(last) = vars.last().cloned() {
+                    if let Some(op) = parse_set_op_keyword(&last) {
+                        set_op = op;
+                        vars.pop();
+                    }
+                }
+            }
+            Ok(RootFunction::UidSet(vars, set_op))
         }
         Rule::type_func => {
             let qt = parse_qualified_type(inner.into_inner().next().unwrap())?;
@@ -237,6 +254,39 @@ fn parse_root_function(pair: pest::iterators::Pair<Rule>) -> Result<RootFunction
             inner.as_str().to_string(),
         )),
     }
+}
+
+fn parse_set_op_keyword(raw: &str) -> Option<SetOp> {
+    match raw {
+        "intersect" => Some(SetOp::Intersect),
+        "difference" => Some(SetOp::Difference),
+        _ => None,
+    }
+}
+
+fn contains_word_ignore_ascii_case(input: &str, word: &str) -> bool {
+    let bytes = input.as_bytes();
+    let needle = word.as_bytes();
+    if needle.is_empty() || bytes.len() < needle.len() {
+        return false;
+    }
+
+    for idx in 0..=bytes.len() - needle.len() {
+        if !bytes[idx..idx + needle.len()].eq_ignore_ascii_case(needle) {
+            continue;
+        }
+        let left_boundary = idx == 0 || !is_word_char(bytes[idx - 1]);
+        let right_boundary =
+            idx + needle.len() == bytes.len() || !is_word_char(bytes[idx + needle.len()]);
+        if left_boundary && right_boundary {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_word_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 fn parse_qualified_ref(pair: pest::iterators::Pair<Rule>) -> Result<QualifiedRef, PqlParseError> {
