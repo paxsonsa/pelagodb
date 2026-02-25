@@ -560,6 +560,18 @@ impl QueryService for QueryServiceImpl {
             "*",
         )
         .await?;
+        let snapshot_mode = default_execute_pql_snapshot_mode(req.snapshot_mode);
+        let allow_degrade = req.allow_degrade_to_best_effort;
+        let strict_read_version = if snapshot_mode == SnapshotMode::Strict {
+            Some(
+                self.db
+                    .get_read_version()
+                    .await
+                    .map_err(|e| e.into_status())?,
+            )
+        } else {
+            None
+        };
         let input = apply_params(&req.pql, &req.params);
 
         let ast = parse_pql(&input).map_err(pql_parse_error_to_status)?;
@@ -579,12 +591,25 @@ impl QueryService for QueryServiceImpl {
 
         if req.explain {
             let explanation = explain_query(&compiled);
+            let snapshot_meta = validate_snapshot_guardrail(
+                "execute_pql",
+                snapshot_mode,
+                allow_degrade,
+                strict_read_version,
+                0,
+                0,
+                0,
+            )?;
             let stream = tokio_stream::iter(vec![Ok(PqlResult {
                 block_name: "explain".to_string(),
                 node: None,
                 edge: None,
                 next_cursor: vec![],
                 explain: explanation,
+                consistency_applied: snapshot_meta.consistency_applied as i32,
+                snapshot_read_version: snapshot_meta.snapshot_read_version.unwrap_or_default(),
+                degraded: snapshot_meta.degraded,
+                degraded_reason: snapshot_meta.degraded_reason,
             })]);
             return Ok(Response::new(Box::pin(stream)));
         }
@@ -597,6 +622,12 @@ impl QueryService for QueryServiceImpl {
         );
         let mut variables: HashMap<String, Vec<StoredNode>> = HashMap::new();
         let mut out = Vec::new();
+        let mut total_scanned_keys = 0usize;
+        let mut total_result_bytes = 0usize;
+        let started_at = std::time::Instant::now();
+        let read_options = ReadExecutionOptions {
+            read_version: strict_read_version,
+        };
 
         for (compiled_idx, block) in compiled.iter().enumerate() {
             let resolved_idx = resolved.execution_order[compiled_idx];
@@ -611,13 +642,22 @@ impl QueryService for QueryServiceImpl {
                     ..
                 } => {
                     if let Some(mut node) = node_store
-                        .get_node(&ctx.database, &ctx.namespace, entity_type, node_id)
+                        .get_node_at_read_version(
+                            &ctx.database,
+                            &ctx.namespace,
+                            entity_type,
+                            node_id,
+                            strict_read_version,
+                        )
                         .await
                         .map_err(|e| e.into_status())?
                     {
                         if !fields.is_empty() {
                             node.properties.retain(|k, _| fields.contains(k));
                         }
+                        total_scanned_keys = total_scanned_keys.saturating_add(1);
+                        total_result_bytes =
+                            total_result_bytes.saturating_add(estimate_stored_node_bytes(&node));
                         block_nodes.push(node);
                     }
                 }
@@ -650,12 +690,16 @@ impl QueryService for QueryServiceImpl {
                         *limit,
                     )
                     .map_err(|e| e.into_status())?;
-                    let mut nodes = self
+                    let query_results = self
                         .query_executor
-                        .execute(&ctx.database, &ctx.namespace, &plan)
+                        .execute_with_options(&ctx.database, &ctx.namespace, &plan, read_options)
                         .await
-                        .map_err(|e| e.into_status())?
-                        .nodes;
+                        .map_err(|e| e.into_status())?;
+                    total_scanned_keys =
+                        total_scanned_keys.saturating_add(query_results.scanned_keys);
+                    total_result_bytes =
+                        total_result_bytes.saturating_add(query_results.result_bytes);
+                    let mut nodes = query_results.nodes;
                     if let Some(skip) = offset {
                         nodes = nodes.into_iter().skip(*skip as usize).collect();
                     }
@@ -707,16 +751,21 @@ impl QueryService for QueryServiceImpl {
                         },
                     );
                     let results = engine
-                        .traverse(
+                        .traverse_with_options(
                             &ctx.database,
                             &ctx.namespace,
                             start_entity_type,
                             start_node_id,
                             &hops,
                             None,
+                            TraversalReadOptions {
+                                read_version: strict_read_version,
+                            },
                         )
                         .await
                         .map_err(|e| e.into_status())?;
+                    total_scanned_keys = total_scanned_keys.saturating_add(results.scanned_keys);
+                    total_result_bytes = total_result_bytes.saturating_add(results.result_bytes);
                     for path in results.paths {
                         let node = path.end_node().clone();
                         if *cascade && node.id.is_empty() {
@@ -767,12 +816,26 @@ impl QueryService for QueryServiceImpl {
                 variables.insert(capture.clone(), block_nodes.clone());
             }
 
+            let elapsed_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let snapshot_meta = validate_snapshot_guardrail(
+                "execute_pql",
+                snapshot_mode,
+                allow_degrade,
+                strict_read_version,
+                total_scanned_keys,
+                total_result_bytes,
+                elapsed_ms,
+            )?;
             out.extend(block_nodes.into_iter().map(|node| PqlResult {
                 block_name: resolved_block.name.clone(),
                 node: Some(stored_node_to_proto(&node)),
                 edge: None,
                 next_cursor: vec![],
                 explain: String::new(),
+                consistency_applied: snapshot_meta.consistency_applied as i32,
+                snapshot_read_version: snapshot_meta.snapshot_read_version.unwrap_or_default(),
+                degraded: snapshot_meta.degraded,
+                degraded_reason: snapshot_meta.degraded_reason.clone(),
             }));
         }
 
@@ -789,6 +852,13 @@ fn default_find_nodes_snapshot_mode(raw: i32) -> SnapshotMode {
 }
 
 fn default_traverse_snapshot_mode(raw: i32) -> SnapshotMode {
+    match SnapshotMode::try_from(raw).unwrap_or(SnapshotMode::Unspecified) {
+        SnapshotMode::Unspecified => SnapshotMode::BestEffort,
+        other => other,
+    }
+}
+
+fn default_execute_pql_snapshot_mode(raw: i32) -> SnapshotMode {
     match SnapshotMode::try_from(raw).unwrap_or(SnapshotMode::Unspecified) {
         SnapshotMode::Unspecified => SnapshotMode::BestEffort,
         other => other,
@@ -942,6 +1012,24 @@ fn apply_params(input: &str, params: &HashMap<String, String>) -> String {
     }
 
     out
+}
+
+fn estimate_stored_node_bytes(node: &StoredNode) -> usize {
+    let mut total = node.id.len().saturating_add(node.entity_type.len());
+    total = total.saturating_add(16);
+    for (key, value) in &node.properties {
+        total = total.saturating_add(key.len());
+        total = total.saturating_add(match value {
+            CoreValue::String(s) => s.len(),
+            CoreValue::Int(_) => 8,
+            CoreValue::Float(_) => 8,
+            CoreValue::Bool(_) => 1,
+            CoreValue::Timestamp(_) => 8,
+            CoreValue::Bytes(b) => b.len(),
+            CoreValue::Null => 1,
+        });
+    }
+    total
 }
 
 fn apply_variable_nodes_pipeline(

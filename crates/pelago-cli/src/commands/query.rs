@@ -174,6 +174,8 @@ pub async fn run(
                     pql,
                     params: std::collections::HashMap::new(),
                     explain,
+                    snapshot_mode: pelago_proto::SnapshotMode::BestEffort as i32,
+                    allow_degrade_to_best_effort: false,
                 })
                 .await?
                 .into_inner();
