@@ -613,6 +613,11 @@ async fn test_full_lifecycle() {
     }
     println!("   ✓ All CDC entries in monotonically increasing versionstamp order");
 
+    consumer
+        .ack_batch(&entries)
+        .await
+        .expect("Failed to ack CDC entries");
+
     // Checkpoint and verify resume works
     consumer
         .checkpoint()
