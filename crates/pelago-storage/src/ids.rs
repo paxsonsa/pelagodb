@@ -99,9 +99,11 @@ impl IdAllocator {
         let trx = self.db.create_transaction()?;
 
         // Read current value
-        let current = match trx.get(&key, false).await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to read ID counter: {}", e))
-        })? {
+        let current = match trx
+            .get(&key, false)
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Failed to read ID counter: {}", e)))?
+        {
             Some(bytes) => {
                 if bytes.len() != 8 {
                     return Err(PelagoError::Internal(format!(

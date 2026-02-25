@@ -1,0 +1,31 @@
+{
+  "server": "127.0.0.1:27615",
+  "namespace": "vfx.show.001.full",
+  "cache_enabled": false,
+  "results": [
+    {
+      "name": "grpc_traverse_1hop_has_task_from_Shot_1_0",
+      "count": 200,
+      "mean_ms": 21.559121635,
+      "p50_ms": 21.403416999999997,
+      "p90_ms": 32.3647375,
+      "p95_ms": 34.798349699999996,
+      "p99_ms": 41.86238208999998,
+      "result_count_min": 4,
+      "result_count_max": 4,
+      "result_count_mean": 4.0
+    },
+    {
+      "name": "grpc_traverse_1hop_has_asset_from_Show_1_0",
+      "count": 50,
+      "mean_ms": 540.2341025000001,
+      "p50_ms": 538.3228125,
+      "p90_ms": 571.9083085999999,
+      "p95_ms": 581.3854956499999,
+      "p99_ms": 610.9478320899999,
+      "result_count_min": 500,
+      "result_count_max": 500,
+      "result_count_mean": 500.0
+    }
+  ]
+}

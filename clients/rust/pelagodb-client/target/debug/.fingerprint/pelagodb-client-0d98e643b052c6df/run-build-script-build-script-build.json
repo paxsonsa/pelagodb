@@ -1,0 +1,1 @@
+{"rustc":16243257175721966122,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[4503772882544414928,"build_script_build",false,6486786699839058082]],"local":[{"RerunIfChanged":{"output":"debug/build/pelagodb-client-0d98e643b052c6df/output","paths":["../../../proto/pelago.proto","../../../proto"]}}],"rustflags":[],"config":0,"compile_kind":0}

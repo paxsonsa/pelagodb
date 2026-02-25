@@ -1,0 +1,55 @@
+# PelagoDB server configuration (TOML)
+# Precedence: file < environment variables < CLI flags
+
+# Core runtime
+fdb_cluster = "./fdb.cluster"
+site_id = 1
+site_name = "default"
+listen_addr = "127.0.0.1:27615"
+log_level = "info"
+id_batch_size = 100
+default_database = "default"
+default_namespace = "default"
+
+# Cache
+cache_enabled = true
+cache_path = "./data/cache"
+cache_size_mb = 1024
+cache_write_buffer_mb = 64
+cache_max_write_buffers = 3
+cache_projector_batch_size = 1000
+
+# Security and audit
+auth_required = false
+# api_keys = "demo-key:demo-principal,ops-key:ops-principal"
+audit_enabled = true
+audit_retention_days = 90
+audit_retention_sweep_secs = 300
+audit_retention_batch = 1000
+
+# Replication (pull model)
+replication_enabled = false
+# replication_peers = "2=127.0.0.1:27616,3=127.0.0.1:27617"
+# replication_database = "default"
+# replication_namespace = "default"
+replication_batch_size = 512
+replication_poll_ms = 300
+# replication_api_key = "replication-key"
+replication_lease_enabled = true
+replication_lease_ttl_ms = 10000
+replication_lease_heartbeat_ms = 2000
+
+# Embedded docs server
+docs_enabled = false
+docs_addr = "127.0.0.1:4070"
+docs_dir = "docs"
+docs_title = "PelagoDB Documentation"
+
+# Watch limits (optional)
+# watch_max_subscriptions = 1024
+# watch_max_namespace_subscriptions = 256
+# watch_max_query_watches = 1000
+# watch_max_principal_subscriptions = 128
+# watch_max_ttl_secs = 86400
+# watch_max_queue_size = 8192
+# watch_max_dropped_events = 512

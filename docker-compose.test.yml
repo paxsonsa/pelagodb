@@ -1,10 +1,9 @@
 # Docker Compose for running FDB in test/development mode
 #
 # USAGE:
-# - Linux: docker-compose -f docker-compose.test.yml up -d
-# - macOS: Install FDB locally (see below), Docker networking doesn't work well
+# - Linux/macOS: docker-compose -f docker-compose.test.yml up -d
 #
-# macOS SETUP (recommended):
+# Native FDB setup (optional alternative):
 #   1. Download FDB pkg from https://github.com/apple/foundationdb/releases
 #   2. Install: sudo installer -pkg FoundationDB-7.3.x.pkg -target /
 #   3. Configure: fdbcli --exec "configure new single memory"
@@ -14,7 +13,7 @@
 # Linux SETUP:
 #   1. docker-compose -f docker-compose.test.yml up -d
 #   2. Wait for healthy: docker-compose -f docker-compose.test.yml ps
-#   3. Configure: docker exec pelago-fdb-test fdbcli --exec "configure new single memory"
+#   3. fdb_single entrypoint auto-configures "new single memory"
 #   4. Copy cluster file: docker cp pelago-fdb-test:/var/fdb/fdb.cluster ./fdb.cluster
 #   5. Run tests: FDB_CLUSTER_FILE=./fdb.cluster cargo test --test fdb_integration -- --ignored
 
@@ -23,10 +22,11 @@ services:
     image: foundationdb/foundationdb:7.3.70
     container_name: pelago-fdb-test
     platform: linux/amd64
-    # Use host networking on Linux for best compatibility
-    # On macOS Docker Desktop, host networking doesn't work - use native FDB instead
-    network_mode: host
+    entrypoint: ["/usr/bin/tini", "-g", "--", "/var/fdb/scripts/fdb_single.bash"]
+    ports:
+      - "4500:4500"
     environment:
+      # Advertise loopback so host CLI/test processes can connect via mapped port 4500.
       FDB_NETWORKING_MODE: host
       FDB_PORT: 4500
       # Enable trace logging for debugging
@@ -35,7 +35,11 @@ services:
     volumes:
       - fdb-test-data:/var/fdb/data
     healthcheck:
-      test: ["CMD", "fdbcli", "--exec", "status minimal"]
+      test:
+        [
+          "CMD-SHELL",
+          "fdbcli --exec 'status minimal' | grep -Eq 'The database is available|Healthy'",
+        ]
       interval: 10s
       timeout: 10s
       retries: 10

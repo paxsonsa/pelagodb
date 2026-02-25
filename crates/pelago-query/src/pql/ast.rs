@@ -97,10 +97,19 @@ pub enum Directive {
     Filter(String),
     Edge(String),
     Cascade,
-    Limit { first: u32, offset: Option<u32> },
-    Sort { field: String, desc: bool, on_edge: bool },
+    Limit {
+        first: u32,
+        offset: Option<u32>,
+    },
+    Sort {
+        field: String,
+        desc: bool,
+        on_edge: bool,
+    },
     Facets(Vec<String>),
-    Recurse { depth: u32 },
+    Recurse {
+        depth: u32,
+    },
     GroupBy(Vec<String>),
     Explain,
 }

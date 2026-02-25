@@ -9,12 +9,15 @@
 
 use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::{PelagoError, Value};
-use pelago_storage::{EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode};
+use pelago_storage::{
+    EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 /// Traversal configuration
 #[derive(Clone)]
@@ -164,6 +167,8 @@ pub struct TraversalEngine {
     config: TraversalConfig,
 }
 
+const NODE_FETCH_CONCURRENCY: usize = 32;
+
 impl TraversalEngine {
     /// Create a new traversal engine
     pub fn new(
@@ -250,8 +255,16 @@ impl TraversalEngine {
             }
             for entry in state.frontier {
                 // Rebuild the path by fetching each node along the recorded path
-                let first_et = &entry.path_keys.first().map(|(et, _)| et.as_str()).unwrap_or(start_entity_type);
-                let first_id = &entry.path_keys.first().map(|(_, id)| id.as_str()).unwrap_or(start_node_id);
+                let first_et = &entry
+                    .path_keys
+                    .first()
+                    .map(|(et, _)| et.as_str())
+                    .unwrap_or(start_entity_type);
+                let first_id = &entry
+                    .path_keys
+                    .first()
+                    .map(|(_, id)| id.as_str())
+                    .unwrap_or(start_node_id);
                 let path_start = node_store
                     .get_node(database, namespace, first_et, first_id)
                     .await?
@@ -340,14 +353,16 @@ impl TraversalEngine {
             let current_node = current_path.end_node();
 
             // Get edges from current node
-            let edges = self.get_edges_for_hop(
-                &edge_store,
-                database,
-                namespace,
-                &current_node.entity_type,
-                &current_node.id,
-                hop,
-            ).await?;
+            let edges = self
+                .get_edges_for_hop(
+                    &edge_store,
+                    database,
+                    namespace,
+                    &current_node.entity_type,
+                    &current_node.id,
+                    hop,
+                )
+                .await?;
 
             // Filter edges if needed
             let filtered_edges = if let Some(ref filter) = hop.edge_filter {
@@ -357,48 +372,94 @@ impl TraversalEngine {
             };
 
             // Process each edge
+            let mut pending = Vec::new();
             for edge in filtered_edges {
-                // Get target node
-                let target_ref = match hop.direction {
-                    TraversalDirection::Outbound => &edge.target,
-                    TraversalDirection::Inbound => &edge.source,
+                // Get target node ref for this edge.
+                let (target_entity, target_id) = match hop.direction {
+                    TraversalDirection::Outbound => {
+                        (edge.target.entity_type.clone(), edge.target.node_id.clone())
+                    }
+                    TraversalDirection::Inbound => {
+                        (edge.source.entity_type.clone(), edge.source.node_id.clone())
+                    }
                     TraversalDirection::Both => {
-                        // Pick the one that's not the current node
+                        // Pick the one that's not the current node.
                         if edge.source.entity_type == current_node.entity_type
                             && edge.source.node_id == current_node.id
                         {
-                            &edge.target
+                            (edge.target.entity_type.clone(), edge.target.node_id.clone())
                         } else {
-                            &edge.source
+                            (edge.source.entity_type.clone(), edge.source.node_id.clone())
                         }
                     }
                 };
 
-                // Check for cycles
-                let target_key = format!("{}:{}", target_ref.entity_type, target_ref.node_id);
+                // Check for cycles.
+                let target_key = format!("{}:{}", target_entity, target_id);
                 if visited.contains(&target_key) {
-                    continue; // Skip cycles
+                    continue;
                 }
 
-                // Fetch target node
-                let target_node = match node_store
-                    .get_node(database, namespace, &target_ref.entity_type, &target_ref.node_id)
-                    .await?
-                {
-                    Some(n) => n,
-                    None => continue, // Node doesn't exist, skip
-                };
+                pending.push((edge, target_entity, target_id, target_key));
+            }
 
-                // Apply node filter if present
+            if pending.is_empty() {
+                continue;
+            }
+
+            // Fetch target nodes in bounded parallel batches.
+            let mut fetched = Vec::new();
+            let mut base_idx = 0usize;
+            while base_idx < pending.len() {
+                let end_idx = (base_idx + NODE_FETCH_CONCURRENCY).min(pending.len());
+                let mut join_set = JoinSet::new();
+
+                for local_idx in base_idx..end_idx {
+                    let (_, target_entity, target_id, _) = &pending[local_idx];
+                    let node_store = Arc::clone(&node_store);
+                    let db = database.to_string();
+                    let ns = namespace.to_string();
+                    let target_entity = target_entity.clone();
+                    let target_id = target_id.clone();
+                    join_set.spawn(async move {
+                        let fetched = node_store
+                            .get_node(&db, &ns, &target_entity, &target_id)
+                            .await;
+                        (local_idx, fetched)
+                    });
+                }
+
+                while let Some(joined) = join_set.join_next().await {
+                    let (pending_idx, node_result) = joined.map_err(|e| {
+                        PelagoError::Internal(format!("Traversal node fetch task failed: {}", e))
+                    })?;
+                    let maybe_node = node_result?;
+                    fetched.push((pending_idx, maybe_node));
+                }
+
+                base_idx = end_idx;
+            }
+
+            // Preserve deterministic processing order relative to edge scan order.
+            fetched.sort_by_key(|(idx, _)| *idx);
+
+            for (pending_idx, maybe_target_node) in fetched {
+                let Some(target_node) = maybe_target_node else {
+                    continue;
+                };
+                let (edge, _, _, target_key) = &pending[pending_idx];
+
+                // Apply node filter if present.
                 if let Some(ref filter) = hop.node_filter {
                     if !self.matches_node_filter(&target_node, filter)? {
                         continue;
                     }
                 }
 
-                // Add to visited and queue
-                visited.insert(target_key);
-
+                // Add to visited and queue.
+                if !visited.insert(target_key.clone()) {
+                    continue;
+                }
                 let mut new_path = current_path.clone();
                 new_path.push(edge.clone(), target_node);
                 queue.push_back((new_path, hop_idx + 1));
@@ -415,7 +476,8 @@ impl TraversalEngine {
                     let end = path.end_node();
                     let node_key = format!("{}:{}", end.entity_type, end.id);
                     // Build path keys from the traversal path
-                    let mut path_keys = vec![(path.start.entity_type.clone(), path.start.id.clone())];
+                    let mut path_keys =
+                        vec![(path.start.entity_type.clone(), path.start.id.clone())];
                     for h in &path.hops {
                         path_keys.push((h.node.entity_type.clone(), h.node.id.clone()));
                     }
@@ -475,10 +537,18 @@ impl TraversalEngine {
         let start_node_id = start_node_id.to_string();
 
         tokio::spawn(async move {
-            let engine = TraversalEngine::with_config(db, schema_registry, id_allocator, site_id, config);
+            let engine =
+                TraversalEngine::with_config(db, schema_registry, id_allocator, site_id, config);
 
             match engine
-                .traverse(&database, &namespace, &start_entity_type, &start_node_id, &hops, None)
+                .traverse(
+                    &database,
+                    &namespace,
+                    &start_entity_type,
+                    &start_node_id,
+                    &hops,
+                    None,
+                )
                 .await
             {
                 Ok(results) => {
@@ -518,7 +588,14 @@ impl TraversalEngine {
         };
 
         let edges = edge_store
-            .list_edges(database, namespace, entity_type, node_id, label_filter, 1000)
+            .list_edges(
+                database,
+                namespace,
+                entity_type,
+                node_id,
+                label_filter,
+                1000,
+            )
             .await?;
 
         // Filter by direction and labels
@@ -535,7 +612,8 @@ impl TraversalEngine {
                     }
                     TraversalDirection::Both => {
                         (edge.source.entity_type == entity_type && edge.source.node_id == node_id)
-                            || (edge.target.entity_type == entity_type && edge.target.node_id == node_id)
+                            || (edge.target.entity_type == entity_type
+                                && edge.target.node_id == node_id)
                     }
                 };
 
@@ -571,11 +649,7 @@ impl TraversalEngine {
     }
 
     /// Check if an edge matches a CEL filter
-    fn matches_edge_filter(
-        &self,
-        edge: &StoredEdge,
-        filter: &str,
-    ) -> Result<bool, PelagoError> {
+    fn matches_edge_filter(&self, edge: &StoredEdge, filter: &str) -> Result<bool, PelagoError> {
         use cel_interpreter::{Context, Program, Value as CelValue};
 
         let program = Program::compile(filter).map_err(|e| PelagoError::CelSyntax {
@@ -598,11 +672,7 @@ impl TraversalEngine {
     }
 
     /// Check if a node matches a CEL filter
-    fn matches_node_filter(
-        &self,
-        node: &StoredNode,
-        filter: &str,
-    ) -> Result<bool, PelagoError> {
+    fn matches_node_filter(&self, node: &StoredNode, filter: &str) -> Result<bool, PelagoError> {
         // Simple implementation - compile and evaluate
         // In a full implementation, we'd cache compiled expressions
         use cel_interpreter::{Context, Program, Value as CelValue};

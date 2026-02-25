@@ -7,13 +7,17 @@
 //! - DropEntityType: Remove an entity type
 //! - DropNamespace: Remove an entire namespace
 
+use crate::authz::{authorize, principal_from_request};
 use pelago_proto::{
     admin_service_server::AdminService, DropEntityTypeRequest, DropEntityTypeResponse,
     DropIndexRequest, DropIndexResponse, DropNamespaceRequest, DropNamespaceResponse,
-    GetJobStatusRequest, GetJobStatusResponse, Job, JobStatus, ListJobsRequest, ListJobsResponse,
-    StripPropertyRequest, StripPropertyResponse,
+    GetJobStatusRequest, GetJobStatusResponse, GetReplicationStatusRequest,
+    GetReplicationStatusResponse, Job, JobStatus, ListJobsRequest, ListJobsResponse,
+    ListSitesRequest, ListSitesResponse, QueryAuditLogRequest, QueryAuditLogResponse,
+    ReplicationPeerStatus, SiteInfo, StripPropertyRequest, StripPropertyResponse,
 };
 use pelago_storage::{
+    get_replication_positions_scoped, list_sites, query_audit_records,
     JobStatus as StorageJobStatus, JobStore, JobType, PelagoDb, Subspace,
 };
 use std::sync::Arc;
@@ -36,10 +40,22 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<DropIndexRequest>,
     ) -> Result<Response<DropIndexResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let property_name = req.property_name;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.write",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
 
         let prefix = Subspace::namespace(&ctx.database, &ctx.namespace)
             .index()
@@ -60,10 +76,22 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<StripPropertyRequest>,
     ) -> Result<Response<StripPropertyResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let property_name = req.property_name;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.write",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
 
         let job = JobStore::new(self.db.as_ref().clone())
             .create_job(
@@ -85,9 +113,21 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GetJobStatusRequest>,
     ) -> Result<Response<GetJobStatusResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let job_id = req.job_id;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.read",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
 
         let store = JobStore::new(self.db.as_ref().clone());
         let job = store
@@ -105,8 +145,20 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<ListJobsRequest>,
     ) -> Result<Response<ListJobsResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.read",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
 
         let store = JobStore::new(self.db.as_ref().clone());
         let jobs = store
@@ -123,29 +175,26 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<DropEntityTypeRequest>,
     ) -> Result<Response<DropEntityTypeResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.write",
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+        )
+        .await?;
 
         let ns = Subspace::namespace(&ctx.database, &ctx.namespace);
-        let schema_prefix = ns
-            .schema()
-            .pack()
-            .add_string(&entity_type)
-            .build()
-            .to_vec();
-        let data_prefix = ns
-            .data()
-            .pack()
-            .add_string(&entity_type)
-            .build()
-            .to_vec();
-        let idx_prefix = ns
-            .index()
-            .pack()
-            .add_string(&entity_type)
-            .build()
-            .to_vec();
+        let schema_prefix = ns.schema().pack().add_string(&entity_type).build().to_vec();
+        let data_prefix = ns.data().pack().add_string(&entity_type).build().to_vec();
+        let idx_prefix = ns.index().pack().add_string(&entity_type).build().to_vec();
         let edge_forward_prefix = ns
             .edge()
             .pack()
@@ -198,8 +247,20 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<DropNamespaceRequest>,
     ) -> Result<Response<DropNamespaceResponse>, Status> {
+        let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req.context.ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.write",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
         let ns = Subspace::namespace(&ctx.database, &ctx.namespace);
         let start = ns.prefix().to_vec();
         let end = ns.range_end().to_vec();
@@ -218,6 +279,148 @@ impl AdminService for AdminServiceImpl {
         }
 
         Ok(Response::new(DropNamespaceResponse { dropped: existed }))
+    }
+
+    async fn list_sites(
+        &self,
+        request: Request<ListSitesRequest>,
+    ) -> Result<Response<ListSitesResponse>, Status> {
+        let principal = principal_from_request(&request);
+        let req = request.into_inner();
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.read",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
+        let sites = list_sites(self.db.as_ref())
+            .await
+            .map_err(|e| Status::internal(format!("list_sites failed: {}", e)))?;
+
+        let response = ListSitesResponse {
+            sites: sites
+                .into_iter()
+                .map(|s| SiteInfo {
+                    site_id: s.site_id,
+                    site_name: s.site_name,
+                    claimed_at: s.claimed_at,
+                    status: "active".to_string(),
+                })
+                .collect(),
+        };
+        Ok(Response::new(response))
+    }
+
+    async fn get_replication_status(
+        &self,
+        request: Request<GetReplicationStatusRequest>,
+    ) -> Result<Response<GetReplicationStatusResponse>, Status> {
+        let principal = principal_from_request(&request);
+        let req = request.into_inner();
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.read",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
+        let positions =
+            get_replication_positions_scoped(self.db.as_ref(), &ctx.database, &ctx.namespace)
+                .await
+                .map_err(|e| Status::internal(format!("get_replication_status failed: {}", e)))?;
+
+        let peers = positions
+            .into_iter()
+            .map(|p| ReplicationPeerStatus {
+                remote_site_id: p.remote_site_id,
+                last_applied_versionstamp: p
+                    .last_applied_versionstamp
+                    .map(|vs| vs.to_bytes().to_vec())
+                    .unwrap_or_default(),
+                lag_events: p.lag_events,
+                updated_at: p.updated_at,
+            })
+            .collect();
+
+        Ok(Response::new(GetReplicationStatusResponse { peers }))
+    }
+
+    async fn query_audit_log(
+        &self,
+        request: Request<QueryAuditLogRequest>,
+    ) -> Result<Response<QueryAuditLogResponse>, Status> {
+        let principal = principal_from_request(&request);
+        let req = request.into_inner();
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.read",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit as usize
+        };
+        let events = query_audit_records(
+            self.db.as_ref(),
+            if req.principal_id.is_empty() {
+                None
+            } else {
+                Some(req.principal_id.as_str())
+            },
+            if req.action.is_empty() {
+                None
+            } else {
+                Some(req.action.as_str())
+            },
+            if req.from_timestamp == 0 {
+                None
+            } else {
+                Some(req.from_timestamp)
+            },
+            if req.to_timestamp == 0 {
+                None
+            } else {
+                Some(req.to_timestamp)
+            },
+            limit,
+        )
+        .await
+        .map_err(|e| Status::internal(format!("query_audit_log failed: {}", e)))?;
+
+        Ok(Response::new(QueryAuditLogResponse {
+            events: events
+                .into_iter()
+                .map(|e| pelago_proto::AuditEvent {
+                    event_id: e.event_id,
+                    timestamp: e.timestamp,
+                    principal_id: e.principal_id,
+                    action: e.action,
+                    resource: e.resource,
+                    allowed: e.allowed,
+                    reason: e.reason,
+                    metadata: e.metadata,
+                })
+                .collect(),
+        }))
     }
 }
 
@@ -242,7 +445,10 @@ fn storage_job_to_proto_job(job: pelago_storage::JobState) -> Job {
     }
 }
 
-async fn clear_prefix_entries(db: &PelagoDb, prefix: &[u8]) -> Result<i64, pelago_core::PelagoError> {
+async fn clear_prefix_entries(
+    db: &PelagoDb,
+    prefix: &[u8],
+) -> Result<i64, pelago_core::PelagoError> {
     let mut range_end = prefix.to_vec();
     range_end.push(0xFF);
 

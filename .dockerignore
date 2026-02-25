@@ -1,0 +1,18 @@
+.git
+.codex
+.claude
+.llm
+target
+**/target
+data
+datasets
+deploy
+
+# Local compose and cluster artifacts
+docker-compose*.yml
+fdb.cluster
+
+# Not required to build pelago-server image
+clients
+scripts
+docs

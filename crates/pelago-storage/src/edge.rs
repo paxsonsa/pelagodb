@@ -2,8 +2,8 @@
 //!
 //! FDB Key Layout:
 //! ```text
-//! Forward:  (db, ns, edge, f, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id)
-//! Metadata: (db, ns, edge, m, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id) → CBOR props
+//! Forward:  (db, ns, edge, f, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id) → CBOR edge data
+//! Metadata: (db, ns, edge, m, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id) → CBOR edge data (compat)
 //! Reverse:  (db, ns, edge, r, tgt_db, tgt_ns, tgt_type, tgt_id, label, src_type, src_id)
 //! ```
 //!
@@ -21,7 +21,7 @@ use crate::subspace::edge_markers;
 use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor, encode_value_for_index};
-use pelago_core::schema::{EdgeDirection, EntitySchema};
+use pelago_core::schema::{EdgeDirection, EntitySchema, OwnershipMode};
 use pelago_core::{EdgeId, PelagoError, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -113,6 +113,206 @@ impl EdgeStore {
         }
     }
 
+    fn local_site_id(&self) -> Option<u8> {
+        self.site_id.parse::<u8>().ok()
+    }
+
+    fn parse_site_id(value: &str, field: &str) -> Result<u8, PelagoError> {
+        value.parse::<u8>().map_err(|_| PelagoError::InvalidValue {
+            field: field.to_string(),
+            reason: format!("'{}' is not a valid site id", value),
+        })
+    }
+
+    fn enforce_source_ownership(
+        &self,
+        source_type: &str,
+        source_id: &str,
+        source_locality: u8,
+    ) -> Result<(), PelagoError> {
+        if let Some(local_site) = self.local_site_id() {
+            if local_site != source_locality {
+                return Err(PelagoError::VersionConflict {
+                    entity_type: source_type.to_string(),
+                    node_id: source_id.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply replicated edge creation without emitting CDC.
+    pub async fn apply_replica_edge_create(
+        &self,
+        database: &str,
+        namespace: &str,
+        source: NodeRef,
+        target: NodeRef,
+        label: &str,
+        edge_id: &str,
+        properties: HashMap<String, Value>,
+        event_timestamp: i64,
+        origin_site: &str,
+    ) -> Result<bool, PelagoError> {
+        let actor_site = Self::parse_site_id(origin_site, "origin_site")?;
+        let source_node = self
+            .node_store
+            .get_node(
+                &source.database,
+                &source.namespace,
+                &source.entity_type,
+                &source.node_id,
+            )
+            .await?
+            .ok_or_else(|| PelagoError::SourceNotFound {
+                entity_type: source.entity_type.clone(),
+                node_id: source.node_id.clone(),
+            })?;
+        let _target_node = self
+            .node_store
+            .get_node(
+                &target.database,
+                &target.namespace,
+                &target.entity_type,
+                &target.node_id,
+            )
+            .await?
+            .ok_or_else(|| PelagoError::TargetNotFound {
+                entity_type: target.entity_type.clone(),
+                node_id: target.node_id.clone(),
+            })?;
+
+        let schema = self
+            .schema_registry
+            .get_schema(&source.database, &source.namespace, &source.entity_type)
+            .await?
+            .ok_or_else(|| PelagoError::UnregisteredType {
+                entity_type: source.entity_type.clone(),
+            })?;
+        let direction = validate_edge_type(&schema, label, &target.entity_type)?;
+        let is_bidirectional = direction == EdgeDirection::Bidirectional;
+        let ownership = schema
+            .edges
+            .get(label)
+            .map(|e| e.ownership)
+            .unwrap_or(OwnershipMode::SourceSite);
+        if ownership == OwnershipMode::SourceSite {
+            if source_node.locality != actor_site && event_timestamp <= source_node.updated_at {
+                return Ok(false);
+            }
+        }
+
+        let sort_key_value = schema
+            .edges
+            .get(label)
+            .and_then(|edge_def| edge_def.sort_key.as_ref())
+            .and_then(|sk| properties.get(sk));
+
+        let subspace = Subspace::namespace(database, namespace);
+        let keys = compute_edge_keys(
+            &subspace,
+            &source,
+            &target,
+            label,
+            sort_key_value,
+            is_bidirectional,
+        )?;
+        if self.db.get(keys.forward_key.as_ref()).await?.is_some() {
+            return Ok(false);
+        }
+
+        let edge_data = EdgeData {
+            edge_id: edge_id.to_string(),
+            properties: properties.clone(),
+            created_at: event_timestamp,
+            source: Some(source.clone()),
+            target: Some(target.clone()),
+            label: Some(label.to_string()),
+        };
+        let edge_bytes = encode_cbor(&edge_data)?;
+
+        let trx = self.db.create_transaction()?;
+        trx.set(keys.forward_key.as_ref(), &edge_bytes);
+        trx.set(keys.meta_key.as_ref(), &edge_bytes);
+        trx.set(keys.reverse_key.as_ref(), &[]);
+        if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
+            trx.set(rev_forward.as_ref(), &edge_bytes);
+            trx.set(rev_reverse.as_ref(), &[]);
+        }
+        trx.commit().await.map_err(|e| {
+            PelagoError::Internal(format!("Failed to apply replicated edge create: {}", e))
+        })?;
+        Ok(true)
+    }
+
+    /// Apply replicated edge deletion without emitting CDC.
+    pub async fn apply_replica_edge_delete(
+        &self,
+        database: &str,
+        namespace: &str,
+        source: NodeRef,
+        target: NodeRef,
+        label: &str,
+        event_timestamp: i64,
+        origin_site: &str,
+    ) -> Result<bool, PelagoError> {
+        let actor_site = Self::parse_site_id(origin_site, "origin_site")?;
+        let source_node = self
+            .node_store
+            .get_node(
+                &source.database,
+                &source.namespace,
+                &source.entity_type,
+                &source.node_id,
+            )
+            .await?
+            .ok_or_else(|| PelagoError::SourceNotFound {
+                entity_type: source.entity_type.clone(),
+                node_id: source.node_id.clone(),
+            })?;
+        let schema = self
+            .schema_registry
+            .get_schema(&source.database, &source.namespace, &source.entity_type)
+            .await?;
+        let ownership = schema
+            .as_ref()
+            .and_then(|s| s.edges.get(label))
+            .map(|e| e.ownership)
+            .unwrap_or(OwnershipMode::SourceSite);
+        if ownership == OwnershipMode::SourceSite
+            && source_node.locality != actor_site
+            && event_timestamp <= source_node.updated_at
+        {
+            return Ok(false);
+        }
+
+        let is_bidirectional = schema
+            .as_ref()
+            .and_then(|s| s.edges.get(label))
+            .map(|e| e.direction == EdgeDirection::Bidirectional)
+            .unwrap_or(false);
+
+        let subspace = Subspace::namespace(database, namespace);
+        let keys = compute_edge_keys(&subspace, &source, &target, label, None, is_bidirectional)?;
+        let exists = self.db.get(keys.forward_key.as_ref()).await?.is_some();
+        if !exists {
+            return Ok(false);
+        }
+
+        let trx = self.db.create_transaction()?;
+        trx.clear(keys.forward_key.as_ref());
+        trx.clear(keys.meta_key.as_ref());
+        trx.clear(keys.reverse_key.as_ref());
+        if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
+            trx.clear(rev_forward.as_ref());
+            trx.clear(rev_reverse.as_ref());
+        }
+        trx.commit().await.map_err(|e| {
+            PelagoError::Internal(format!("Failed to apply replicated edge delete: {}", e))
+        })?;
+        Ok(true)
+    }
+
     /// Create a new edge
     pub async fn create_edge(
         &self,
@@ -124,19 +324,30 @@ impl EdgeStore {
         properties: HashMap<String, Value>,
     ) -> Result<StoredEdge, PelagoError> {
         // Verify source node exists
-        let _source_node = self
+        let source_node = self
             .node_store
-            .get_node(&source.database, &source.namespace, &source.entity_type, &source.node_id)
+            .get_node(
+                &source.database,
+                &source.namespace,
+                &source.entity_type,
+                &source.node_id,
+            )
             .await?
             .ok_or_else(|| PelagoError::SourceNotFound {
                 entity_type: source.entity_type.clone(),
                 node_id: source.node_id.clone(),
             })?;
+        self.enforce_source_ownership(&source.entity_type, &source.node_id, source_node.locality)?;
 
         // Verify target node exists
         let _target_node = self
             .node_store
-            .get_node(&target.database, &target.namespace, &target.entity_type, &target.node_id)
+            .get_node(
+                &target.database,
+                &target.namespace,
+                &target.entity_type,
+                &target.node_id,
+            )
             .await?
             .ok_or_else(|| PelagoError::TargetNotFound {
                 entity_type: target.entity_type.clone(),
@@ -157,10 +368,7 @@ impl EdgeStore {
 
         // Get sort key value if defined
         let sort_key_value = if let Some(edge_def) = schema.edges.get(label) {
-            edge_def
-                .sort_key
-                .as_ref()
-                .and_then(|sk| properties.get(sk))
+            edge_def.sort_key.as_ref().and_then(|sk| properties.get(sk))
         } else {
             None
         };
@@ -174,7 +382,14 @@ impl EdgeStore {
 
         // Compute keys
         let subspace = Subspace::namespace(database, namespace);
-        let keys = compute_edge_keys(&subspace, &source, &target, label, sort_key_value, is_bidirectional)?;
+        let keys = compute_edge_keys(
+            &subspace,
+            &source,
+            &target,
+            label,
+            sort_key_value,
+            is_bidirectional,
+        )?;
 
         // Encode edge data for metadata
         let edge_data = EdgeData {
@@ -194,8 +409,8 @@ impl EdgeStore {
         let trx = self.db.create_transaction()?;
         let mut cdc = CdcAccumulator::new(&self.site_id);
 
-        // Write forward key (empty value - just existence)
-        trx.set(keys.forward_key.as_ref(), &[]);
+        // Write forward key with edge data so scans avoid N+1 metadata fetches.
+        trx.set(keys.forward_key.as_ref(), &edge_bytes);
 
         // Write metadata key (edge properties)
         trx.set(keys.meta_key.as_ref(), &edge_bytes);
@@ -205,7 +420,7 @@ impl EdgeStore {
 
         // Write bidirectional keys if needed
         if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
-            trx.set(rev_forward.as_ref(), &[]);
+            trx.set(rev_forward.as_ref(), &edge_bytes);
             trx.set(rev_reverse.as_ref(), &[]);
         }
 
@@ -246,6 +461,21 @@ impl EdgeStore {
         target: NodeRef,
         label: &str,
     ) -> Result<bool, PelagoError> {
+        let source_node = self
+            .node_store
+            .get_node(
+                &source.database,
+                &source.namespace,
+                &source.entity_type,
+                &source.node_id,
+            )
+            .await?
+            .ok_or_else(|| PelagoError::SourceNotFound {
+                entity_type: source.entity_type.clone(),
+                node_id: source.node_id.clone(),
+            })?;
+        self.enforce_source_ownership(&source.entity_type, &source.node_id, source_node.locality)?;
+
         // Get source schema for bidirectional check
         let schema = self
             .schema_registry
@@ -339,9 +569,26 @@ impl EdgeStore {
 
         // The marker position is right after the edge subspace prefix
         let marker_pos = subspace.prefix().len();
+        let needs_legacy_meta = results.iter().any(|(_, value)| value.is_empty());
+        let mut legacy_meta_by_key: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+
+        if needs_legacy_meta {
+            let mut meta_start = range_start.to_vec();
+            if meta_start.len() > marker_pos {
+                meta_start[marker_pos] = edge_markers::FORWARD_META;
+            }
+            let mut meta_end = meta_start.clone();
+            meta_end.push(0xFF);
+
+            let meta_rows = self
+                .db
+                .get_range(meta_start.as_ref(), &meta_end, limit)
+                .await?;
+            legacy_meta_by_key.extend(meta_rows);
+        }
 
         // For each forward key, fetch the corresponding metadata
-        for (key, _) in results {
+        for (key, forward_value) in results {
             // Convert forward key to metadata key (change marker from 'f' to 'm')
             let mut meta_key = key.clone();
             // Replace the marker at the known position (not searching - 'f' may appear in strings!)
@@ -349,30 +596,45 @@ impl EdgeStore {
                 meta_key[marker_pos] = edge_markers::FORWARD_META;
             }
 
-            if let Some(meta_bytes) = self.db.get(&meta_key).await? {
-                let edge_data: EdgeData = decode_cbor(&meta_bytes)?;
-                let label = edge_data
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| label_filter.unwrap_or("unknown").to_string());
-                let source = edge_data
-                    .source
-                    .clone()
-                    .unwrap_or_else(|| NodeRef::new(database, namespace, entity_type, node_id));
-                let target = edge_data
-                    .target
-                    .clone()
-                    .unwrap_or_else(|| NodeRef::new(database, namespace, "Unknown", "Unknown"));
+            let edge_data = if !forward_value.is_empty() {
+                decode_cbor::<EdgeData>(&forward_value).ok()
+            } else {
+                None
+            };
 
-                edges.push(StoredEdge {
-                    edge_id: edge_data.edge_id,
-                    source,
-                    target,
-                    label,
-                    properties: edge_data.properties,
-                    created_at: edge_data.created_at,
-                });
-            }
+            let edge_data = match edge_data {
+                Some(data) => Some(data),
+                None => legacy_meta_by_key
+                    .get(&meta_key)
+                    .map(|meta_bytes| decode_cbor::<EdgeData>(meta_bytes))
+                    .transpose()?,
+            };
+
+            let Some(edge_data) = edge_data else {
+                continue;
+            };
+
+            let label = edge_data
+                .label
+                .clone()
+                .unwrap_or_else(|| label_filter.unwrap_or("unknown").to_string());
+            let source = edge_data
+                .source
+                .clone()
+                .unwrap_or_else(|| NodeRef::new(database, namespace, entity_type, node_id));
+            let target = edge_data
+                .target
+                .clone()
+                .unwrap_or_else(|| NodeRef::new(database, namespace, "Unknown", "Unknown"));
+
+            edges.push(StoredEdge {
+                edge_id: edge_data.edge_id,
+                source,
+                target,
+                label,
+                properties: edge_data.properties,
+                created_at: edge_data.created_at,
+            });
         }
 
         Ok(edges)
@@ -597,8 +859,7 @@ mod tests {
         let source = NodeRef::new("db", "ns", "Person", "1_100");
         let target = NodeRef::new("db", "ns", "Company", "1_200");
 
-        let keys =
-            compute_edge_keys(&subspace, &source, &target, "WORKS_AT", None, false).unwrap();
+        let keys = compute_edge_keys(&subspace, &source, &target, "WORKS_AT", None, false).unwrap();
 
         assert!(keys.reverse_direction_keys.is_none());
         assert_eq!(keys.entry_count(), 3);
@@ -625,9 +886,15 @@ mod tests {
         let target = NodeRef::new("db", "ns", "Company", "1_200");
         let sort_value = Value::Timestamp(1234567890);
 
-        let keys_with_sort =
-            compute_edge_keys(&subspace, &source, &target, "WORKS_AT", Some(&sort_value), false)
-                .unwrap();
+        let keys_with_sort = compute_edge_keys(
+            &subspace,
+            &source,
+            &target,
+            "WORKS_AT",
+            Some(&sort_value),
+            false,
+        )
+        .unwrap();
         let keys_without_sort =
             compute_edge_keys(&subspace, &source, &target, "WORKS_AT", None, false).unwrap();
 

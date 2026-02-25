@@ -1,0 +1,6 @@
+{"source":"p_alice","label":"follows","target":"p_bob","properties":{}}
+{"source":"p_alice","label":"follows","target":"p_carol","properties":{}}
+{"source":"p_bob","label":"follows","target":"p_dan","properties":{}}
+{"source":"p_carol","label":"follows","target":"p_eve","properties":{}}
+{"source":"p_bob","label":"works_with","target":"p_carol","properties":{}}
+{"source":"p_alice","label":"works_with","target":"p_eve","properties":{}}

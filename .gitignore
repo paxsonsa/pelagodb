@@ -15,6 +15,10 @@ Thumbs.db
 # Local development
 fdb.cluster
 *.log
+data/cache/
+data/cache.bak.*/
+**/__pycache__/
+clients/python/pelagodb/generated/*
 
 # AI agent worktrees
 .codex/

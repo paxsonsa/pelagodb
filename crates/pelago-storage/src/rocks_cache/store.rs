@@ -1,9 +1,9 @@
+use super::config::RocksCacheConfig;
 use crate::cdc::{CdcOperation, Versionstamp};
 use crate::edge::{NodeRef, StoredEdge};
 use crate::node::StoredNode;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::PelagoError;
-use super::config::RocksCacheConfig;
 use std::collections::HashMap;
 
 pub struct RocksCacheStore {
@@ -24,7 +24,16 @@ impl RocksCacheStore {
     }
 
     pub fn open_temp() -> Result<Self, PelagoError> {
-        let path = format!("/tmp/pelago-cache-test-{}", std::process::id());
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = format!(
+            "/tmp/pelago-cache-test-{}-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t"),
+            ts
+        );
         let mut config = RocksCacheConfig::default();
         config.path = path;
         Self::open(&config)
@@ -76,12 +85,7 @@ impl RocksCacheStore {
         }
     }
 
-    pub fn put_node(
-        &self,
-        db: &str,
-        ns: &str,
-        node: &StoredNode,
-    ) -> Result<(), PelagoError> {
+    pub fn put_node(&self, db: &str, ns: &str, node: &StoredNode) -> Result<(), PelagoError> {
         let key = Self::node_key(db, ns, &node.entity_type, &node.id);
         let value = encode_cbor(node)?;
         self.db
@@ -102,12 +106,7 @@ impl RocksCacheStore {
             .map_err(|e| PelagoError::Internal(format!("RocksDB delete: {}", e)))
     }
 
-    pub fn put_edge(
-        &self,
-        db: &str,
-        ns: &str,
-        edge: &StoredEdge,
-    ) -> Result<(), PelagoError> {
+    pub fn put_edge(&self, db: &str, ns: &str, edge: &StoredEdge) -> Result<(), PelagoError> {
         let key = Self::edge_key(db, ns, &edge.source, &edge.label, &edge.target);
         let value = encode_cbor(edge)?;
         self.db
@@ -141,8 +140,8 @@ impl RocksCacheStore {
         let mut edges = Vec::new();
         let iter = self.db.prefix_iterator(&prefix);
         for item in iter {
-            let (key, value) = item
-                .map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
+            let (key, value) =
+                item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
             if !key.starts_with(&prefix) {
                 break;
             }
@@ -267,6 +266,20 @@ impl RocksCacheStore {
                 CdcOperation::SchemaRegister { .. } => {
                     // No cache action for schema registrations.
                 }
+                CdcOperation::OwnershipTransfer {
+                    entity_type,
+                    node_id,
+                    current_site_id,
+                    ..
+                } => {
+                    // Best-effort locality update for cached node.
+                    if let Some(mut node) = self.get_node(db, ns, entity_type, node_id)? {
+                        node.locality = current_site_id.parse::<u8>().unwrap_or(node.locality);
+                        let key = Self::node_key(db, ns, &node.entity_type, &node.id);
+                        let value = encode_cbor(&node)?;
+                        batch.put(key, value);
+                    }
+                }
             }
         }
 
@@ -291,8 +304,8 @@ impl RocksCacheStore {
     pub fn clear(&self) -> Result<(), PelagoError> {
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
         for item in iter {
-            let (key, _) = item
-                .map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
+            let (key, _) =
+                item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
             self.db
                 .delete(&*key)
                 .map_err(|e| PelagoError::Internal(format!("RocksDB delete: {}", e)))?;

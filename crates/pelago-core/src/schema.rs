@@ -203,10 +203,10 @@ impl IndexType {
     /// Heuristic selectivity for query planning
     pub fn selectivity(&self) -> f64 {
         match self {
-            IndexType::None => 1.0,       // Full scan
-            IndexType::Unique => 0.01,    // ~1% selectivity
-            IndexType::Equality => 0.10,  // ~10% selectivity
-            IndexType::Range => 0.50,     // ~50% selectivity
+            IndexType::None => 1.0,      // Full scan
+            IndexType::Unique => 0.01,   // ~1% selectivity
+            IndexType::Equality => 0.10, // ~10% selectivity
+            IndexType::Range => 0.50,    // ~50% selectivity
         }
     }
 

@@ -1,0 +1,59 @@
+{
+  "server": "http://127.0.0.1:27615",
+  "database": "default",
+  "namespace": "benchmark",
+  "profile": "context",
+  "runs": 10,
+  "warmup": 2,
+  "results": [
+    {
+      "name": "context_point_lookup",
+      "count": 10,
+      "mean_ms": 36.119962599999994,
+      "p50_ms": 36.0260005,
+      "p95_ms": 36.843325,
+      "p99_ms": 36.846565
+    },
+    {
+      "name": "context_show_shot",
+      "count": 10,
+      "mean_ms": 95.7148295,
+      "p50_ms": 96.2592295,
+      "p95_ms": 101.5967189,
+      "p99_ms": 102.50354378
+    },
+    {
+      "name": "context_show_shot_task_label",
+      "count": 10,
+      "mean_ms": 64.8370041,
+      "p50_ms": 64.95652050000001,
+      "p95_ms": 68.89676875,
+      "p99_ms": 69.15565375
+    },
+    {
+      "name": "context_or_shots",
+      "count": 10,
+      "mean_ms": 95.8668375,
+      "p50_ms": 93.8453125,
+      "p95_ms": 102.1219962,
+      "p99_ms": 102.76786643999999
+    },
+    {
+      "name": "context_deep_page",
+      "count": 10,
+      "mean_ms": 88.6320917,
+      "p50_ms": 88.450271,
+      "p95_ms": 95.41674825,
+      "p99_ms": 95.45648325
+    }
+  ],
+  "targets_ms": {
+    "context_point_lookup": 1.0,
+    "context_show_shot": 50.0,
+    "context_show_shot_task_label": 50.0,
+    "context_or_shots": 80.0,
+    "context_deep_page": 80.0
+  },
+  "enforced": false,
+  "exit_code": 0
+}

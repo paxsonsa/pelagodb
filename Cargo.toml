@@ -29,7 +29,7 @@ ciborium = "0.2"
 foundationdb = { version = "0.10", features = ["embedded-fdb-include", "fdb-7_3"] }
 
 # gRPC
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 prost-types = "0.13"
 

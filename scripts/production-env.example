@@ -1,0 +1,31 @@
+# PelagoDB production baseline profile
+
+# Core server
+export PELAGO_FDB_CLUSTER=/usr/local/etc/foundationdb/fdb.cluster
+export PELAGO_SITE_ID=1
+export PELAGO_SITE_NAME=prod-site-1
+export PELAGO_LISTEN_ADDR=0.0.0.0:27615
+export RUST_LOG=info
+
+# Security by default
+export PELAGO_AUTH_REQUIRED=true
+export PELAGO_API_KEYS='replace-me-admin-key:admin-principal'
+
+# Audit + retention
+export PELAGO_AUDIT_ENABLED=true
+export PELAGO_AUDIT_RETENTION_DAYS=90
+export PELAGO_AUDIT_RETENTION_SWEEP_SECS=300
+
+# Cache
+export PELAGO_CACHE_ENABLED=true
+
+# Optional replication
+# export PELAGO_REPLICATION_ENABLED=true
+# export PELAGO_REPLICATION_PEERS='2=10.0.0.2:27615,3=10.0.0.3:27615'
+# export PELAGO_REPLICATION_API_KEY='peer-read-key'
+
+# Optional docs site (serve docs from the same pelago-server process)
+# export PELAGO_DOCS_ENABLED=true
+# export PELAGO_DOCS_ADDR=127.0.0.1:4070
+# export PELAGO_DOCS_DIR=docs
+# export PELAGO_DOCS_TITLE='PelagoDB Operations Docs'

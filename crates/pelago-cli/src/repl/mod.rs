@@ -6,10 +6,12 @@ use pelago_proto::{
 };
 use pelago_query::pql::{
     explain_query, parse_pql, CompiledBlock, InMemorySchemaProvider, PqlCompiler, PqlEdgeDirection,
-    PqlResolver, SchemaInfo,
+    PqlResolver, SchemaInfo, SetOp,
 };
 use rustyline::DefaultEditor;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -48,90 +50,211 @@ pub async fn run(
         params: HashMap::new(),
     };
 
-    // Connect to server
+    // Connect to server (optional; REPL supports offline parse/explain mode)
     let conn = match GrpcConnection::connect(server).await {
-        Ok(c) => c,
+        Ok(c) => Some(c),
         Err(e) => {
-            eprintln!(
-                "Warning: Could not connect to server at {}: {}",
-                server, e
-            );
+            eprintln!("Warning: Could not connect to server at {}: {}", server, e);
             eprintln!("REPL will start in offline mode (parse/explain only).\n");
-            return run_offline_repl(&mut context).await;
+            None
         }
     };
 
-    // Print banner
-    println!("PelagoDB PQL REPL v{}", env!("CARGO_PKG_VERSION"));
-    println!("Connected to {} (db: {}, ns: {})", server, database, ns);
-    println!("Type :help for commands, :quit to exit.\n");
-
-    // Setup rustyline
-    let history_path = get_history_path();
-    let mut rl = DefaultEditor::new()?;
-    let mut session_history: Vec<String> = Vec::new();
-    if let Some(ref path) = history_path {
-        let _ = rl.load_history(path);
+    // Non-interactive mode for scripted execution (used by tests/automation).
+    if !std::io::stdin().is_terminal() {
+        return run_scripted_repl(&mut context, conn.as_ref(), server).await;
     }
 
-    // Fetch schemas for resolution (cache them)
-    let mut schemas = fetch_schemas(&conn, &context)
-        .await
-        .unwrap_or_default();
+    if let Some(conn) = conn {
+        // Print banner
+        println!("PelagoDB PQL REPL v{}", env!("CARGO_PKG_VERSION"));
+        println!("Connected to {} (db: {}, ns: {})", server, database, ns);
+        println!("Type :help for commands, :quit to exit.\n");
 
-    loop {
-        let prompt = format!("{}:{}> ", context.database, context.namespace);
-        let line = match rl.readline(&prompt) {
-            Ok(line) => line,
-            Err(rustyline::error::ReadlineError::Interrupted) => continue,
-            Err(rustyline::error::ReadlineError::Eof) => break,
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                break;
+        // Setup rustyline
+        let history_path = get_history_path();
+        let mut rl = DefaultEditor::new()?;
+        let mut session_history: Vec<String> = Vec::new();
+        if let Some(ref path) = history_path {
+            let _ = rl.load_history(path);
+        }
+
+        // Fetch schemas for resolution (cache them)
+        let mut schemas = fetch_schemas(&conn, &context).await.unwrap_or_default();
+
+        loop {
+            let prompt = format!("{}:{}> ", context.database, context.namespace);
+            let line = match rl.readline(&prompt) {
+                Ok(line) => line,
+                Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                Err(rustyline::error::ReadlineError::Eof) => break,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    break;
+                }
+            };
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
             }
-        };
 
+            let _ = rl.add_history_entry(trimmed);
+            session_history.push(trimmed.to_string());
+
+            // Handle meta-commands
+            if trimmed.starts_with(':') {
+                let outcome = handle_meta_command(trimmed, &mut context, &session_history);
+                if let Some(explain_query) = outcome.explain_query {
+                    execute_explain_input(&explain_query, &context, &schemas);
+                }
+                if outcome.refresh_schemas {
+                    schemas = fetch_schemas(&conn, &context).await.unwrap_or_default();
+                }
+                if outcome.exit {
+                    break; // :quit
+                }
+                continue;
+            }
+
+            // Handle multiline input
+            let input = if needs_continuation(trimmed) {
+                collect_multiline(&mut rl, trimmed)?
+            } else {
+                trimmed.to_string()
+            };
+
+            // Execute PQL
+            execute_pql_input(
+                &apply_params(&input, &context.params),
+                &conn,
+                &context,
+                &schemas,
+            )
+            .await;
+        }
+
+        // Save history
+        if let Some(ref path) = history_path {
+            let _ = rl.save_history(path);
+        }
+
+        println!("Goodbye!");
+        Ok(())
+    } else {
+        run_offline_repl(&mut context).await
+    }
+}
+
+async fn run_scripted_repl(
+    context: &mut ReplContext,
+    conn: Option<&GrpcConnection>,
+    server: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if conn.is_some() {
+        println!("PelagoDB PQL REPL v{}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "Connected to {} (db: {}, ns: {})",
+            server, context.database, context.namespace
+        );
+        println!("Type :help for commands, :quit to exit.\n");
+    } else {
+        println!(
+            "PelagoDB PQL REPL v{} (offline mode)",
+            env!("CARGO_PKG_VERSION")
+        );
+        println!("Type :help for commands, :quit to exit.\n");
+    }
+
+    let mut session_history: Vec<String> = Vec::new();
+    let mut pending_query = String::new();
+    let mut schemas = match conn {
+        Some(c) => fetch_schemas(c, context).await.unwrap_or_default(),
+        None => InMemorySchemaProvider::new(),
+    };
+
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let line = line?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-
-        let _ = rl.add_history_entry(trimmed);
         session_history.push(trimmed.to_string());
 
-        // Handle meta-commands
-        if trimmed.starts_with(':') {
-            let outcome = handle_meta_command(trimmed, &mut context, &session_history);
+        if pending_query.is_empty() && trimmed.starts_with(':') {
+            let outcome = handle_meta_command(trimmed, context, &session_history);
             if let Some(explain_query) = outcome.explain_query {
-                execute_explain_input(&explain_query, &context, &schemas);
+                execute_explain_input(&explain_query, context, &schemas);
             }
             if outcome.refresh_schemas {
-                schemas = fetch_schemas(&conn, &context).await.unwrap_or_default();
+                if let Some(c) = conn {
+                    schemas = fetch_schemas(c, context).await.unwrap_or_default();
+                }
             }
             if outcome.exit {
-                break; // :quit
+                println!("Goodbye!");
+                return Ok(());
             }
             continue;
         }
 
-        // Handle multiline input
-        let input = if needs_continuation(trimmed) {
-            collect_multiline(&mut rl, trimmed)?
+        if !pending_query.is_empty() {
+            pending_query.push('\n');
+            pending_query.push_str(trimmed);
         } else {
-            trimmed.to_string()
-        };
+            pending_query = trimmed.to_string();
+        }
 
-        // Execute PQL
-        execute_pql_input(&apply_params(&input, &context.params), &conn, &context, &schemas).await;
+        if needs_continuation(&pending_query) {
+            continue;
+        }
+
+        let query = apply_params(&pending_query, &context.params);
+        if let Some(c) = conn {
+            execute_pql_input(&query, c, context, &schemas).await;
+        } else {
+            execute_offline_pql_input(&query, &schemas);
+        }
+        pending_query.clear();
     }
 
-    // Save history
-    if let Some(ref path) = history_path {
-        let _ = rl.save_history(path);
+    if !pending_query.trim().is_empty() {
+        let query = apply_params(&pending_query, &context.params);
+        if let Some(c) = conn {
+            execute_pql_input(&query, c, context, &schemas).await;
+        } else {
+            execute_offline_pql_input(&query, &schemas);
+        }
     }
 
     println!("Goodbye!");
     Ok(())
+}
+
+fn execute_offline_pql_input(input: &str, schemas: &InMemorySchemaProvider) {
+    let ast = match parse_pql(input) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Parse error: {}", e);
+            return;
+        }
+    };
+
+    println!("Parsed successfully ({} block(s))", ast.blocks.len());
+    let resolver = PqlResolver::new();
+    match resolver.resolve(&ast, schemas) {
+        Ok(resolved) => {
+            let compiler = PqlCompiler::new();
+            match compiler.compile(&resolved) {
+                Ok(blocks) => {
+                    println!("{}", explain_query(&blocks));
+                }
+                Err(e) => println!("Compile: {}", e),
+            }
+        }
+        Err(e) => println!("(Schema validation skipped in offline mode: {})", e),
+    }
 }
 
 async fn run_offline_repl(context: &mut ReplContext) -> Result<(), Box<dyn std::error::Error>> {
@@ -281,9 +404,7 @@ fn handle_meta_command(
                 if let Some((name, value)) = assignment.split_once('=') {
                     let name = name.trim().trim_start_matches('$');
                     let value = value.trim();
-                    context
-                        .params
-                        .insert(name.to_string(), value.to_string());
+                    context.params.insert(name.to_string(), value.to_string());
                     println!("Set ${} = {}", name, value);
                 } else {
                     println!("Usage: :param $name = value");
@@ -347,9 +468,7 @@ fn print_help() {
     println!("PQL Examples:");
     println!("  Person {{ name, age }}");
     println!("  Person @filter(age >= 30) {{ name, age }}");
-    println!(
-        "  query {{ start(func: uid(Person:1_42)) {{ name, -[KNOWS]-> {{ name }} }} }}"
-    );
+    println!("  query {{ start(func: uid(Person:1_42)) {{ name, -[KNOWS]-> {{ name }} }} }}");
 }
 
 /// Check if input needs continuation (unbalanced braces)
@@ -398,11 +517,7 @@ fn apply_params(input: &str, params: &HashMap<String, String>) -> String {
     replaced
 }
 
-fn execute_explain_input(
-    input: &str,
-    context: &ReplContext,
-    schemas: &InMemorySchemaProvider,
-) {
+fn execute_explain_input(input: &str, context: &ReplContext, schemas: &InMemorySchemaProvider) {
     let ast = match parse_pql(input) {
         Ok(ast) => ast,
         Err(e) => {
@@ -623,19 +738,12 @@ async fn execute_pql_input(
                         while let Ok(Some(result)) = stream.message().await {
                             results.push(result);
                         }
-                        let block_nodes: Vec<Node> = results
-                            .iter()
-                            .filter_map(|r| r.node.clone())
-                            .collect();
+                        let block_nodes: Vec<Node> =
+                            results.iter().filter_map(|r| r.node.clone()).collect();
                         total_results += block_nodes.len();
                         format_traverse_results(&results, block_name, &context.format);
                         if let Some(var_name) = capture_by_block.get(block_name) {
-                            store_capture(
-                                var_name,
-                                &block_nodes,
-                                context,
-                                &mut captured_variables,
-                            );
+                            store_capture(var_name, &block_nodes, context, &mut captured_variables);
                         }
                     }
                     Err(e) => eprintln!("Error in '{}': {}", block_name, e),
@@ -646,6 +754,8 @@ async fn execute_pql_input(
                 variable,
                 filter,
                 fields,
+                limit,
+                offset,
             } => {
                 let refs = match captured_variables.get(variable) {
                     Some(v) => v.clone(),
@@ -688,6 +798,55 @@ async fn execute_pql_input(
                     }
                 }
 
+                nodes = apply_offset_limit(nodes, *offset, *limit);
+                total_results += nodes.len();
+                format_result_nodes(&nodes, block_name, &context.format);
+                if let Some(var_name) = capture_by_block.get(block_name) {
+                    store_capture(var_name, &nodes, context, &mut captured_variables);
+                }
+            }
+            CompiledBlock::VariableSet {
+                block_name,
+                variables,
+                set_op,
+                filter,
+                fields,
+                limit,
+                offset,
+            } => {
+                let refs = merge_variable_refs(&captured_variables, variables, set_op);
+                let mut nodes = Vec::new();
+
+                for node_ref in refs {
+                    let mut client = conn.node_client();
+                    match client
+                        .get_node(GetNodeRequest {
+                            context: Some(request_context.clone()),
+                            entity_type: node_ref.entity_type.clone(),
+                            node_id: node_ref.node_id.clone(),
+                            consistency: 0,
+                            fields: fields.clone(),
+                        })
+                        .await
+                    {
+                        Ok(resp) => {
+                            if let Some(node) = resp.into_inner().node {
+                                let filter_ok = filter
+                                    .as_ref()
+                                    .map(|expr| node_matches_filter(&node, expr))
+                                    .unwrap_or(true);
+                                if filter_ok {
+                                    nodes.push(node);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Error in '{}': {}", block_name, e);
+                        }
+                    }
+                }
+
+                nodes = apply_offset_limit(nodes, *offset, *limit);
                 total_results += nodes.len();
                 format_result_nodes(&nodes, block_name, &context.format);
                 if let Some(var_name) = capture_by_block.get(block_name) {
@@ -721,6 +880,99 @@ fn store_capture(
         })
         .collect();
     captured_variables.insert(variable.to_string(), refs);
+}
+
+fn apply_offset_limit(mut nodes: Vec<Node>, offset: Option<u32>, limit: Option<u32>) -> Vec<Node> {
+    let skip = offset.unwrap_or(0) as usize;
+    if skip > 0 {
+        nodes = nodes.into_iter().skip(skip).collect();
+    }
+    if let Some(max) = limit {
+        nodes = nodes.into_iter().take(max as usize).collect();
+    }
+    nodes
+}
+
+fn merge_variable_refs(
+    captured_variables: &HashMap<String, Vec<NodeRef>>,
+    variable_names: &[String],
+    set_op: &SetOp,
+) -> Vec<NodeRef> {
+    if variable_names.is_empty() {
+        return Vec::new();
+    }
+
+    let first = captured_variables
+        .get(&variable_names[0])
+        .cloned()
+        .unwrap_or_default();
+
+    match set_op {
+        SetOp::Union => {
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            for name in variable_names {
+                if let Some(nodes) = captured_variables.get(name) {
+                    for node in nodes {
+                        let key = node_ref_identity(node);
+                        if seen.insert(key) {
+                            out.push(node.clone());
+                        }
+                    }
+                }
+            }
+            out
+        }
+        SetOp::Intersect => {
+            if variable_names.len() == 1 {
+                return first;
+            }
+
+            let other_sets: Vec<HashSet<(String, String)>> = variable_names[1..]
+                .iter()
+                .map(|name| {
+                    captured_variables
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(node_ref_identity)
+                        .collect()
+                })
+                .collect();
+
+            first
+                .into_iter()
+                .filter(|node| {
+                    let key = node_ref_identity(node);
+                    other_sets.iter().all(|s| s.contains(&key))
+                })
+                .collect()
+        }
+        SetOp::Difference => {
+            if variable_names.len() == 1 {
+                return first;
+            }
+
+            let mut excluded: HashSet<(String, String)> = HashSet::new();
+            for name in &variable_names[1..] {
+                if let Some(nodes) = captured_variables.get(name) {
+                    for node in nodes {
+                        excluded.insert(node_ref_identity(node));
+                    }
+                }
+            }
+
+            first
+                .into_iter()
+                .filter(|node| !excluded.contains(&node_ref_identity(node)))
+                .collect()
+        }
+    }
+}
+
+fn node_ref_identity(node_ref: &NodeRef) -> (String, String) {
+    (node_ref.entity_type.clone(), node_ref.node_id.clone())
 }
 
 fn node_matches_filter(node: &Node, filter: &str) -> bool {
@@ -891,11 +1143,7 @@ fn format_result_nodes(nodes: &[Node], block_name: &str, format: &OutputFormat) 
     }
 }
 
-fn format_traverse_results(
-    results: &[TraverseResult],
-    block_name: &str,
-    format: &OutputFormat,
-) {
+fn format_traverse_results(results: &[TraverseResult], block_name: &str, format: &OutputFormat) {
     match format {
         OutputFormat::Json => {
             let json: Vec<serde_json::Value> = results
@@ -1014,9 +1262,7 @@ mod tests {
     #[test]
     fn test_needs_continuation() {
         assert!(needs_continuation("Person {"));
-        assert!(needs_continuation(
-            "query { start(func: type(Person)) {"
-        ));
+        assert!(needs_continuation("query { start(func: type(Person)) {"));
         assert!(!needs_continuation("Person { name }"));
         assert!(!needs_continuation(
             "query { start(func: type(Person)) { name } }"

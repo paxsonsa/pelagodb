@@ -1,8 +1,8 @@
+use super::store::RocksCacheStore;
+use crate::cdc::Versionstamp;
 use crate::db::PelagoDb;
 use crate::edge::StoredEdge;
 use crate::node::StoredNode;
-use crate::cdc::Versionstamp;
-use super::store::RocksCacheStore;
 use pelago_core::PelagoError;
 use std::sync::Arc;
 
@@ -110,10 +110,12 @@ impl CachedReadPath {
                 if !self.session_cache_fresh_for_current_read().await? {
                     return Ok(Vec::new());
                 }
-                self.cache.list_edges_cached(db, ns, entity_type, node_id, label)
+                self.cache
+                    .list_edges_cached(db, ns, entity_type, node_id, label)
             }
             ReadConsistency::Eventual => {
-                self.cache.list_edges_cached(db, ns, entity_type, node_id, label)
+                self.cache
+                    .list_edges_cached(db, ns, entity_type, node_id, label)
             }
         }
     }

@@ -1,0 +1,33 @@
+[
+  {
+    "name": "Customer",
+    "properties": {
+      "name": {"type": "string", "required": true},
+      "email": {"type": "string", "required": true, "index": "unique"},
+      "segment": {"type": "string", "index": "equality"}
+    },
+    "edges": {
+      "placed": {"target": "Order", "direction": "outgoing"}
+    }
+  },
+  {
+    "name": "Product",
+    "properties": {
+      "sku": {"type": "string", "required": true, "index": "unique"},
+      "name": {"type": "string", "required": true},
+      "price_cents": {"type": "int", "index": "range"},
+      "category": {"type": "string", "index": "equality"}
+    },
+    "edges": {
+      "included_in": {"target": "Order", "direction": "outgoing"}
+    }
+  },
+  {
+    "name": "Order",
+    "properties": {
+      "order_number": {"type": "string", "required": true, "index": "unique"},
+      "status": {"type": "string", "index": "equality"},
+      "total_cents": {"type": "int", "index": "range"}
+    }
+  }
+]

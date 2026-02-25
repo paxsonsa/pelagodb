@@ -1,0 +1,5 @@
+{"id":"p_alice","entity_type":"Person","properties":{"name":"Alice","age":34,"city":"San Francisco","role":"Engineering Manager"}}
+{"id":"p_bob","entity_type":"Person","properties":{"name":"Bob","age":29,"city":"San Francisco","role":"Backend Engineer"}}
+{"id":"p_carol","entity_type":"Person","properties":{"name":"Carol","age":31,"city":"New York","role":"Data Engineer"}}
+{"id":"p_dan","entity_type":"Person","properties":{"name":"Dan","age":27,"city":"Austin","role":"Product Manager"}}
+{"id":"p_eve","entity_type":"Person","properties":{"name":"Eve","age":36,"city":"Seattle","role":"Platform Lead"}}

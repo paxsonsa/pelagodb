@@ -226,7 +226,8 @@ mod tests {
         props.insert("age".to_string(), Value::Int(30));
         props.insert("name".to_string(), Value::String("Alice".into()));
 
-        let entries = compute_index_entries(&subspace, "Person", &node_id, &schema, &props).unwrap();
+        let entries =
+            compute_index_entries(&subspace, "Person", &node_id, &schema, &props).unwrap();
 
         // Should have 3 index entries (email=unique, status=equality, age=range)
         // name has no index
@@ -255,7 +256,8 @@ mod tests {
         props.insert("email".to_string(), Value::Null);
         props.insert("status".to_string(), Value::Null);
 
-        let entries = compute_index_entries(&subspace, "Person", &node_id, &schema, &props).unwrap();
+        let entries =
+            compute_index_entries(&subspace, "Person", &node_id, &schema, &props).unwrap();
 
         // No entries for null values
         assert_eq!(entries.len(), 0);
@@ -269,7 +271,8 @@ mod tests {
 
         let props = HashMap::new(); // Empty
 
-        let entries = compute_index_entries(&subspace, "Person", &node_id, &schema, &props).unwrap();
+        let entries =
+            compute_index_entries(&subspace, "Person", &node_id, &schema, &props).unwrap();
 
         // No entries for missing values
         assert_eq!(entries.len(), 0);
@@ -282,26 +285,15 @@ mod tests {
         let node_id = NodeId::new(1, 100).to_bytes();
 
         let mut old_props = HashMap::new();
-        old_props.insert(
-            "email".to_string(),
-            Value::String("old@example.com".into()),
-        );
+        old_props.insert("email".to_string(), Value::String("old@example.com".into()));
         old_props.insert("age".to_string(), Value::Int(25));
 
         let mut new_props = HashMap::new();
-        new_props.insert(
-            "email".to_string(),
-            Value::String("new@example.com".into()),
-        );
+        new_props.insert("email".to_string(), Value::String("new@example.com".into()));
         new_props.insert("age".to_string(), Value::Int(25)); // Same value
 
         let removals = compute_index_removals(
-            &subspace,
-            "Person",
-            &node_id,
-            &schema,
-            &old_props,
-            &new_props,
+            &subspace, "Person", &node_id, &schema, &old_props, &new_props,
         )
         .unwrap();
 

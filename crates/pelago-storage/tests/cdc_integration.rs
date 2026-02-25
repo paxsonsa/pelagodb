@@ -5,7 +5,7 @@
 //! Run with:
 //!   LIBRARY_PATH=/usr/local/lib cargo test --test cdc_integration -- --ignored --nocapture
 
-use pelago_core::schema::{EntitySchema, PropertyDef};
+use pelago_core::schema::{EdgeDef, EdgeTarget, EntitySchema, PropertyDef};
 use pelago_core::{PropertyType, Value};
 use pelago_storage::{
     CdcConsumer, CdcOperation, ConsumerConfig, EdgeStore, IdAllocator, NodeRef, NodeStore,
@@ -86,7 +86,8 @@ async fn test_cdc_consumer_receives_all_mutations() {
     // 1. Register a schema → SchemaRegister CDC op
     let schema = EntitySchema::new("Person")
         .with_property("name", PropertyDef::new(PropertyType::String).required())
-        .with_property("age", PropertyDef::new(PropertyType::Int));
+        .with_property("age", PropertyDef::new(PropertyType::Int))
+        .with_edge("knows", EdgeDef::new(EdgeTarget::specific("Person")));
 
     schema_registry
         .register_schema(&database, &namespace, schema)
@@ -173,10 +174,7 @@ async fn test_cdc_consumer_receives_all_mutations() {
         .await
         .expect("Failed to create consumer");
 
-    let entries = consumer
-        .poll_batch()
-        .await
-        .expect("Failed to poll CDC");
+    let entries = consumer.poll_batch().await.expect("Failed to poll CDC");
 
     let mut op_counts: HashMap<&str, usize> = HashMap::new();
     for (_vs, entry) in &entries {
@@ -188,6 +186,7 @@ async fn test_cdc_consumer_receives_all_mutations() {
                 CdcOperation::EdgeCreate { .. } => "EdgeCreate",
                 CdcOperation::EdgeDelete { .. } => "EdgeDelete",
                 CdcOperation::SchemaRegister { .. } => "SchemaRegister",
+                CdcOperation::OwnershipTransfer { .. } => "OwnershipTransfer",
             };
             *op_counts.entry(name).or_insert(0) += 1;
         }
@@ -249,14 +248,15 @@ async fn test_cdc_consumer_resumes_from_checkpoint() {
 
     // Consumer reads and checkpoints
     let config = ConsumerConfig::new("resume_test", &database, &namespace);
-    let mut consumer = CdcConsumer::new(db.clone(), config)
-        .await
-        .unwrap();
+    let mut consumer = CdcConsumer::new(db.clone(), config).await.unwrap();
 
     let batch1 = consumer.poll_batch().await.unwrap();
     let batch1_count = batch1.len();
     println!("First batch: {} entries", batch1_count);
-    assert!(batch1_count >= 3, "Expected schema + 2 nodes = at least 3 entries");
+    assert!(
+        batch1_count >= 3,
+        "Expected schema + 2 nodes = at least 3 entries"
+    );
 
     // Force checkpoint
     consumer.checkpoint().await.unwrap();
@@ -277,14 +277,16 @@ async fn test_cdc_consumer_resumes_from_checkpoint() {
     drop(consumer);
 
     let config2 = ConsumerConfig::new("resume_test", &database, &namespace);
-    let mut consumer2 = CdcConsumer::new(db.clone(), config2)
-        .await
-        .unwrap();
+    let mut consumer2 = CdcConsumer::new(db.clone(), config2).await.unwrap();
 
     // Should only get entries AFTER the checkpoint
     let batch2 = consumer2.poll_batch().await.unwrap();
     println!("Second batch (after resume): {} entries", batch2.len());
-    assert_eq!(batch2.len(), 1, "Should only receive the one new mutation after checkpoint");
+    assert_eq!(
+        batch2.len(),
+        1,
+        "Should only receive the one new mutation after checkpoint"
+    );
 
     // Verify it's the W3 node
     let has_w3 = batch2.iter().any(|(_, entry)| {
@@ -335,8 +337,15 @@ async fn test_multiple_independent_consumers() {
     println!("Consumer A: {} entries", batch_a.len());
     println!("Consumer B: {} entries", batch_b.len());
 
-    assert_eq!(batch_a.len(), batch_b.len(), "Both consumers should see same entries");
-    assert!(batch_a.len() >= 2, "Expected at least schema + node = 2 entries");
+    assert_eq!(
+        batch_a.len(),
+        batch_b.len(),
+        "Both consumers should see same entries"
+    );
+    assert!(
+        batch_a.len() >= 2,
+        "Expected at least schema + node = 2 entries"
+    );
 
     // Checkpoint A but not B
     consumer_a.checkpoint().await.unwrap();
@@ -354,11 +363,19 @@ async fn test_multiple_independent_consumers() {
 
     // A should only see new entry
     let batch_a2 = consumer_a.poll_batch().await.unwrap();
-    assert_eq!(batch_a2.len(), 1, "Consumer A should only see new entry after checkpoint");
+    assert_eq!(
+        batch_a2.len(),
+        1,
+        "Consumer A should only see new entry after checkpoint"
+    );
 
     // B (no checkpoint) sees the new entry too since its HWM advanced in memory
     let batch_b2 = consumer_b.poll_batch().await.unwrap();
-    assert_eq!(batch_b2.len(), 1, "Consumer B should see only new entry (HWM advanced in memory)");
+    assert_eq!(
+        batch_b2.len(),
+        1,
+        "Consumer B should see only new entry (HWM advanced in memory)"
+    );
 
     // But if we recreate B (simulating restart without checkpoint), it sees everything again
     drop(consumer_b);

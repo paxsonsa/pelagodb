@@ -69,7 +69,10 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                 }
                 for (j, step) in steps.iter().enumerate() {
                     output.push_str(&format!("  Step {}:\n", j + 1));
-                    output.push_str(&format!("    Edge: {} {}\n", step.edge_type, step.direction));
+                    output.push_str(&format!(
+                        "    Edge: {} {}\n",
+                        step.edge_type, step.direction
+                    ));
                     if let Some(ef) = &step.edge_filter {
                         output.push_str(&format!("    Edge filter: {}\n", ef));
                     }
@@ -77,10 +80,7 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                         output.push_str(&format!("    Node filter: {}\n", nf));
                     }
                     if !step.fields.is_empty() {
-                        output.push_str(&format!(
-                            "    Fields: [{}]\n",
-                            step.fields.join(", ")
-                        ));
+                        output.push_str(&format!("    Fields: [{}]\n", step.fields.join(", ")));
                     }
                     if !step.edge_fields.is_empty() {
                         output.push_str(&format!(
@@ -94,10 +94,7 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                     if let Some(sort) = &step.sort {
                         let order = if sort.descending { "desc" } else { "asc" };
                         let target = if sort.on_edge { " (on edge)" } else { "" };
-                        output.push_str(&format!(
-                            "    Sort: {} {}{}\n",
-                            sort.field, order, target
-                        ));
+                        output.push_str(&format!("    Sort: {} {}{}\n", sort.field, order, target));
                     }
                 }
             }
@@ -106,6 +103,8 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                 variable,
                 filter,
                 fields,
+                limit,
+                offset,
             } => {
                 output.push_str(&format!("\"{}\":\n", block_name));
                 output.push_str("  Strategy: variable_ref\n");
@@ -115,6 +114,43 @@ pub fn explain(blocks: &[CompiledBlock]) -> String {
                 }
                 if !fields.is_empty() {
                     output.push_str(&format!("  Fields: [{}]\n", fields.join(", ")));
+                }
+                if let Some(lim) = limit {
+                    output.push_str(&format!("  Limit: {}\n", lim));
+                }
+                if let Some(off) = offset {
+                    output.push_str(&format!("  Offset: {}\n", off));
+                }
+            }
+            CompiledBlock::VariableSet {
+                block_name,
+                variables,
+                set_op,
+                filter,
+                fields,
+                limit,
+                offset,
+            } => {
+                output.push_str(&format!("\"{}\":\n", block_name));
+                output.push_str("  Strategy: variable_set\n");
+                output.push_str(&format!("  Variables: [{}]\n", variables.join(", ")));
+                let op = match set_op {
+                    super::ast::SetOp::Union => "union",
+                    super::ast::SetOp::Intersect => "intersect",
+                    super::ast::SetOp::Difference => "difference",
+                };
+                output.push_str(&format!("  Set op: {}\n", op));
+                if let Some(f) = filter {
+                    output.push_str(&format!("  Filter: {}\n", f));
+                }
+                if !fields.is_empty() {
+                    output.push_str(&format!("  Fields: [{}]\n", fields.join(", ")));
+                }
+                if let Some(lim) = limit {
+                    output.push_str(&format!("  Limit: {}\n", lim));
+                }
+                if let Some(off) = offset {
+                    output.push_str(&format!("  Offset: {}\n", off));
                 }
             }
         }

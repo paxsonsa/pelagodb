@@ -4,7 +4,9 @@
 //! handling connection management, transactions, and common operations.
 
 use foundationdb::api::{FdbApiBuilder, NetworkAutoStop};
-use foundationdb::{Database, FdbBindingError, MaybeCommitted, RangeOption, RetryableTransaction, Transaction};
+use foundationdb::{
+    Database, FdbBindingError, MaybeCommitted, RangeOption, RetryableTransaction, Transaction,
+};
 use pelago_core::PelagoError;
 use std::future::Future;
 use std::sync::Arc;
@@ -28,7 +30,9 @@ pub async fn init_fdb_network() -> Result<(), PelagoError> {
             let network_builder = FdbApiBuilder::default()
                 .set_runtime_version(730)
                 .build()
-                .map_err(|e| PelagoError::FdbUnavailable(format!("Failed to build FDB API: {}", e)))?;
+                .map_err(|e| {
+                    PelagoError::FdbUnavailable(format!("Failed to build FDB API: {}", e))
+                })?;
 
             // Safety: boot() must only be called once per process, which we ensure
             // via the OnceCell. The FDB network thread will run for the lifetime
@@ -119,9 +123,10 @@ impl PelagoDb {
             PelagoError::FdbUnavailable(format!("Failed to create transaction: {}", e))
         })?;
 
-        let result = trx.get(key, false).await.map_err(|e| {
-            PelagoError::Internal(format!("Get failed: {}", e))
-        })?;
+        let result = trx
+            .get(key, false)
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Get failed: {}", e)))?;
 
         Ok(result.map(|v| v.to_vec()))
     }
@@ -178,24 +183,44 @@ impl PelagoDb {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, PelagoError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let trx = self.fdb.create_trx().map_err(|e| {
             PelagoError::FdbUnavailable(format!("Failed to create transaction: {}", e))
         })?;
 
-        let range_option = RangeOption {
+        let mut range_option = RangeOption {
             limit: Some(limit),
             ..RangeOption::from((begin, end))
         };
 
-        // iteration must be >= 1 (it's used for streaming pagination)
-        let result = trx.get_range(&range_option, 1, false).await.map_err(|e| {
-            PelagoError::Internal(format!("Get range failed: {}", e))
-        })?;
+        // `Transaction::get_range` may return a partial batch even when `limit`
+        // is higher (byte-based batching). Continue until `more == false` or the
+        // requested limit is satisfied.
+        let mut out = Vec::with_capacity(limit);
+        let mut iteration = 1usize;
+        loop {
+            let batch = trx
+                .get_range(&range_option, iteration, false)
+                .await
+                .map_err(|e| PelagoError::Internal(format!("Get range failed: {}", e)))?;
 
-        Ok(result
-            .iter()
-            .map(|kv| (kv.key().to_vec(), kv.value().to_vec()))
-            .collect())
+            out.extend(
+                batch
+                    .iter()
+                    .map(|kv| (kv.key().to_vec(), kv.value().to_vec())),
+            );
+
+            let Some(next_range) = range_option.next_range(&batch) else {
+                break;
+            };
+            range_option = next_range;
+            iteration += 1;
+        }
+
+        Ok(out)
     }
 
     /// Get underlying FDB database for advanced operations
@@ -229,9 +254,11 @@ impl PelagoTxn {
 
     /// Get a value within this transaction
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PelagoError> {
-        let result = self.trx.get(key, false).await.map_err(|e| {
-            PelagoError::Internal(format!("Get failed: {}", e))
-        })?;
+        let result = self
+            .trx
+            .get(key, false)
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Get failed: {}", e)))?;
         Ok(result.map(|v| v.to_vec()))
     }
 
@@ -266,20 +293,38 @@ impl PelagoTxn {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, PelagoError> {
-        let range_option = RangeOption {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut range_option = RangeOption {
             limit: Some(limit),
             ..RangeOption::from((begin, end))
         };
 
-        // iteration must be >= 1 (it's used for streaming pagination)
-        let result = self.trx.get_range(&range_option, 1, false).await.map_err(|e| {
-            PelagoError::Internal(format!("Get range failed: {}", e))
-        })?;
+        let mut out = Vec::with_capacity(limit);
+        let mut iteration = 1usize;
+        loop {
+            let batch = self
+                .trx
+                .get_range(&range_option, iteration, false)
+                .await
+                .map_err(|e| PelagoError::Internal(format!("Get range failed: {}", e)))?;
 
-        Ok(result
-            .iter()
-            .map(|kv| (kv.key().to_vec(), kv.value().to_vec()))
-            .collect())
+            out.extend(
+                batch
+                    .iter()
+                    .map(|kv| (kv.key().to_vec(), kv.value().to_vec())),
+            );
+
+            let Some(next_range) = range_option.next_range(&batch) else {
+                break;
+            };
+            range_option = next_range;
+            iteration += 1;
+        }
+
+        Ok(out)
     }
 
     /// Get access to underlying transaction for advanced operations

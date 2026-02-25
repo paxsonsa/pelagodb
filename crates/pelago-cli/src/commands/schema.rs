@@ -1,8 +1,8 @@
 use crate::connection::GrpcConnection;
 use crate::output::OutputFormat;
 use pelago_proto::{
-    EntitySchema, GetSchemaRequest, IndexType, ListSchemasRequest, PropertyDef, PropertyType,
-    RegisterSchemaRequest, RequestContext,
+    EntitySchema, ExtrasPolicy, GetSchemaRequest, IndexType, ListSchemasRequest, PropertyDef,
+    PropertyType, RegisterSchemaRequest, RequestContext, SchemaMeta,
 };
 
 #[derive(clap::Args)]
@@ -126,7 +126,11 @@ pub async fn run(
 
             format_schema_list(&resp.schemas, format);
         }
-        SchemaCommand::Diff { entity_type, v1, v2 } => {
+        SchemaCommand::Diff {
+            entity_type,
+            v1,
+            v2,
+        } => {
             let mut client = conn.schema_client();
             let left = client
                 .get_schema(GetSchemaRequest {
@@ -168,18 +172,12 @@ fn json_to_proto_schema(
     let mut properties = std::collections::HashMap::new();
     if let Some(props) = json.get("properties").and_then(|v| v.as_object()) {
         for (key, val) in props {
-            let type_str = val
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("string");
+            let type_str = val.get("type").and_then(|v| v.as_str()).unwrap_or("string");
             let required = val
                 .get("required")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let index_str = val
-                .get("index")
-                .and_then(|v| v.as_str())
-                .unwrap_or("none");
+            let index_str = val.get("index").and_then(|v| v.as_str()).unwrap_or("none");
 
             properties.insert(
                 key.clone(),
@@ -193,12 +191,31 @@ fn json_to_proto_schema(
         }
     }
 
+    let meta = json
+        .get("meta")
+        .and_then(|value| value.as_object())
+        .map(|obj| {
+            let allow_undeclared_edges = obj
+                .get("allow_undeclared_edges")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let extras_policy = obj
+                .get("extras_policy")
+                .and_then(|v| v.as_str())
+                .map(extras_policy_from_str)
+                .unwrap_or(ExtrasPolicy::Unspecified) as i32;
+            SchemaMeta {
+                allow_undeclared_edges,
+                extras_policy,
+            }
+        });
+
     Ok(EntitySchema {
         name: name.to_string(),
         version: 0,
         properties,
         edges: std::collections::HashMap::new(),
-        meta: None,
+        meta,
         created_at: 0,
         created_by: String::new(),
     })
@@ -222,6 +239,15 @@ fn index_type_from_str(s: &str) -> IndexType {
         "equality" | "eq" => IndexType::Equality,
         "range" => IndexType::Range,
         _ => IndexType::None,
+    }
+}
+
+fn extras_policy_from_str(s: &str) -> ExtrasPolicy {
+    match s.to_lowercase().as_str() {
+        "reject" => ExtrasPolicy::Reject,
+        "allow" => ExtrasPolicy::Allow,
+        "warn" => ExtrasPolicy::Warn,
+        _ => ExtrasPolicy::Unspecified,
     }
 }
 

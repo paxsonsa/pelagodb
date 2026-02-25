@@ -3,11 +3,7 @@ use pelago_query::pql::*;
 fn person_schema() -> SchemaInfo {
     SchemaInfo {
         entity_type: "Person".to_string(),
-        fields: vec![
-            "name".to_string(),
-            "age".to_string(),
-            "email".to_string(),
-        ],
+        fields: vec!["name".to_string(), "age".to_string(), "email".to_string()],
         edges: vec!["KNOWS".to_string(), "WORKS_AT".to_string()],
         allow_undeclared_edges: false,
     }
@@ -146,14 +142,25 @@ fn test_compile_with_limit_directive() {
     let blocks = resolve_and_compile(input);
 
     match &blocks[0] {
-        CompiledBlock::FindNodes {
-            limit, offset, ..
-        } => {
+        CompiledBlock::FindNodes { limit, offset, .. } => {
             assert_eq!(*limit, Some(10));
             assert_eq!(*offset, Some(5));
         }
         other => panic!("Expected FindNodes, got {:?}", other),
     }
+}
+
+#[test]
+fn test_compile_rejects_unsupported_block_directive() {
+    let ast = parse_pql("Person @sort(age: desc) { name }").unwrap();
+    let schemas = make_schemas();
+    let resolver = PqlResolver::new();
+    let resolved = resolver.resolve(&ast, &schemas).unwrap();
+    let compiler = PqlCompiler::new();
+    let err = compiler
+        .compile(&resolved)
+        .expect_err("unsupported @sort on find block should fail");
+    assert!(matches!(err, PqlError::CompilationError(_)));
 }
 
 // 6. @sort directive on edge traversal
@@ -211,6 +218,91 @@ fn test_compile_multi_block_dependency_order() {
         }
         other => panic!("Expected VariableRef, got {:?}", other),
     }
+}
+
+#[test]
+fn test_compile_variable_ref_directives() {
+    let input = r#"query {
+        friends as seed(func: uid(Person:abc123)) {
+            -[KNOWS]-> { name, age }
+        }
+        related(func: uid(friends)) @filter(age >= 30) @limit(first: 5, offset: 2) {
+            name
+        }
+    }"#;
+    let blocks = resolve_and_compile(input);
+
+    match &blocks[1] {
+        CompiledBlock::VariableRef {
+            variable,
+            filter,
+            fields,
+            limit,
+            offset,
+            ..
+        } => {
+            assert_eq!(variable, "friends");
+            assert_eq!(filter.as_deref(), Some("age >= 30"));
+            assert_eq!(fields, &vec!["name".to_string()]);
+            assert_eq!(*limit, Some(5));
+            assert_eq!(*offset, Some(2));
+        }
+        other => panic!("Expected VariableRef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_compile_uid_set_intersect() {
+    let input = r#"query {
+        a as aa(func: uid(Person:abc123)) {
+            -[KNOWS]-> { name }
+        }
+        b as bb(func: uid(Person:def456)) {
+            -[KNOWS]-> { name }
+        }
+        mutual(func: uid(a, b, intersect)) @filter(age >= 25) @limit(first: 3) {
+            name
+        }
+    }"#;
+    let blocks = resolve_and_compile(input);
+
+    match &blocks[2] {
+        CompiledBlock::VariableSet {
+            variables,
+            set_op,
+            filter,
+            fields,
+            limit,
+            offset,
+            ..
+        } => {
+            assert_eq!(variables, &vec!["a".to_string(), "b".to_string()]);
+            assert!(matches!(set_op, SetOp::Intersect));
+            assert_eq!(filter.as_deref(), Some("age >= 25"));
+            assert_eq!(fields, &vec!["name".to_string()]);
+            assert_eq!(*limit, Some(3));
+            assert_eq!(*offset, None);
+        }
+        other => panic!("Expected VariableSet, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_compile_rejects_unsupported_edge_directive() {
+    let input = r#"query {
+        result(func: uid(Person:abc123)) {
+            -[KNOWS]-> @groupby(name) { name }
+        }
+    }"#;
+    let ast = parse_pql(input).unwrap();
+    let schemas = make_schemas();
+    let resolver = PqlResolver::new();
+    let resolved = resolver.resolve(&ast, &schemas).unwrap();
+    let compiler = PqlCompiler::new();
+    let err = compiler
+        .compile(&resolved)
+        .expect_err("unsupported edge directive should fail");
+    assert!(matches!(err, PqlError::CompilationError(_)));
 }
 
 // 8. Explain output is human-readable
@@ -352,9 +444,7 @@ fn test_compile_type_with_limit_only() {
     let blocks = resolve_and_compile(input);
 
     match &blocks[0] {
-        CompiledBlock::FindNodes {
-            limit, offset, ..
-        } => {
+        CompiledBlock::FindNodes { limit, offset, .. } => {
             assert_eq!(*limit, Some(5));
             assert_eq!(*offset, None);
         }

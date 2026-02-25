@@ -16,8 +16,8 @@
 use pelago_core::schema::{EdgeDef, EdgeTarget, EntitySchema, IndexType, PropertyDef};
 use pelago_core::{PropertyType, Value};
 use pelago_storage::{
-    CdcConsumer, CdcOperation, ConsumerConfig, Versionstamp,
-    EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaCache, SchemaRegistry,
+    CdcConsumer, CdcOperation, ConsumerConfig, EdgeStore, IdAllocator, NodeRef, NodeStore,
+    PelagoDb, SchemaCache, SchemaRegistry, Versionstamp,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -100,10 +100,7 @@ async fn test_full_lifecycle() {
                 .required()
                 .with_index(IndexType::Unique),
         )
-        .with_property(
-            "name",
-            PropertyDef::new(PropertyType::String).required(),
-        )
+        .with_property("name", PropertyDef::new(PropertyType::String).required())
         .with_property(
             "age",
             PropertyDef::new(PropertyType::Int).with_index(IndexType::Range),
@@ -132,10 +129,7 @@ async fn test_full_lifecycle() {
 
     // Post schema
     let post_schema = EntitySchema::new("Post")
-        .with_property(
-            "title",
-            PropertyDef::new(PropertyType::String).required(),
-        )
+        .with_property("title", PropertyDef::new(PropertyType::String).required())
         .with_property("content", PropertyDef::new(PropertyType::String))
         .with_property(
             "published_at",
@@ -180,10 +174,7 @@ async fn test_full_lifecycle() {
                     "email".to_string(),
                     Value::String("alice@example.com".to_string()),
                 ),
-                (
-                    "name".to_string(),
-                    Value::String("Alice Smith".to_string()),
-                ),
+                ("name".to_string(), Value::String("Alice Smith".to_string())),
                 ("age".to_string(), Value::Int(30)),
             ]),
         )
@@ -207,10 +198,7 @@ async fn test_full_lifecycle() {
                     "email".to_string(),
                     Value::String("bob@example.com".to_string()),
                 ),
-                (
-                    "name".to_string(),
-                    Value::String("Bob Jones".to_string()),
-                ),
+                ("name".to_string(), Value::String("Bob Jones".to_string())),
                 ("age".to_string(), Value::Int(25)),
             ]),
         )
@@ -228,10 +216,7 @@ async fn test_full_lifecycle() {
                     "email".to_string(),
                     Value::String("carol@example.com".to_string()),
                 ),
-                (
-                    "name".to_string(),
-                    Value::String("Carol White".to_string()),
-                ),
+                ("name".to_string(), Value::String("Carol White".to_string())),
                 ("age".to_string(), Value::Int(35)),
                 ("active".to_string(), Value::Bool(false)),
             ]),
@@ -449,10 +434,7 @@ async fn test_full_lifecycle() {
                     "email".to_string(),
                     Value::String("alice@example.com".to_string()),
                 ), // Already exists!
-                (
-                    "name".to_string(),
-                    Value::String("Fake Alice".to_string()),
-                ),
+                ("name".to_string(), Value::String("Fake Alice".to_string())),
             ]),
         )
         .await;
@@ -538,7 +520,10 @@ async fn test_full_lifecycle() {
         .get_node(&database, &namespace, "User", &carol.id)
         .await
         .expect("Failed to check Carol");
-    println!("   Carol exists after deletion: {}\n", carol_check.is_some());
+    println!(
+        "   Carol exists after deletion: {}\n",
+        carol_check.is_some()
+    );
     assert!(carol_check.is_none());
 
     // =========================================================================
@@ -573,6 +558,7 @@ async fn test_full_lifecycle() {
                 CdcOperation::EdgeCreate { .. } => "EdgeCreate",
                 CdcOperation::EdgeDelete { .. } => "EdgeDelete",
                 CdcOperation::SchemaRegister { .. } => "SchemaRegister",
+                CdcOperation::OwnershipTransfer { .. } => "OwnershipTransfer",
             };
             *op_counts.entry(name).or_insert(0) += 1;
         }

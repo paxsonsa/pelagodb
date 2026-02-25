@@ -1,0 +1,5 @@
+{"source":"c_1","label":"placed","target":"o_1","properties":{}}
+{"source":"c_2","label":"placed","target":"o_2","properties":{}}
+{"source":"p_1","label":"included_in","target":"o_1","properties":{}}
+{"source":"p_2","label":"included_in","target":"o_1","properties":{}}
+{"source":"p_1","label":"included_in","target":"o_2","properties":{}}

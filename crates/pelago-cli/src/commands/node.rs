@@ -83,7 +83,11 @@ pub async fn run(
     };
 
     match args.command {
-        NodeCommand::Create { entity_type, props, kv } => {
+        NodeCommand::Create {
+            entity_type,
+            props,
+            kv,
+        } => {
             let properties = if let Some(ref p) = props {
                 parse_properties(p)?
             } else if !kv.is_empty() {

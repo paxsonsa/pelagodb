@@ -1,0 +1,10 @@
+/Users/apaxson/work/projects/pelagodb/.codex/worktrees/pelagodb-spec-v1/clients/rust/pelagodb-client/target/debug/deps/log-e35a9b2728f0cd14.d: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/macros.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/serde.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/__private_api.rs
+
+/Users/apaxson/work/projects/pelagodb/.codex/worktrees/pelagodb-spec-v1/clients/rust/pelagodb-client/target/debug/deps/liblog-e35a9b2728f0cd14.rlib: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/macros.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/serde.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/__private_api.rs
+
+/Users/apaxson/work/projects/pelagodb/.codex/worktrees/pelagodb-spec-v1/clients/rust/pelagodb-client/target/debug/deps/liblog-e35a9b2728f0cd14.rmeta: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/macros.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/serde.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/__private_api.rs
+
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/lib.rs:
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/macros.rs:
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/serde.rs:
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.29/src/__private_api.rs:

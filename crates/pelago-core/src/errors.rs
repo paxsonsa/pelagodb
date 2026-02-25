@@ -47,13 +47,22 @@ pub enum PelagoError {
 
     // Referential errors
     #[error("Source node not found: {entity_type}/{node_id}")]
-    SourceNotFound { entity_type: String, node_id: String },
+    SourceNotFound {
+        entity_type: String,
+        node_id: String,
+    },
 
     #[error("Target node not found: {entity_type}/{node_id}")]
-    TargetNotFound { entity_type: String, node_id: String },
+    TargetNotFound {
+        entity_type: String,
+        node_id: String,
+    },
 
     #[error("Node not found: {entity_type}/{node_id}")]
-    NodeNotFound { entity_type: String, node_id: String },
+    NodeNotFound {
+        entity_type: String,
+        node_id: String,
+    },
 
     #[error("Edge not found: {source_node} -[{label}]-> {target_node}")]
     EdgeNotFound {
@@ -84,7 +93,10 @@ pub enum PelagoError {
     },
 
     #[error("Version conflict for {entity_type}/{node_id}")]
-    VersionConflict { entity_type: String, node_id: String },
+    VersionConflict {
+        entity_type: String,
+        node_id: String,
+    },
 
     #[error("Schema version mismatch: expected {expected}, got {actual}")]
     SchemaMismatch { expected: u32, actual: u32 },
@@ -101,7 +113,10 @@ pub enum PelagoError {
 
     // Resource errors
     #[error("Traversal result limit exceeded: {current_count} >= {max_results}")]
-    TraversalLimit { max_results: u32, current_count: u32 },
+    TraversalLimit {
+        max_results: u32,
+        current_count: u32,
+    },
 
     // Watch System errors (Phase 4)
     #[error("Subscription limit reached: {current}/{limit}")]

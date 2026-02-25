@@ -36,6 +36,18 @@ pub enum CompiledBlock {
         variable: String,
         filter: Option<String>,
         fields: Vec<String>,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    },
+    /// Variable set operation (union/intersect/difference)
+    VariableSet {
+        block_name: String,
+        variables: Vec<String>,
+        set_op: SetOp,
+        filter: Option<String>,
+        fields: Vec<String>,
+        limit: Option<u32>,
+        offset: Option<u32>,
     },
 }
 
@@ -82,12 +94,17 @@ impl PqlCompiler {
         block: &QueryBlock,
         entity_type: &str,
     ) -> Result<CompiledBlock, PqlError> {
+        self.validate_block_directives(block, has_edge_traversals(&block.selections))?;
+
         match &block.root {
             RootFunction::Uid(qref) => {
                 if has_edge_traversals(&block.selections) {
-                    let steps = compile_edge_traversals(&block.selections);
+                    let steps = compile_edge_traversals(&block.selections)?;
                     let max_depth = self.extract_recurse_depth(&block.directives);
-                    let cascade = block.directives.iter().any(|d| matches!(d, Directive::Cascade));
+                    let cascade = block
+                        .directives
+                        .iter()
+                        .any(|d| matches!(d, Directive::Cascade));
                     let max_results = self.extract_limit(&block.directives).unwrap_or(1000);
                     Ok(CompiledBlock::Traverse {
                         block_name: block.name.clone(),
@@ -125,11 +142,15 @@ impl PqlCompiler {
             RootFunction::UidVar(var) => {
                 let fields = extract_fields(&block.selections);
                 let filter = self.extract_filter_cel(&block.directives);
+                let limit = self.extract_limit(&block.directives);
+                let offset = self.extract_offset(&block.directives);
                 Ok(CompiledBlock::VariableRef {
                     block_name: block.name.clone(),
                     variable: var.clone(),
                     filter,
                     fields,
+                    limit,
+                    offset,
                 })
             }
             RootFunction::Eq(_, _)
@@ -154,19 +175,60 @@ impl PqlCompiler {
                     offset,
                 })
             }
-            RootFunction::UidSet(_, _) => {
-                // Treated as a variable ref with multiple sources
+            RootFunction::UidSet(vars, set_op) => {
                 let fields = extract_fields(&block.selections);
-                Ok(CompiledBlock::FindNodes {
+                let filter = self.extract_filter_cel(&block.directives);
+                let limit = self.extract_limit(&block.directives);
+                let offset = self.extract_offset(&block.directives);
+                Ok(CompiledBlock::VariableSet {
                     block_name: block.name.clone(),
-                    entity_type: entity_type.to_string(),
-                    cel_expression: None,
+                    variables: vars.clone(),
+                    set_op: set_op.clone(),
+                    filter,
                     fields,
-                    limit: None,
-                    offset: None,
+                    limit,
+                    offset,
                 })
             }
         }
+    }
+
+    fn validate_block_directives(
+        &self,
+        block: &QueryBlock,
+        has_edges: bool,
+    ) -> Result<(), PqlError> {
+        for directive in &block.directives {
+            let supported = match &block.root {
+                RootFunction::Uid(_) if has_edges => matches!(
+                    directive,
+                    Directive::Limit { .. } | Directive::Cascade | Directive::Recurse { .. }
+                ),
+                RootFunction::Type(_)
+                | RootFunction::UidVar(_)
+                | RootFunction::UidSet(_, _)
+                | RootFunction::Eq(_, _)
+                | RootFunction::Ge(_, _)
+                | RootFunction::Le(_, _)
+                | RootFunction::Gt(_, _)
+                | RootFunction::Lt(_, _)
+                | RootFunction::Between(_, _, _)
+                | RootFunction::Has(_)
+                | RootFunction::AllOfTerms(_, _) => {
+                    matches!(directive, Directive::Filter(_) | Directive::Limit { .. })
+                }
+                RootFunction::Uid(_) => false,
+            };
+
+            if !supported {
+                return Err(PqlError::CompilationError(format!(
+                    "unsupported block directive {} on block '{}'",
+                    directive_name(directive),
+                    block.name
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Extract filter CEL expression from directives
@@ -233,7 +295,7 @@ pub fn has_edge_traversals(selections: &[Selection]) -> bool {
 }
 
 /// Compile edge traversals to steps
-pub fn compile_edge_traversals(selections: &[Selection]) -> Vec<CompiledStep> {
+pub fn compile_edge_traversals(selections: &[Selection]) -> Result<Vec<CompiledStep>, PqlError> {
     selections
         .iter()
         .filter_map(|s| {
@@ -246,7 +308,7 @@ pub fn compile_edge_traversals(selections: &[Selection]) -> Vec<CompiledStep> {
         .collect()
 }
 
-fn compile_single_edge(edge: &EdgeTraversal) -> CompiledStep {
+fn compile_single_edge(edge: &EdgeTraversal) -> Result<CompiledStep, PqlError> {
     let mut edge_filter = None;
     let mut node_filter = None;
     let mut per_node_limit = None;
@@ -258,7 +320,11 @@ fn compile_single_edge(edge: &EdgeTraversal) -> CompiledStep {
             Directive::Edge(expr) => edge_filter = Some(expr.clone()),
             Directive::Filter(expr) => node_filter = Some(expr.clone()),
             Directive::Limit { first, .. } => per_node_limit = Some(*first),
-            Directive::Sort { field, desc, on_edge } => {
+            Directive::Sort {
+                field,
+                desc,
+                on_edge,
+            } => {
                 sort = Some(CompiledSort {
                     field: field.clone(),
                     descending: *desc,
@@ -268,13 +334,19 @@ fn compile_single_edge(edge: &EdgeTraversal) -> CompiledStep {
             Directive::Facets(fields) => {
                 edge_fields.extend(fields.iter().cloned());
             }
-            _ => {}
+            other => {
+                return Err(PqlError::CompilationError(format!(
+                    "unsupported edge directive {} on edge '{}'",
+                    directive_name(other),
+                    edge.edge_type
+                )));
+            }
         }
     }
 
     let fields = extract_fields(&edge.selections);
 
-    CompiledStep {
+    Ok(CompiledStep {
         edge_type: edge.edge_type.clone(),
         direction: edge.direction,
         edge_filter,
@@ -283,6 +355,20 @@ fn compile_single_edge(edge: &EdgeTraversal) -> CompiledStep {
         edge_fields,
         per_node_limit,
         sort,
+    })
+}
+
+fn directive_name(directive: &Directive) -> &'static str {
+    match directive {
+        Directive::Filter(_) => "@filter",
+        Directive::Edge(_) => "@edge",
+        Directive::Cascade => "@cascade",
+        Directive::Limit { .. } => "@limit",
+        Directive::Sort { .. } => "@sort",
+        Directive::Facets(_) => "@facets",
+        Directive::Recurse { .. } => "@recurse",
+        Directive::GroupBy(_) => "@groupby",
+        Directive::Explain => "@explain",
     }
 }
 

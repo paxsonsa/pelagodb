@@ -1,0 +1,15 @@
+[
+  {
+    "name": "Person",
+    "properties": {
+      "name": {"type": "string", "required": true},
+      "age": {"type": "int", "index": "range"},
+      "city": {"type": "string", "index": "equality"},
+      "role": {"type": "string", "index": "equality"}
+    },
+    "edges": {
+      "follows": {"target": "Person", "direction": "outgoing"},
+      "works_with": {"target": "Person", "direction": "bidirectional"}
+    }
+  }
+]

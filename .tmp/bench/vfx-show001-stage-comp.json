@@ -1,0 +1,32 @@
+{
+  "server": "http://127.0.0.1:27615",
+  "database": "default",
+  "namespace": "vfx.show.001.full",
+  "profile": "default",
+  "runs": 200,
+  "warmup": 20,
+  "results": [
+    {
+      "name": "node_get",
+      "count": 200,
+      "mean_ms": 33.810286059999996,
+      "p50_ms": 33.546979,
+      "p95_ms": 37.33096875,
+      "p99_ms": 38.985335410000005
+    },
+    {
+      "name": "query_find",
+      "count": 200,
+      "mean_ms": 754.83106671,
+      "p50_ms": 743.4990835,
+      "p95_ms": 925.4310190499998,
+      "p99_ms": 1182.8097475
+    }
+  ],
+  "targets_ms": {
+    "node_get": 1.0,
+    "query_find": 10.0
+  },
+  "enforced": false,
+  "exit_code": 0
+}
