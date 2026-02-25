@@ -87,6 +87,23 @@ pub struct ServerConfig {
     #[arg(long, env = "PELAGO_CACHE_MAX_WRITE_BUFFERS", default_value_t = 3)]
     pub cache_max_write_buffers: i32,
 
+    /// RocksDB bloom filter bits per key for cache edge/node lookups
+    #[arg(long, env = "PELAGO_CACHE_BLOOM_BITS_PER_KEY", default_value_t = 10)]
+    pub cache_bloom_bits_per_key: i32,
+
+    /// RocksDB fixed-prefix extractor bytes (prefix bloom + prefix iteration hints)
+    #[arg(long, env = "PELAGO_CACHE_PREFIX_EXTRACTOR_BYTES", default_value_t = 8)]
+    pub cache_prefix_extractor_bytes: usize,
+
+    /// Split cache into node/edge/meta column families
+    #[arg(
+        long,
+        env = "PELAGO_CACHE_USE_COLUMN_FAMILIES",
+        default_value_t = true,
+        action = ArgAction::Set
+    )]
+    pub cache_use_column_families: bool,
+
     /// CDC projector batch size for cache projection
     #[arg(
         long,
@@ -331,6 +348,9 @@ impl Default for ServerConfig {
             cache_size_mb: 1024,
             cache_write_buffer_mb: 64,
             cache_max_write_buffers: 3,
+            cache_bloom_bits_per_key: 10,
+            cache_prefix_extractor_bytes: 8,
+            cache_use_column_families: true,
             cache_projector_batch_size: 1000,
             auth_required: false,
             api_keys: None,

@@ -6,21 +6,43 @@ use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::PelagoError;
 use std::collections::HashMap;
 
+const CF_DEFAULT: &str = "default";
+const CF_NODE: &str = "node";
+const CF_EDGE: &str = "edge";
+const CF_META: &str = "meta";
+
 pub struct RocksCacheStore {
     db: rocksdb::DB,
+    use_column_families: bool,
 }
 
 impl RocksCacheStore {
     pub fn open(config: &RocksCacheConfig) -> Result<Self, PelagoError> {
-        let mut opts = rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.set_write_buffer_size(config.write_buffer_mb * 1024 * 1024);
-        opts.set_max_write_buffer_number(config.max_write_buffers);
+        let mut db_opts = rocksdb::Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
 
-        let db = rocksdb::DB::open(&opts, &config.path)
-            .map_err(|e| PelagoError::Internal(format!("RocksDB open failed: {}", e)))?;
+        let cf_opts = Self::cf_options(config)?;
+        let db = if config.use_column_families {
+            let cf_descriptors = vec![
+                rocksdb::ColumnFamilyDescriptor::new(CF_DEFAULT, cf_opts.clone()),
+                rocksdb::ColumnFamilyDescriptor::new(CF_NODE, cf_opts.clone()),
+                rocksdb::ColumnFamilyDescriptor::new(CF_EDGE, cf_opts.clone()),
+                rocksdb::ColumnFamilyDescriptor::new(CF_META, cf_opts),
+            ];
+            rocksdb::DB::open_cf_descriptors(&db_opts, &config.path, cf_descriptors)
+                .map_err(|e| PelagoError::Internal(format!("RocksDB open failed: {}", e)))?
+        } else {
+            let mut fallback_opts = Self::cf_options(config)?;
+            fallback_opts.create_if_missing(true);
+            rocksdb::DB::open(&fallback_opts, &config.path)
+                .map_err(|e| PelagoError::Internal(format!("RocksDB open failed: {}", e)))?
+        };
 
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            use_column_families: config.use_column_families,
+        })
     }
 
     pub fn open_temp() -> Result<Self, PelagoError> {
@@ -37,6 +59,103 @@ impl RocksCacheStore {
         let mut config = RocksCacheConfig::default();
         config.path = path;
         Self::open(&config)
+    }
+
+    fn cf_options(config: &RocksCacheConfig) -> Result<rocksdb::Options, PelagoError> {
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+        opts.set_write_buffer_size(config.write_buffer_mb * 1024 * 1024);
+        opts.set_max_write_buffer_number(config.max_write_buffers);
+
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        let block_cache = rocksdb::Cache::new_lru_cache(config.cache_size_mb * 1024 * 1024);
+        block_opts.set_block_cache(&block_cache);
+        block_opts.set_bloom_filter(config.bloom_bits_per_key as f64, false);
+        opts.set_block_based_table_factory(&block_opts);
+        opts.set_optimize_filters_for_hits(true);
+        if config.prefix_extractor_bytes > 0 {
+            opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(
+                config.prefix_extractor_bytes,
+            ));
+            opts.set_memtable_prefix_bloom_ratio(0.2);
+        }
+        Ok(opts)
+    }
+
+    fn cf_handle(&self, cf_name: &'static str) -> Result<&rocksdb::ColumnFamily, PelagoError> {
+        self.db.cf_handle(cf_name).ok_or_else(|| {
+            PelagoError::Internal(format!("RocksDB column family missing: {}", cf_name))
+        })
+    }
+
+    fn get_cf(&self, cf_name: &'static str, key: &[u8]) -> Result<Option<Vec<u8>>, PelagoError> {
+        if self.use_column_families {
+            let cf = self.cf_handle(cf_name)?;
+            self.db
+                .get_cf(cf, key)
+                .map_err(|e| PelagoError::Internal(format!("RocksDB get: {}", e)))
+        } else {
+            self.db
+                .get(key)
+                .map_err(|e| PelagoError::Internal(format!("RocksDB get: {}", e)))
+        }
+    }
+
+    fn put_cf(&self, cf_name: &'static str, key: &[u8], value: &[u8]) -> Result<(), PelagoError> {
+        if self.use_column_families {
+            let cf = self.cf_handle(cf_name)?;
+            self.db
+                .put_cf(cf, key, value)
+                .map_err(|e| PelagoError::Internal(format!("RocksDB put: {}", e)))
+        } else {
+            self.db
+                .put(key, value)
+                .map_err(|e| PelagoError::Internal(format!("RocksDB put: {}", e)))
+        }
+    }
+
+    fn delete_cf(&self, cf_name: &'static str, key: &[u8]) -> Result<(), PelagoError> {
+        if self.use_column_families {
+            let cf = self.cf_handle(cf_name)?;
+            self.db
+                .delete_cf(cf, key)
+                .map_err(|e| PelagoError::Internal(format!("RocksDB delete: {}", e)))
+        } else {
+            self.db
+                .delete(key)
+                .map_err(|e| PelagoError::Internal(format!("RocksDB delete: {}", e)))
+        }
+    }
+
+    fn batch_put_cf(
+        &self,
+        batch: &mut rocksdb::WriteBatch,
+        cf_name: &'static str,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), PelagoError> {
+        if self.use_column_families {
+            let cf = self.cf_handle(cf_name)?;
+            batch.put_cf(cf, key, value);
+        } else {
+            batch.put(key, value);
+        }
+        Ok(())
+    }
+
+    fn batch_delete_cf(
+        &self,
+        batch: &mut rocksdb::WriteBatch,
+        cf_name: &'static str,
+        key: &[u8],
+    ) -> Result<(), PelagoError> {
+        if self.use_column_families {
+            let cf = self.cf_handle(cf_name)?;
+            batch.delete_cf(cf, key);
+        } else {
+            batch.delete(key);
+        }
+        Ok(())
     }
 
     // Node key: n:<db>:<ns>:<type>:<node_id>
@@ -104,11 +223,7 @@ impl RocksCacheStore {
         node_id: &str,
     ) -> Result<Option<StoredNode>, PelagoError> {
         let key = Self::node_key(db, ns, entity_type, node_id);
-        match self
-            .db
-            .get(&key)
-            .map_err(|e| PelagoError::Internal(format!("RocksDB get: {}", e)))?
-        {
+        match self.get_cf(CF_NODE, &key)? {
             Some(bytes) => Ok(Some(decode_cbor(&bytes)?)),
             None => Ok(None),
         }
@@ -117,9 +232,7 @@ impl RocksCacheStore {
     pub fn put_node(&self, db: &str, ns: &str, node: &StoredNode) -> Result<(), PelagoError> {
         let key = Self::node_key(db, ns, &node.entity_type, &node.id);
         let value = encode_cbor(node)?;
-        self.db
-            .put(&key, &value)
-            .map_err(|e| PelagoError::Internal(format!("RocksDB put: {}", e)))
+        self.put_cf(CF_NODE, &key, &value)
     }
 
     pub fn delete_node(
@@ -130,9 +243,7 @@ impl RocksCacheStore {
         node_id: &str,
     ) -> Result<(), PelagoError> {
         let key = Self::node_key(db, ns, entity_type, node_id);
-        self.db
-            .delete(&key)
-            .map_err(|e| PelagoError::Internal(format!("RocksDB delete: {}", e)))
+        self.delete_cf(CF_NODE, &key)
     }
 
     pub fn put_edge(&self, db: &str, ns: &str, edge: &StoredEdge) -> Result<(), PelagoError> {
@@ -140,8 +251,8 @@ impl RocksCacheStore {
         let incoming_key = Self::incoming_edge_key(db, ns, &edge.source, &edge.label, &edge.target);
         let value = encode_cbor(edge)?;
         let mut batch = rocksdb::WriteBatch::default();
-        batch.put(key, &value);
-        batch.put(incoming_key, &value);
+        self.batch_put_cf(&mut batch, CF_EDGE, &key, &value)?;
+        self.batch_put_cf(&mut batch, CF_EDGE, &incoming_key, &value)?;
         self.db
             .write(batch)
             .map_err(|e| PelagoError::Internal(format!("RocksDB put edge: {}", e)))
@@ -158,8 +269,8 @@ impl RocksCacheStore {
         let key = Self::edge_key(db, ns, source, label, target);
         let incoming_key = Self::incoming_edge_key(db, ns, source, label, target);
         let mut batch = rocksdb::WriteBatch::default();
-        batch.delete(key);
-        batch.delete(incoming_key);
+        self.batch_delete_cf(&mut batch, CF_EDGE, &key)?;
+        self.batch_delete_cf(&mut batch, CF_EDGE, &incoming_key)?;
         self.db
             .write(batch)
             .map_err(|e| PelagoError::Internal(format!("RocksDB delete edge: {}", e)))
@@ -175,15 +286,29 @@ impl RocksCacheStore {
     ) -> Result<Vec<StoredEdge>, PelagoError> {
         let prefix = Self::edge_prefix(db, ns, entity_type, node_id, label);
         let mut edges = Vec::new();
-        let iter = self.db.prefix_iterator(&prefix);
-        for item in iter {
-            let (key, value) =
-                item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
-            if !key.starts_with(&prefix) {
-                break;
+        if self.use_column_families {
+            let cf = self.cf_handle(CF_EDGE)?;
+            let iter = self.db.prefix_iterator_cf(cf, &prefix);
+            for item in iter {
+                let (key, value) =
+                    item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                let edge: StoredEdge = decode_cbor(&value)?;
+                edges.push(edge);
             }
-            let edge: StoredEdge = decode_cbor(&value)?;
-            edges.push(edge);
+        } else {
+            let iter = self.db.prefix_iterator(&prefix);
+            for item in iter {
+                let (key, value) =
+                    item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                let edge: StoredEdge = decode_cbor(&value)?;
+                edges.push(edge);
+            }
         }
         Ok(edges)
     }
@@ -198,25 +323,35 @@ impl RocksCacheStore {
     ) -> Result<Vec<StoredEdge>, PelagoError> {
         let prefix = Self::incoming_edge_prefix(db, ns, entity_type, node_id, label);
         let mut edges = Vec::new();
-        let iter = self.db.prefix_iterator(&prefix);
-        for item in iter {
-            let (key, value) =
-                item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
-            if !key.starts_with(&prefix) {
-                break;
+        if self.use_column_families {
+            let cf = self.cf_handle(CF_EDGE)?;
+            let iter = self.db.prefix_iterator_cf(cf, &prefix);
+            for item in iter {
+                let (key, value) =
+                    item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                let edge: StoredEdge = decode_cbor(&value)?;
+                edges.push(edge);
             }
-            let edge: StoredEdge = decode_cbor(&value)?;
-            edges.push(edge);
+        } else {
+            let iter = self.db.prefix_iterator(&prefix);
+            for item in iter {
+                let (key, value) =
+                    item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                let edge: StoredEdge = decode_cbor(&value)?;
+                edges.push(edge);
+            }
         }
         Ok(edges)
     }
 
     pub fn get_hwm(&self) -> Result<Versionstamp, PelagoError> {
-        match self
-            .db
-            .get(b"_hwm")
-            .map_err(|e| PelagoError::Internal(format!("RocksDB get hwm: {}", e)))?
-        {
+        match self.get_cf(CF_META, b"_hwm")? {
             Some(bytes) => Versionstamp::from_bytes(&bytes)
                 .ok_or_else(|| PelagoError::Internal("Invalid HWM".into())),
             None => Ok(Versionstamp::zero()),
@@ -224,9 +359,8 @@ impl RocksCacheStore {
     }
 
     pub fn set_hwm(&self, vs: &Versionstamp) -> Result<(), PelagoError> {
-        self.db
-            .put(b"_hwm", vs.to_bytes())
-            .map_err(|e| PelagoError::Internal(format!("RocksDB set hwm: {}", e)))
+        let hwm_bytes = vs.to_bytes();
+        self.put_cf(CF_META, b"_hwm", hwm_bytes)
     }
 
     /// Apply a batch of CDC operations atomically with HWM advancement.
@@ -311,8 +445,8 @@ impl RocksCacheStore {
                     let incoming_key =
                         Self::incoming_edge_key(db, ns, &edge.source, &edge.label, &edge.target);
                     let value = encode_cbor(&edge)?;
-                    batch.put(key, &value);
-                    batch.put(incoming_key, &value);
+                    self.batch_put_cf(&mut batch, CF_EDGE, &key, &value)?;
+                    self.batch_put_cf(&mut batch, CF_EDGE, &incoming_key, &value)?;
                 }
                 CdcOperation::EdgeDelete {
                     source_type,
@@ -325,8 +459,8 @@ impl RocksCacheStore {
                     let target = NodeRef::new(db, ns, target_type, target_id);
                     let key = Self::edge_key(db, ns, &source, edge_type, &target);
                     let incoming_key = Self::incoming_edge_key(db, ns, &source, edge_type, &target);
-                    batch.delete(key);
-                    batch.delete(incoming_key);
+                    self.batch_delete_cf(&mut batch, CF_EDGE, &key)?;
+                    self.batch_delete_cf(&mut batch, CF_EDGE, &incoming_key)?;
                 }
                 CdcOperation::SchemaRegister { .. } => {
                     // No cache action for schema registrations.
@@ -342,7 +476,7 @@ impl RocksCacheStore {
                         node.locality = current_site_id.parse::<u8>().unwrap_or(node.locality);
                         let key = Self::node_key(db, ns, &node.entity_type, &node.id);
                         let value = encode_cbor(&node)?;
-                        batch.put(key, value);
+                        self.batch_put_cf(&mut batch, CF_NODE, &key, &value)?;
                     }
                 }
             }
@@ -353,13 +487,14 @@ impl RocksCacheStore {
             match maybe_node {
                 Some(node) => {
                     let value = encode_cbor(&node)?;
-                    batch.put(key, value);
+                    self.batch_put_cf(&mut batch, CF_NODE, &key, &value)?;
                 }
-                None => batch.delete(key),
+                None => self.batch_delete_cf(&mut batch, CF_NODE, &key)?,
             }
         }
 
-        batch.put(b"_hwm", hwm.to_bytes());
+        let hwm_bytes = hwm.to_bytes();
+        self.batch_put_cf(&mut batch, CF_META, b"_hwm", hwm_bytes)?;
         self.db
             .write(batch)
             .map_err(|e| PelagoError::Internal(format!("RocksDB batch write: {}", e)))
@@ -367,13 +502,25 @@ impl RocksCacheStore {
 
     /// Clear all data (for testing/rebuild)
     pub fn clear(&self) -> Result<(), PelagoError> {
-        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
-        for item in iter {
-            let (key, _) =
-                item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
-            self.db
-                .delete(&*key)
-                .map_err(|e| PelagoError::Internal(format!("RocksDB delete: {}", e)))?;
+        if self.use_column_families {
+            for cf_name in [CF_NODE, CF_EDGE, CF_META] {
+                let cf = self.cf_handle(cf_name)?;
+                let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+                for item in iter {
+                    let (key, _) =
+                        item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
+                    self.delete_cf(cf_name, &key)?;
+                }
+            }
+        } else {
+            let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key, _) =
+                    item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
+                self.db
+                    .delete(&*key)
+                    .map_err(|e| PelagoError::Internal(format!("RocksDB delete: {}", e)))?;
+            }
         }
         Ok(())
     }
