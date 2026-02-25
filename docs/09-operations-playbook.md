@@ -26,7 +26,10 @@ cargo build -p pelago-cli --release
 
 ### 2) Load dataset for repeatable benchmark inputs
 ```bash
-python datasets/load_dataset.py social_graph --namespace benchmark
+python datasets/load_dataset.py vfx_pipeline_50k/show_001 \
+  --endpoint 127.0.0.1:27615 \
+  --database default \
+  --namespace benchmark.vfx
 ```
 
 ### 3) Run benchmark
@@ -34,8 +37,8 @@ python datasets/load_dataset.py social_graph --namespace benchmark
 scripts/perf-benchmark.py \
   --server http://127.0.0.1:27615 \
   --database default \
-  --namespace benchmark \
-  --entity-type Person \
+  --namespace benchmark.vfx \
+  --entity-type Task \
   --seed-node-id 1_0 \
   --runs 50 \
   --warmup 10 \
@@ -44,12 +47,12 @@ scripts/perf-benchmark.py \
 
 If your benchmark namespace does not yet include traversal-ready edge data:
 ```bash
-scripts/perf-benchmark.py --namespace benchmark --skip-traverse
+scripts/perf-benchmark.py --namespace benchmark.vfx --skip-traverse
 ```
 
 ### 4) Enforce phase targets (optional)
 ```bash
-scripts/perf-benchmark.py --namespace benchmark --enforce-targets
+scripts/perf-benchmark.py --namespace benchmark.vfx --enforce-targets
 ```
 
 Default p99 targets are aligned to phase docs:

@@ -155,5 +155,5 @@ Fixes:
 
 1. Verify FDB health.
 2. Restart server with `scripts/presentation-env.example`.
-3. Reload `social_graph` dataset.
+3. Reload `vfx_pipeline_50k/show_001` into `vfx.show.001`.
 4. Run `scripts/presentation-smoke.sh`.

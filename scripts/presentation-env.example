@@ -6,6 +6,12 @@ export PELAGO_SITE_ID=1
 export PELAGO_SITE_NAME=sf
 export PELAGO_LISTEN_ADDR=127.0.0.1:27615
 export RUST_LOG=info
+export PELAGO_DEFAULT_DATABASE=default
+export PELAGO_DEFAULT_NAMESPACE=vfx.show.001
+
+# CLI defaults for presentation commands/smoke script
+export PELAGO_DATABASE=default
+export PELAGO_NAMESPACE=vfx.show.001
 
 # Security
 export PELAGO_AUTH_REQUIRED=false
