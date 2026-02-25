@@ -1,7 +1,8 @@
 //! WatchService gRPC handler.
 
-use crate::authz::{authorize, principal_from_request};
+use crate::authz::principal_from_request;
 use crate::schema_service::core_to_proto_properties;
+use crate::service_common::{authorize_with_context, require_field};
 use pelago_proto::{
     watch_service_server::WatchService, CancelSubscriptionRequest, CancelSubscriptionResponse,
     ListSubscriptionsRequest, ListSubscriptionsResponse, SubscriptionInfo, WatchEvent,
@@ -212,9 +213,7 @@ impl WatchService for WatchServiceImpl {
     ) -> Result<Response<Self::WatchPointStream>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        let ctx = require_field(req.context, "context")?;
 
         let mut node_targets = Vec::new();
         for node in req.nodes {
@@ -266,12 +265,11 @@ impl WatchService for WatchServiceImpl {
             .first()
             .map(|t| t.entity_type.as_str())
             .unwrap_or("*");
-        authorize(
+        authorize_with_context(
             &self.db,
             principal.as_ref(),
             "watch.subscribe",
-            &ctx.database,
-            &ctx.namespace,
+            &ctx,
             acl_entity,
         )
         .await?;
@@ -336,15 +334,12 @@ impl WatchService for WatchServiceImpl {
     ) -> Result<Response<Self::WatchQueryStream>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(
             &self.db,
             principal.as_ref(),
             "watch.subscribe",
-            &ctx.database,
-            &ctx.namespace,
+            &ctx,
             if req.entity_type.is_empty() {
                 "*"
             } else {
@@ -413,18 +408,8 @@ impl WatchService for WatchServiceImpl {
     ) -> Result<Response<Self::WatchNamespaceStream>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "watch.subscribe",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "watch.subscribe", &ctx, "*").await?;
 
         let options = normalize_options(req.options.unwrap_or_default(), &self.limits);
         let after =
@@ -483,18 +468,8 @@ impl WatchService for WatchServiceImpl {
     ) -> Result<Response<ListSubscriptionsResponse>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "watch.list",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "watch.list", &ctx, "*").await?;
         Ok(Response::new(ListSubscriptionsResponse {
             subscriptions: self.registry.list().await,
         }))
@@ -506,18 +481,8 @@ impl WatchService for WatchServiceImpl {
     ) -> Result<Response<CancelSubscriptionResponse>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "watch.cancel",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "watch.cancel", &ctx, "*").await?;
         let cancelled = self.registry.cancel(&req.subscription_id).await;
         Ok(Response::new(CancelSubscriptionResponse { cancelled }))
     }

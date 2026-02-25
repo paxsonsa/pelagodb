@@ -1,6 +1,7 @@
 //! AuthService gRPC handler.
 
-use crate::authz::{authorize, principal_from_request};
+use crate::authz::principal_from_request;
+use crate::service_common::{authorize_with_context, require_field};
 use pelago_proto::{
     auth_service_server::AuthService, AuthenticateRequest, AuthenticateResponse,
     CheckPermissionRequest, CheckPermissionResponse, CreatePolicyRequest, CreatePolicyResponse,
@@ -543,18 +544,8 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<IssueServiceTokenResponse>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "auth.token.write",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "auth.token.write", &ctx, "*").await?;
 
         if req.principal_id.is_empty() {
             return Err(Status::invalid_argument("principal_id cannot be empty"));
@@ -617,18 +608,8 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<RevokeTokenResponse>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "auth.token.write",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "auth.token.write", &ctx, "*").await?;
 
         if req.access_token.is_empty() && req.refresh_token.is_empty() {
             return Err(Status::invalid_argument(
@@ -687,15 +668,12 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<IntrospectTokenResponse>, Status> {
         let requester_principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(
             &self.db,
             requester_principal.as_ref(),
             "auth.token.read",
-            &ctx.database,
-            &ctx.namespace,
+            &ctx,
             "*",
         )
         .await?;
@@ -751,21 +729,10 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<CreatePolicyResponse>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "auth.policy.write",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
-        let policy = req
-            .policy
-            .ok_or_else(|| Status::invalid_argument("missing policy"))?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "auth.policy.write", &ctx, "*")
+            .await?;
+        let policy = require_field(req.policy, "policy")?;
         let model = proto_policy_to_model(policy)?;
         upsert_policy(&self.db, &model)
             .await
@@ -798,18 +765,8 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<GetPolicyResponse>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "auth.policy.read",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "auth.policy.read", &ctx, "*").await?;
         let policy = get_policy(&self.db, &req.policy_id)
             .await
             .map_err(|e| Status::internal(format!("get_policy failed: {}", e)))?
@@ -825,18 +782,8 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<ListPoliciesResponse>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "auth.policy.read",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "auth.policy.read", &ctx, "*").await?;
         let policies = list_policies(
             &self.db,
             if req.principal_id.is_empty() {
@@ -859,18 +806,9 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<DeletePolicyResponse>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "auth.policy.write",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "auth.policy.write", &ctx, "*")
+            .await?;
         let deleted = delete_policy(&self.db, &req.policy_id)
             .await
             .map_err(|e| Status::internal(format!("delete_policy failed: {}", e)))?;
@@ -904,18 +842,9 @@ impl AuthService for AuthServiceImpl {
     ) -> Result<Response<CheckPermissionResponse>, Status> {
         let principal = principal_from_request(&request);
         let req = request.into_inner();
-        let ctx = req
-            .context
-            .ok_or_else(|| Status::invalid_argument("missing context"))?;
-        authorize(
-            &self.db,
-            principal.as_ref(),
-            "auth.policy.check",
-            &ctx.database,
-            &ctx.namespace,
-            "*",
-        )
-        .await?;
+        let ctx = require_field(req.context, "context")?;
+        authorize_with_context(&self.db, principal.as_ref(), "auth.policy.check", &ctx, "*")
+            .await?;
         let allowed = check_permission(
             &self.db,
             &req.principal_id,
