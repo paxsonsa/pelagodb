@@ -11,6 +11,7 @@ pub mod executor;
 pub mod plan;
 pub mod planner;
 pub mod pql;
+pub mod predicate;
 pub mod traversal;
 
 // Re-export main types

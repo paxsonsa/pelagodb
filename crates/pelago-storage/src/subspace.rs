@@ -75,6 +75,11 @@ impl Subspace {
         }
     }
 
+    /// Create the global system metadata subspace.
+    pub fn system() -> Self {
+        Self::root().subspace(markers::SYS)
+    }
+
     /// Get the schema subspace
     pub fn schema(&self) -> Self {
         self.subspace(markers::SCHEMA)
@@ -113,6 +118,11 @@ impl Subspace {
     /// Get the meta subspace (for checkpoints, counters, etc.)
     pub fn meta(&self) -> Self {
         self.subspace(markers::META)
+    }
+
+    /// Create a named child subspace.
+    pub fn child(&self, name: &str) -> Self {
+        self.subspace(name)
     }
 
     /// Create a child subspace

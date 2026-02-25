@@ -10,6 +10,9 @@
 //! 4. Build execution plan with residual filter
 
 use crate::plan::{ExecutionPlan, IndexPredicate, PredicateValue, QueryPlan, RangeBound};
+use crate::predicate::{
+    parse_comparison, split_boolean_expression, ComparisonOperator, PredicateLiteral,
+};
 use pelago_core::schema::{EntitySchema, IndexType};
 use pelago_core::PelagoError;
 use std::collections::HashSet;
@@ -20,30 +23,10 @@ pub struct ExtractedPredicate {
     pub property: String,
     pub operator: ComparisonOp,
     pub value: PredicateValue,
+    raw_index: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComparisonOp {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-impl ComparisonOp {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ComparisonOp::Eq => "==",
-            ComparisonOp::Ne => "!=",
-            ComparisonOp::Lt => "<",
-            ComparisonOp::Le => "<=",
-            ComparisonOp::Gt => ">",
-            ComparisonOp::Ge => ">=",
-        }
-    }
-}
+pub type ComparisonOp = ComparisonOperator;
 
 /// Query planner
 pub struct QueryPlanner;
@@ -88,85 +71,40 @@ impl QueryPlanner {
     /// Extract simple predicates from a CEL expression
     /// This is a simplified parser - full CEL support requires cel_interpreter
     fn extract_predicates(cel_expression: &str) -> Result<Vec<ExtractedPredicate>, PelagoError> {
+        let groups = match split_boolean_expression(cel_expression) {
+            Some(groups) => groups,
+            None => return Ok(Vec::new()),
+        };
+
+        // Keep planner index extraction constrained to conjunctions. OR expressions
+        // continue through the residual/full-scan path unless/until disjunctive index
+        // planning is implemented.
+        if groups.len() != 1 {
+            return Ok(Vec::new());
+        }
+
         let mut predicates = Vec::new();
-
-        // Split by && to get conjuncts
-        for part in cel_expression.split("&&") {
-            let part = part.trim();
-            if part.is_empty() {
+        for (raw_index, part) in groups[0].iter().enumerate() {
+            let Some(parsed) = parse_comparison(part) else {
                 continue;
-            }
+            };
 
-            if let Some(pred) = Self::parse_comparison(part) {
-                predicates.push(pred);
-            }
+            let value = match parsed.value {
+                PredicateLiteral::String(v) => PredicateValue::String(v),
+                PredicateLiteral::Int(v) => PredicateValue::Int(v),
+                PredicateLiteral::Float(v) => PredicateValue::Float(v),
+                PredicateLiteral::Bool(v) => PredicateValue::Bool(v),
+            };
+
+            predicates.push(ExtractedPredicate {
+                property: parsed.field,
+                operator: parsed.operator,
+                value,
+                raw_index,
+            });
         }
 
         Ok(predicates)
-    }
-
-    /// Parse a single comparison expression
-    fn parse_comparison(expr: &str) -> Option<ExtractedPredicate> {
-        // Try different operators
-        for (op_str, op) in [
-            ("==", ComparisonOp::Eq),
-            ("!=", ComparisonOp::Ne),
-            (">=", ComparisonOp::Ge),
-            ("<=", ComparisonOp::Le),
-            (">", ComparisonOp::Gt),
-            ("<", ComparisonOp::Lt),
-        ] {
-            if let Some(pos) = expr.find(op_str) {
-                let property = expr[..pos].trim().to_string();
-                let value_str = expr[pos + op_str.len()..].trim();
-
-                // Skip if property has spaces (probably a complex expression)
-                if property.contains(' ') {
-                    continue;
-                }
-
-                if let Some(value) = Self::parse_value(value_str) {
-                    return Some(ExtractedPredicate {
-                        property,
-                        operator: op,
-                        value,
-                    });
-                }
-            }
-        }
-        None
-    }
-
-    /// Parse a value literal
-    fn parse_value(s: &str) -> Option<PredicateValue> {
-        let s = s.trim();
-
-        // String literal
-        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-            return Some(PredicateValue::String(s[1..s.len() - 1].to_string()));
-        }
-
-        // Boolean
-        if s == "true" {
-            return Some(PredicateValue::Bool(true));
-        }
-        if s == "false" {
-            return Some(PredicateValue::Bool(false));
-        }
-
-        // Float (contains decimal point)
-        if s.contains('.') {
-            if let Ok(f) = s.parse::<f64>() {
-                return Some(PredicateValue::Float(f));
-            }
-        }
-
-        // Integer
-        if let Ok(i) = s.parse::<i64>() {
-            return Some(PredicateValue::Int(i));
-        }
-
-        None
     }
 
     /// Select the best index based on predicate selectivity
@@ -281,11 +219,15 @@ impl QueryPlanner {
                     .filter(|s| !s.is_empty())
                     .map(ToString::to_string)
                     .collect();
-                if conjuncts.len() == predicates.len() && idx < conjuncts.len() {
+                if idx >= predicates.len() {
+                    return Some(original_expression.to_string());
+                }
+                let raw_idx = predicates[idx].raw_index;
+                if raw_idx < conjuncts.len() {
                     let residual_parts: Vec<String> = conjuncts
                         .into_iter()
                         .enumerate()
-                        .filter_map(|(i, part)| (i != idx).then_some(part))
+                        .filter_map(|(i, part)| (i != raw_idx).then_some(part))
                         .collect();
                     if residual_parts.is_empty() {
                         None
@@ -342,27 +284,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_value_types() {
-        assert_eq!(
-            QueryPlanner::parse_value("\"hello\""),
-            Some(PredicateValue::String("hello".into()))
-        );
-        assert_eq!(
-            QueryPlanner::parse_value("'world'"),
-            Some(PredicateValue::String("world".into()))
-        );
-        assert_eq!(
-            QueryPlanner::parse_value("42"),
-            Some(PredicateValue::Int(42))
-        );
-        assert_eq!(
-            QueryPlanner::parse_value("3.14"),
-            Some(PredicateValue::Float(3.14))
-        );
-        assert_eq!(
-            QueryPlanner::parse_value("true"),
-            Some(PredicateValue::Bool(true))
-        );
+    fn test_extract_predicates_skips_non_comparison_terms() {
+        let predicates =
+            QueryPlanner::extract_predicates("age >= 30 && bio.contains('writer')").unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(predicates[0].property, "age");
+        assert_eq!(predicates[0].operator, ComparisonOp::Ge);
     }
 
     #[test]

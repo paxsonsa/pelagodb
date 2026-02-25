@@ -9,6 +9,9 @@
 
 use crate::cel::CelEnvironment;
 use crate::plan::{ExecutionPlan, IndexPredicate, PredicateValue, QueryPlan};
+use crate::predicate::{
+    parse_comparison, split_boolean_expression, ComparisonOperator, PredicateLiteral,
+};
 use pelago_core::encoding::encode_value_for_index;
 use pelago_core::{NodeId, PelagoError, Value};
 use pelago_storage::index::markers;
@@ -1060,98 +1063,30 @@ struct ParsedTermExpression {
 }
 
 fn parse_term_expression(expression: &str) -> Option<ParsedTermExpression> {
-    let expression = expression.trim();
-    if expression.is_empty() {
-        return None;
-    }
-
-    // Parenthesized expressions should go through the normal planner/executor path.
-    if expression.contains('(') || expression.contains(')') {
-        return None;
-    }
-
-    let mut groups = Vec::new();
-    for or_part in expression.split("||") {
-        let or_part = or_part.trim();
-        if or_part.is_empty() {
-            return None;
-        }
-
-        let mut group = Vec::new();
-        for and_part in or_part.split("&&") {
-            let and_part = and_part.trim();
-            if and_part.is_empty() {
+    let raw_groups = split_boolean_expression(expression)?;
+    let mut groups = Vec::with_capacity(raw_groups.len());
+    for raw_group in raw_groups {
+        let mut group = Vec::with_capacity(raw_group.len());
+        for raw_term in raw_group {
+            let parsed = parse_comparison(&raw_term)?;
+            if parsed.operator != ComparisonOperator::Eq {
                 return None;
             }
-            let predicate = parse_term_predicate(and_part)?;
-            group.push(predicate);
+            let value = match parsed.value {
+                PredicateLiteral::String(v) => Value::String(v),
+                PredicateLiteral::Int(v) => Value::Int(v),
+                PredicateLiteral::Float(v) => Value::Float(v),
+                PredicateLiteral::Bool(v) => Value::Bool(v),
+            };
+            group.push(TermPredicate {
+                field: parsed.field,
+                value,
+            });
         }
         groups.push(group);
     }
 
-    if groups.is_empty() {
-        None
-    } else {
-        Some(ParsedTermExpression { groups })
-    }
-}
-
-fn parse_term_predicate(expr: &str) -> Option<TermPredicate> {
-    if expr.contains("!=")
-        || expr.contains(">=")
-        || expr.contains("<=")
-        || expr.contains('>')
-        || expr.contains('<')
-    {
-        return None;
-    }
-
-    let pos = expr.find("==")?;
-    let field = expr[..pos].trim();
-    let value_str = expr[pos + 2..].trim();
-
-    if field.is_empty() || field.contains(' ') {
-        return None;
-    }
-
-    let value = parse_term_value(value_str)?;
-    Some(TermPredicate {
-        field: field.to_string(),
-        value,
-    })
-}
-
-fn parse_term_value(raw: &str) -> Option<Value> {
-    let raw = raw.trim();
-
-    if raw.len() < 2 {
-        if let Ok(i) = raw.parse::<i64>() {
-            return Some(Value::Int(i));
-        }
-        return None;
-    }
-
-    if (raw.starts_with('"') && raw.ends_with('"'))
-        || (raw.starts_with('\'') && raw.ends_with('\''))
-    {
-        return Some(Value::String(raw[1..raw.len() - 1].to_string()));
-    }
-    if raw == "true" {
-        return Some(Value::Bool(true));
-    }
-    if raw == "false" {
-        return Some(Value::Bool(false));
-    }
-    if raw.contains('.') {
-        if let Ok(f) = raw.parse::<f64>() {
-            return Some(Value::Float(f));
-        }
-    }
-    if let Ok(i) = raw.parse::<i64>() {
-        return Some(Value::Int(i));
-    }
-
-    None
+    Some(ParsedTermExpression { groups })
 }
 
 fn rewrite_template_term_groups(groups: Vec<Vec<TermPredicate>>) -> Vec<Vec<TermPredicate>> {

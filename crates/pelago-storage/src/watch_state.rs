@@ -2,12 +2,11 @@
 
 use crate::cdc::Versionstamp;
 use crate::db::PelagoDb;
+use crate::Subspace;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::PelagoError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-
-const QUERY_WATCH_STATE_PREFIX: &str = "_sys:watch:qstate:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryWatchState {
@@ -82,9 +81,9 @@ pub async fn cleanup_query_watch_states(
     let cutoff = now_micros().saturating_sub(retention_micros);
     let batch_limit = batch_limit.max(1);
     let page_size = batch_limit.saturating_mul(8).max(64);
-    let start = QUERY_WATCH_STATE_PREFIX.as_bytes().to_vec();
-    let mut end = start.clone();
-    end.push(0xFF);
+    let subspace = query_watch_state_root_subspace();
+    let start = subspace.prefix().to_vec();
+    let end = subspace.range_end().to_vec();
     let mut scan_start = start;
     let mut to_delete = Vec::with_capacity(batch_limit);
 
@@ -141,11 +140,21 @@ pub async fn cleanup_query_watch_states(
 }
 
 fn query_watch_state_key(database: &str, namespace: &str, state_id: &str) -> Vec<u8> {
-    format!(
-        "{}{}:{}:{}",
-        QUERY_WATCH_STATE_PREFIX, database, namespace, state_id
-    )
-    .into_bytes()
+    query_watch_state_subspace(database, namespace)
+        .pack()
+        .add_string(state_id)
+        .build()
+        .to_vec()
+}
+
+fn query_watch_state_root_subspace() -> Subspace {
+    Subspace::system().child("watch").child("qstate")
+}
+
+fn query_watch_state_subspace(database: &str, namespace: &str) -> Subspace {
+    query_watch_state_root_subspace()
+        .child(database)
+        .child(namespace)
 }
 
 fn now_micros() -> i64 {
@@ -172,9 +181,9 @@ mod tests {
 
     #[test]
     fn test_query_watch_state_key_shape() {
-        let key = String::from_utf8(query_watch_state_key("db", "ns", "state-a"))
-            .expect("key should be utf8");
-        assert_eq!(key, "_sys:watch:qstate:db:ns:state-a");
+        let key = query_watch_state_key("db", "ns", "state-a");
+        let prefix = query_watch_state_subspace("db", "ns").prefix().to_vec();
+        assert!(key.starts_with(&prefix));
     }
 
     #[test]
