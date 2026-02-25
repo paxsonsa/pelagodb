@@ -5,7 +5,7 @@
 
 use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
-use crate::schema_service::core_to_proto_properties;
+use crate::schema_service::{core_to_proto_properties, core_to_proto_schema};
 use pelago_proto::{
     replication_service_server::ReplicationService, CdcEntryProto, CdcEventResponse,
     CdcOperationProto, EdgeCreateOp, EdgeDeleteOp, NodeCreateOp, NodeDeleteOp, NodeUpdateOp,
@@ -180,9 +180,11 @@ fn cdc_op_to_proto(op: CdcOperation) -> CdcOperationProto {
         CdcOperation::SchemaRegister {
             entity_type,
             version,
+            schema,
         } => Operation::SchemaRegister(SchemaRegisterOp {
             entity_type,
             version,
+            schema: Some(core_to_proto_schema(&schema)),
         }),
         CdcOperation::OwnershipTransfer {
             entity_type,

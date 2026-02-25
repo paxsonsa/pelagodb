@@ -169,6 +169,11 @@ pub struct TraversalEngine {
 
 const NODE_FETCH_CONCURRENCY: usize = 32;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TraversalReadOptions {
+    pub read_version: Option<i64>,
+}
+
 impl TraversalEngine {
     /// Create a new traversal engine
     pub fn new(
@@ -216,6 +221,28 @@ impl TraversalEngine {
         hops: &[TraversalHop],
         continuation_token: Option<&[u8]>,
     ) -> Result<TraversalResults, PelagoError> {
+        self.traverse_with_options(
+            database,
+            namespace,
+            start_entity_type,
+            start_node_id,
+            hops,
+            continuation_token,
+            TraversalReadOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn traverse_with_options(
+        &self,
+        database: &str,
+        namespace: &str,
+        start_entity_type: &str,
+        start_node_id: &str,
+        hops: &[TraversalHop],
+        continuation_token: Option<&[u8]>,
+        read_options: TraversalReadOptions,
+    ) -> Result<TraversalResults, PelagoError> {
         let start_time = Instant::now();
 
         // Get the starting node
@@ -227,7 +254,13 @@ impl TraversalEngine {
         ));
 
         let start_node = node_store
-            .get_node(database, namespace, start_entity_type, start_node_id)
+            .get_node_at_read_version(
+                database,
+                namespace,
+                start_entity_type,
+                start_node_id,
+                read_options.read_version,
+            )
             .await?
             .ok_or_else(|| PelagoError::NodeNotFound {
                 entity_type: start_entity_type.to_string(),
@@ -246,6 +279,7 @@ impl TraversalEngine {
         let mut results = Vec::new();
         let mut visited: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<(TraversalPath, usize)> = VecDeque::new();
+        let mut scanned_edges: usize = 0;
 
         if let Some(token_bytes) = continuation_token {
             // Resume from a continuation token
@@ -266,7 +300,13 @@ impl TraversalEngine {
                     .map(|(_, id)| id.as_str())
                     .unwrap_or(start_node_id);
                 let path_start = node_store
-                    .get_node(database, namespace, first_et, first_id)
+                    .get_node_at_read_version(
+                        database,
+                        namespace,
+                        first_et,
+                        first_id,
+                        read_options.read_version,
+                    )
                     .await?
                     .ok_or_else(|| PelagoError::NodeNotFound {
                         entity_type: first_et.to_string(),
@@ -282,7 +322,13 @@ impl TraversalEngine {
                 } else {
                     // Fetch the frontier node and build a minimal path to it
                     let frontier_node = match node_store
-                        .get_node(database, namespace, &entry.entity_type, &entry.node_id)
+                        .get_node_at_read_version(
+                            database,
+                            namespace,
+                            &entry.entity_type,
+                            &entry.node_id,
+                            read_options.read_version,
+                        )
                         .await?
                     {
                         Some(n) => n,
@@ -361,8 +407,10 @@ impl TraversalEngine {
                     &current_node.entity_type,
                     &current_node.id,
                     hop,
+                    read_options.read_version,
                 )
                 .await?;
+            scanned_edges = scanned_edges.saturating_add(edges.len());
 
             // Filter edges if needed
             let filtered_edges = if let Some(ref filter) = hop.edge_filter {
@@ -421,9 +469,16 @@ impl TraversalEngine {
                     let ns = namespace.to_string();
                     let target_entity = target_entity.clone();
                     let target_id = target_id.clone();
+                    let read_version = read_options.read_version;
                     join_set.spawn(async move {
                         let fetched = node_store
-                            .get_node(&db, &ns, &target_entity, &target_id)
+                            .get_node_at_read_version(
+                                &db,
+                                &ns,
+                                &target_entity,
+                                &target_id,
+                                read_version,
+                            )
                             .await;
                         (local_idx, fetched)
                     });
@@ -506,11 +561,17 @@ impl TraversalEngine {
             (None, Vec::new())
         };
 
+        let result_bytes = estimate_traversal_result_bytes(&results);
+        let elapsed_ms = start_time.elapsed().as_millis() as u64;
+
         Ok(TraversalResults {
             paths: results,
             truncated,
             continuation_token,
             frontier,
+            scanned_keys: scanned_edges,
+            result_bytes,
+            elapsed_ms,
         })
     }
 
@@ -576,6 +637,7 @@ impl TraversalEngine {
         entity_type: &str,
         node_id: &str,
         hop: &TraversalHop,
+        read_version: Option<i64>,
     ) -> Result<Vec<StoredEdge>, PelagoError> {
         // Determine which label to filter by (if any)
         let label_filter = if hop.edge_labels.is_empty() {
@@ -587,50 +649,83 @@ impl TraversalEngine {
             None
         };
 
-        let edges = edge_store
-            .list_edges(
-                database,
-                namespace,
-                entity_type,
-                node_id,
-                label_filter,
-                1000,
-            )
-            .await?;
-
-        // Filter by direction and labels
-        let filtered: Vec<StoredEdge> = edges
-            .into_iter()
-            .filter(|edge| {
-                // Check direction
-                let direction_ok = match hop.direction {
-                    TraversalDirection::Outbound => {
-                        edge.source.entity_type == entity_type && edge.source.node_id == node_id
+        let mut edges = match hop.direction {
+            TraversalDirection::Outbound => {
+                edge_store
+                    .list_edges_at_read_version(
+                        database,
+                        namespace,
+                        entity_type,
+                        node_id,
+                        label_filter,
+                        1000,
+                        read_version,
+                    )
+                    .await?
+            }
+            TraversalDirection::Inbound => {
+                edge_store
+                    .list_incoming_edges_at_read_version(
+                        database,
+                        namespace,
+                        entity_type,
+                        node_id,
+                        label_filter,
+                        1000,
+                        read_version,
+                    )
+                    .await?
+            }
+            TraversalDirection::Both => {
+                let outgoing = edge_store
+                    .list_edges_at_read_version(
+                        database,
+                        namespace,
+                        entity_type,
+                        node_id,
+                        label_filter,
+                        1000,
+                        read_version,
+                    )
+                    .await?;
+                let incoming = edge_store
+                    .list_incoming_edges_at_read_version(
+                        database,
+                        namespace,
+                        entity_type,
+                        node_id,
+                        label_filter,
+                        1000,
+                        read_version,
+                    )
+                    .await?;
+                let mut merged = Vec::with_capacity(outgoing.len().saturating_add(incoming.len()));
+                let mut seen = HashSet::new();
+                for edge in outgoing.into_iter().chain(incoming.into_iter()) {
+                    let key = format!(
+                        "{}|{}|{}|{}|{}|{}|{}",
+                        edge.edge_id,
+                        edge.source.entity_type,
+                        edge.source.node_id,
+                        edge.label,
+                        edge.target.entity_type,
+                        edge.target.node_id,
+                        edge.created_at
+                    );
+                    if seen.insert(key) {
+                        merged.push(edge);
                     }
-                    TraversalDirection::Inbound => {
-                        edge.target.entity_type == entity_type && edge.target.node_id == node_id
-                    }
-                    TraversalDirection::Both => {
-                        (edge.source.entity_type == entity_type && edge.source.node_id == node_id)
-                            || (edge.target.entity_type == entity_type
-                                && edge.target.node_id == node_id)
-                    }
-                };
-
-                if !direction_ok {
-                    return false;
                 }
+                merged
+            }
+        };
 
-                // Check label filter if multiple labels specified
-                if hop.edge_labels.len() > 1 {
-                    return hop.edge_labels.contains(&edge.label);
-                }
+        // Check label filter if multiple labels specified
+        if hop.edge_labels.len() > 1 {
+            edges.retain(|edge| hop.edge_labels.contains(&edge.label));
+        }
 
-                true
-            })
-            .collect();
-
-        Ok(filtered)
+        Ok(edges)
     }
 
     /// Filter edges using a CEL expression
@@ -712,6 +807,24 @@ fn pelago_value_to_cel(value: &Value) -> cel_interpreter::Value {
     }
 }
 
+fn estimate_traversal_result_bytes(paths: &[TraversalPath]) -> usize {
+    paths
+        .iter()
+        .map(|path| {
+            let start_bytes = encode_cbor(&path.start).map(|b| b.len()).unwrap_or(0);
+            let hop_bytes: usize = path
+                .hops
+                .iter()
+                .map(|hop| {
+                    encode_cbor(&hop.node).map(|b| b.len()).unwrap_or(0)
+                        + encode_cbor(&hop.edge).map(|b| b.len()).unwrap_or(0)
+                })
+                .sum();
+            start_bytes.saturating_add(hop_bytes)
+        })
+        .sum()
+}
+
 /// Results from a traversal
 pub struct TraversalResults {
     /// Paths found
@@ -722,6 +835,12 @@ pub struct TraversalResults {
     pub continuation_token: Option<Vec<u8>>,
     /// Unexplored frontier nodes as (entity_type, node_id) pairs
     pub frontier: Vec<(String, String)>,
+    /// Approximate keys scanned while traversing.
+    pub scanned_keys: usize,
+    /// Approximate serialized bytes of returned result paths.
+    pub result_bytes: usize,
+    /// Wall-clock execution time.
+    pub elapsed_ms: u64,
 }
 
 /// Streaming traversal results

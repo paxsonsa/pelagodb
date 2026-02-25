@@ -660,6 +660,8 @@ async fn execute_pql_input(
                         fields: fields.clone(),
                         limit: limit.unwrap_or(100),
                         cursor: Vec::new(),
+                        snapshot_mode: pelago_proto::SnapshotMode::Strict as i32,
+                        allow_degrade_to_best_effort: false,
                     })
                     .await
                 {
@@ -729,6 +731,8 @@ async fn execute_pql_input(
                         consistency: 0,
                         cascade: *cascade,
                         cursor: Vec::new(),
+                        snapshot_mode: pelago_proto::SnapshotMode::BestEffort as i32,
+                        allow_degrade_to_best_effort: true,
                     })
                     .await
                 {

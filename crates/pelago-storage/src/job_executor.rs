@@ -14,8 +14,10 @@
 use crate::cdc::Versionstamp;
 use crate::consumer::fetch_all_checkpoints;
 use crate::db::PelagoDb;
+use crate::ids::IdAllocator;
 use crate::index;
 use crate::jobs::{JobState, JobType};
+use crate::node::NodeStore;
 use crate::schema::SchemaRegistry;
 use crate::subspace::edge_markers;
 use crate::Subspace;
@@ -48,6 +50,10 @@ pub fn executor_for_job(
         JobType::StripProperty { .. } => Ok(Box::new(StripPropertyExecutor)),
         JobType::CdcRetention { .. } => Ok(Box::new(CdcRetentionExecutor)),
         JobType::OrphanedEdgeCleanup { .. } => Ok(Box::new(OrphanedEdgeCleanupExecutor)),
+        JobType::DeleteNodeCascade { .. } => {
+            Ok(Box::new(DeleteNodeCascadeExecutor { schema_registry }))
+        }
+        JobType::DropEntityTypeCleanup { .. } => Ok(Box::new(DropEntityTypeCleanupExecutor)),
     }
 }
 
@@ -604,5 +610,273 @@ impl JobExecutor for CdcRetentionExecutor {
         }
 
         Ok(results.len() >= batch_size)
+    }
+}
+
+// ─── DeleteNodeCascade ──────────────────────────────────────────────────
+
+/// Deletes a single node and cascades incident edge cleanup.
+///
+/// This job type is used by API async fallback for oversized inline delete.
+pub struct DeleteNodeCascadeExecutor {
+    schema_registry: Arc<SchemaRegistry>,
+}
+
+#[async_trait]
+impl JobExecutor for DeleteNodeCascadeExecutor {
+    async fn execute_batch(
+        &self,
+        job: &mut JobState,
+        db: &PelagoDb,
+        _batch_size: usize,
+    ) -> Result<bool, PelagoError> {
+        let (entity_type, node_id) = match &job.job_type {
+            JobType::DeleteNodeCascade {
+                entity_type,
+                node_id,
+            } => (entity_type.clone(), node_id.clone()),
+            _ => return Err(PelagoError::Internal("Wrong executor for job type".into())),
+        };
+
+        let node_store = NodeStore::new(
+            db.clone(),
+            Arc::clone(&self.schema_registry),
+            Arc::new(IdAllocator::new(db.clone(), 0, 1000)),
+            String::new(),
+        );
+
+        let _ = node_store
+            .delete_node(&job.database, &job.namespace, &entity_type, &node_id)
+            .await?;
+        job.processed_items = job.processed_items.saturating_add(1);
+
+        // One-shot job.
+        Ok(false)
+    }
+}
+
+// ─── DropEntityTypeCleanup ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DropEntityTypeCursor {
+    phase: u8,
+    next_start: Option<Vec<u8>>,
+}
+
+const DROP_TYPE_PHASE_SCHEMA: u8 = 0;
+const DROP_TYPE_PHASE_DATA: u8 = 1;
+const DROP_TYPE_PHASE_INDEX: u8 = 2;
+const DROP_TYPE_PHASE_EDGE_FORWARD: u8 = 3;
+const DROP_TYPE_PHASE_EDGE_REVERSE_BY_SOURCE: u8 = 4;
+const DROP_TYPE_PHASE_EDGE_META: u8 = 5;
+const DROP_TYPE_PHASE_EDGE_REVERSE_TARGET: u8 = 6;
+const DROP_TYPE_PHASE_DONE: u8 = 7;
+
+/// Deletes all keys for one entity type in bounded batches.
+pub struct DropEntityTypeCleanupExecutor;
+
+#[async_trait]
+impl JobExecutor for DropEntityTypeCleanupExecutor {
+    async fn execute_batch(
+        &self,
+        job: &mut JobState,
+        db: &PelagoDb,
+        batch_size: usize,
+    ) -> Result<bool, PelagoError> {
+        let entity_type = match &job.job_type {
+            JobType::DropEntityTypeCleanup { entity_type } => entity_type.clone(),
+            _ => return Err(PelagoError::Internal("Wrong executor for job type".into())),
+        };
+
+        let mut state = match &job.progress_cursor {
+            Some(raw) => decode_cbor::<DropEntityTypeCursor>(raw).unwrap_or(DropEntityTypeCursor {
+                phase: DROP_TYPE_PHASE_SCHEMA,
+                next_start: None,
+            }),
+            None => DropEntityTypeCursor {
+                phase: DROP_TYPE_PHASE_SCHEMA,
+                next_start: None,
+            },
+        };
+
+        while state.phase < DROP_TYPE_PHASE_DONE {
+            if state.phase == DROP_TYPE_PHASE_EDGE_REVERSE_BY_SOURCE {
+                let edge_subspace = Subspace::namespace(&job.database, &job.namespace).edge();
+                let meta_prefix = edge_subspace
+                    .pack()
+                    .add_marker(edge_markers::FORWARD_META)
+                    .add_string(&entity_type)
+                    .build()
+                    .to_vec();
+                let range_start = state
+                    .next_start
+                    .clone()
+                    .unwrap_or_else(|| meta_prefix.clone());
+                let range_end = {
+                    let mut end = meta_prefix.clone();
+                    end.push(0xFF);
+                    end
+                };
+
+                let rows = db
+                    .get_range(&range_start, &range_end, batch_size.max(1))
+                    .await?;
+                if rows.is_empty() {
+                    state.phase = state.phase.saturating_add(1);
+                    state.next_start = None;
+                    continue;
+                }
+
+                let mut cleared = 0usize;
+                let trx = db.create_transaction()?;
+                for (_meta_key, meta_value) in &rows {
+                    let edge: EdgeMetaEnvelope = match decode_cbor(meta_value) {
+                        Ok(edge) => edge,
+                        Err(_) => continue,
+                    };
+                    let (source, target, label) = match (
+                        edge.source.as_ref(),
+                        edge.target.as_ref(),
+                        edge.label.as_deref(),
+                    ) {
+                        (Some(source), Some(target), Some(label)) if !label.is_empty() => {
+                            (source, target, label)
+                        }
+                        _ => continue,
+                    };
+                    let reverse_key = edge_subspace
+                        .pack()
+                        .add_marker(edge_markers::REVERSE)
+                        .add_string(&target.database)
+                        .add_string(&target.namespace)
+                        .add_string(&target.entity_type)
+                        .add_string(&target.node_id)
+                        .add_string(label)
+                        .add_string(&source.entity_type)
+                        .add_string(&source.node_id)
+                        .build();
+                    trx.clear(reverse_key.as_ref());
+                    cleared = cleared.saturating_add(1);
+                }
+
+                if cleared > 0 {
+                    trx.commit().await.map_err(|e| {
+                        PelagoError::Internal(format!(
+                            "DropEntityTypeCleanup reverse-source commit failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+
+                job.processed_items = job.processed_items.saturating_add(rows.len() as u64);
+                if rows.len() < batch_size.max(1) {
+                    state.phase = state.phase.saturating_add(1);
+                    state.next_start = None;
+                } else if let Some((last_key, _)) = rows.last() {
+                    let mut next = last_key.clone();
+                    next.push(0x00);
+                    state.next_start = Some(next);
+                }
+
+                if state.phase < DROP_TYPE_PHASE_DONE {
+                    job.progress_cursor = Some(encode_cbor(&state)?);
+                    return Ok(true);
+                }
+                break;
+            }
+
+            let Some(phase_prefix) =
+                drop_type_phase_prefix(&job.database, &job.namespace, &entity_type, state.phase)
+            else {
+                state.phase = DROP_TYPE_PHASE_DONE;
+                break;
+            };
+            let range_start = state
+                .next_start
+                .clone()
+                .unwrap_or_else(|| phase_prefix.clone());
+            let range_end = {
+                let mut end = phase_prefix.clone();
+                end.push(0xFF);
+                end
+            };
+
+            let rows = db
+                .get_range(&range_start, &range_end, batch_size.max(1))
+                .await?;
+            if rows.is_empty() {
+                state.phase = state.phase.saturating_add(1);
+                state.next_start = None;
+                continue;
+            }
+
+            let trx = db.create_transaction()?;
+            for (key, _) in &rows {
+                trx.clear(key);
+            }
+            trx.commit().await.map_err(|e| {
+                PelagoError::Internal(format!("DropEntityTypeCleanup commit failed: {}", e))
+            })?;
+
+            job.processed_items = job.processed_items.saturating_add(rows.len() as u64);
+            if rows.len() < batch_size.max(1) {
+                state.phase = state.phase.saturating_add(1);
+                state.next_start = None;
+            } else if let Some((last_key, _)) = rows.last() {
+                let mut next = last_key.clone();
+                next.push(0x00);
+                state.next_start = Some(next);
+            }
+
+            if state.phase < DROP_TYPE_PHASE_DONE {
+                job.progress_cursor = Some(encode_cbor(&state)?);
+                return Ok(true);
+            }
+            break;
+        }
+
+        job.progress_cursor = None;
+        Ok(false)
+    }
+}
+
+fn drop_type_phase_prefix(
+    database: &str,
+    namespace: &str,
+    entity_type: &str,
+    phase: u8,
+) -> Option<Vec<u8>> {
+    let ns = Subspace::namespace(database, namespace);
+    match phase {
+        DROP_TYPE_PHASE_SCHEMA => Some(ns.schema().pack().add_string(entity_type).build().to_vec()),
+        DROP_TYPE_PHASE_DATA => Some(ns.data().pack().add_string(entity_type).build().to_vec()),
+        DROP_TYPE_PHASE_INDEX => Some(ns.index().pack().add_string(entity_type).build().to_vec()),
+        DROP_TYPE_PHASE_EDGE_FORWARD => Some(
+            ns.edge()
+                .pack()
+                .add_marker(edge_markers::FORWARD)
+                .add_string(entity_type)
+                .build()
+                .to_vec(),
+        ),
+        DROP_TYPE_PHASE_EDGE_META => Some(
+            ns.edge()
+                .pack()
+                .add_marker(edge_markers::FORWARD_META)
+                .add_string(entity_type)
+                .build()
+                .to_vec(),
+        ),
+        DROP_TYPE_PHASE_EDGE_REVERSE_TARGET => Some(
+            ns.edge()
+                .pack()
+                .add_marker(edge_markers::REVERSE)
+                .add_string(database)
+                .add_string(namespace)
+                .add_string(entity_type)
+                .build()
+                .to_vec(),
+        ),
+        _ => None,
     }
 }

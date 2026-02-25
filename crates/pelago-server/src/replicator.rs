@@ -1,4 +1,5 @@
-use pelago_api::schema_service::proto_to_core_properties;
+use pelago_api::schema_service::{proto_to_core_properties, proto_to_core_schema};
+use pelago_core::PelagoError;
 use pelago_core::ServerConfig;
 use pelago_proto::cdc_operation_proto::Operation;
 use pelago_proto::replication_service_client::ReplicationServiceClient;
@@ -343,6 +344,7 @@ async fn run_peer_replicator(
                 let applied = apply_replication_op(
                     &node_store,
                     &edge_store,
+                    &schema_registry,
                     &peer.remote_site_id,
                     &config.database,
                     &config.namespace,
@@ -430,6 +432,7 @@ async fn run_peer_replicator(
 async fn apply_replication_op(
     node_store: &Arc<NodeStore>,
     edge_store: &EdgeStore,
+    schema_registry: &Arc<SchemaRegistry>,
     remote_site_id: &str,
     database: &str,
     namespace: &str,
@@ -565,9 +568,35 @@ async fn apply_replication_op(
                 Ok(None)
             }
         }
-        Operation::SchemaRegister(_op) => {
-            // Schema body is not included in CDC operations yet.
-            Ok(None)
+        Operation::SchemaRegister(op) => {
+            let proto_schema = op.schema.ok_or_else(|| PelagoError::SchemaValidation {
+                message: "replicated schema register missing schema payload".to_string(),
+            })?;
+            let schema =
+                proto_to_core_schema(&proto_schema).map_err(|e| PelagoError::SchemaValidation {
+                    message: format!("invalid replicated schema payload: {}", e.message()),
+                })?;
+            if schema.name != op.entity_type {
+                return Err(PelagoError::SchemaValidation {
+                    message: format!(
+                        "schema payload name '{}' does not match op entity_type '{}'",
+                        schema.name, op.entity_type
+                    ),
+                });
+            }
+
+            let applied = schema_registry
+                .apply_replica_schema_register(database, namespace, schema.clone(), op.version)
+                .await?;
+            if applied {
+                Ok(Some(CdcOperation::SchemaRegister {
+                    entity_type: op.entity_type,
+                    version: op.version,
+                    schema,
+                }))
+            } else {
+                Ok(None)
+            }
         }
         Operation::OwnershipTransfer(op) => {
             let applied = node_store

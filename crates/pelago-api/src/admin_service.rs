@@ -8,20 +8,28 @@
 //! - DropNamespace: Remove an entire namespace
 
 use crate::authz::{authorize, principal_from_request};
+use crate::error::ToStatus;
+use pelago_core::encoding::decode_cbor;
+use pelago_core::PelagoError;
 use pelago_proto::{
     admin_service_server::AdminService, DropEntityTypeRequest, DropEntityTypeResponse,
     DropIndexRequest, DropIndexResponse, DropNamespaceRequest, DropNamespaceResponse,
     GetJobStatusRequest, GetJobStatusResponse, GetReplicationStatusRequest,
     GetReplicationStatusResponse, Job, JobStatus, ListJobsRequest, ListJobsResponse,
-    ListSitesRequest, ListSitesResponse, QueryAuditLogRequest, QueryAuditLogResponse,
-    ReplicationPeerStatus, SiteInfo, StripPropertyRequest, StripPropertyResponse,
+    ListSitesRequest, ListSitesResponse, MutationExecutionMode, QueryAuditLogRequest,
+    QueryAuditLogResponse, ReplicationPeerStatus, SiteInfo, StripPropertyRequest,
+    StripPropertyResponse,
 };
 use pelago_storage::{
     get_replication_positions_scoped, list_sites, query_audit_records,
     JobStatus as StorageJobStatus, JobStore, JobType, PelagoDb, Subspace,
 };
+use serde::Deserialize;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+
+const C4_TX_MAX_MUTATED_KEYS: usize = 5_000;
+const C4_TX_MAX_WRITE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Admin service implementation
 pub struct AdminServiceImpl {
@@ -181,6 +189,12 @@ impl AdminService for AdminServiceImpl {
             .context
             .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
+        let mutation_mode = match MutationExecutionMode::try_from(req.mutation_mode)
+            .unwrap_or(MutationExecutionMode::Unspecified)
+        {
+            MutationExecutionMode::Unspecified => MutationExecutionMode::AsyncAllowed,
+            other => other,
+        };
         authorize(
             self.db.as_ref(),
             principal.as_ref(),
@@ -219,6 +233,80 @@ impl AdminService for AdminServiceImpl {
             .build()
             .to_vec();
 
+        let probe_limit = C4_TX_MAX_MUTATED_KEYS.saturating_add(1);
+        let schema_count = count_prefix_entries_up_to(&self.db, &schema_prefix, probe_limit)
+            .await
+            .map_err(|e| Status::internal(format!("failed to estimate schema scope: {}", e)))?;
+        let data_count = count_prefix_entries_up_to(&self.db, &data_prefix, probe_limit)
+            .await
+            .map_err(|e| Status::internal(format!("failed to estimate data scope: {}", e)))?;
+        let idx_count = count_prefix_entries_up_to(&self.db, &idx_prefix, probe_limit)
+            .await
+            .map_err(|e| Status::internal(format!("failed to estimate index scope: {}", e)))?;
+        let edge_forward_count =
+            count_prefix_entries_up_to(&self.db, &edge_forward_prefix, probe_limit)
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("failed to estimate forward edge scope: {}", e))
+                })?;
+        let edge_meta_count = count_prefix_entries_up_to(&self.db, &edge_meta_prefix, probe_limit)
+            .await
+            .map_err(|e| {
+                Status::internal(format!("failed to estimate edge metadata scope: {}", e))
+            })?;
+        let edge_reverse_count =
+            count_prefix_entries_up_to(&self.db, &edge_reverse_target_prefix, probe_limit)
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("failed to estimate reverse edge scope: {}", e))
+                })?;
+
+        let estimated_mutated_keys = schema_count
+            .saturating_add(data_count)
+            .saturating_add(idx_count)
+            .saturating_add(edge_forward_count)
+            .saturating_add(edge_meta_count)
+            .saturating_add(edge_reverse_count);
+        let estimated_write_bytes = estimated_mutated_keys.saturating_mul(256);
+        if estimated_mutated_keys > C4_TX_MAX_MUTATED_KEYS
+            || estimated_write_bytes > C4_TX_MAX_WRITE_BYTES
+        {
+            let mode_label = match mutation_mode {
+                MutationExecutionMode::InlineStrict => "INLINE_STRICT",
+                MutationExecutionMode::AsyncAllowed => "ASYNC_ALLOWED",
+                MutationExecutionMode::Unspecified => "UNSPECIFIED",
+            };
+            if mutation_mode == MutationExecutionMode::AsyncAllowed {
+                let job = JobStore::new(self.db.as_ref().clone())
+                    .create_job(
+                        &ctx.database,
+                        &ctx.namespace,
+                        JobType::DropEntityTypeCleanup {
+                            entity_type: entity_type.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "failed to create drop-entity-type cleanup job: {}",
+                            e
+                        ))
+                    })?;
+                return Ok(Response::new(DropEntityTypeResponse {
+                    cleanup_job_id: job.job_id,
+                }));
+            }
+
+            return Err(PelagoError::MutationScopeTooLarge {
+                operation: format!("drop_entity_type({mode_label})"),
+                estimated_mutated_keys,
+                estimated_write_bytes,
+                estimated_cascade_edges: edge_forward_count.saturating_add(edge_reverse_count),
+                recommended_mode: "ASYNC_ALLOWED".to_string(),
+            }
+            .into_status());
+        }
+
         clear_prefix_entries(&self.db, &schema_prefix)
             .await
             .map_err(|e| Status::internal(format!("failed to clear schema: {}", e)))?;
@@ -231,6 +319,20 @@ impl AdminService for AdminServiceImpl {
         clear_prefix_entries(&self.db, &edge_forward_prefix)
             .await
             .map_err(|e| Status::internal(format!("failed to clear forward edges: {}", e)))?;
+        clear_reverse_keys_for_source_type(
+            self.db.as_ref(),
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+            1000,
+        )
+        .await
+        .map_err(|e| {
+            Status::internal(format!(
+                "failed to clear reverse edges by dropped source type: {}",
+                e
+            ))
+        })?;
         clear_prefix_entries(&self.db, &edge_meta_prefix)
             .await
             .map_err(|e| Status::internal(format!("failed to clear edge metadata: {}", e)))?;
@@ -433,6 +535,16 @@ fn storage_status_to_proto(status: StorageJobStatus) -> i32 {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct EdgeMetaEnvelope {
+    #[serde(default)]
+    source: Option<pelago_storage::NodeRef>,
+    #[serde(default)]
+    target: Option<pelago_storage::NodeRef>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
 fn storage_job_to_proto_job(job: pelago_storage::JobState) -> Job {
     Job {
         job_id: job.job_id,
@@ -471,4 +583,107 @@ async fn clear_prefix_entries(
     }
 
     Ok(deleted)
+}
+
+async fn clear_reverse_keys_for_source_type(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    source_entity_type: &str,
+    batch_size: usize,
+) -> Result<i64, pelago_core::PelagoError> {
+    let edge_subspace = Subspace::namespace(database, namespace).edge();
+    let meta_prefix = edge_subspace
+        .pack()
+        .add_marker(pelago_storage::subspace::edge_markers::FORWARD_META)
+        .add_string(source_entity_type)
+        .build()
+        .to_vec();
+    let range_end = {
+        let mut end = meta_prefix.clone();
+        end.push(0xFF);
+        end
+    };
+    let mut range_start = meta_prefix;
+    let mut cleared = 0i64;
+
+    loop {
+        let rows = db
+            .get_range(&range_start, &range_end, batch_size.max(1))
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+
+        let trx = db.create_transaction()?;
+        let mut has_mutations = false;
+
+        for (_meta_key, meta_value) in &rows {
+            let edge: EdgeMetaEnvelope = match decode_cbor(meta_value) {
+                Ok(edge) => edge,
+                Err(_) => continue,
+            };
+            let (source, target, label) = match (
+                edge.source.as_ref(),
+                edge.target.as_ref(),
+                edge.label.as_deref(),
+            ) {
+                (Some(source), Some(target), Some(label)) if !label.is_empty() => {
+                    (source, target, label)
+                }
+                _ => continue,
+            };
+
+            let reverse_key = edge_subspace
+                .pack()
+                .add_marker(pelago_storage::subspace::edge_markers::REVERSE)
+                .add_string(&target.database)
+                .add_string(&target.namespace)
+                .add_string(&target.entity_type)
+                .add_string(&target.node_id)
+                .add_string(label)
+                .add_string(&source.entity_type)
+                .add_string(&source.node_id)
+                .build();
+            trx.clear(reverse_key.as_ref());
+            has_mutations = true;
+            cleared = cleared.saturating_add(1);
+        }
+
+        if has_mutations {
+            trx.commit().await.map_err(|e| {
+                pelago_core::PelagoError::Internal(format!(
+                    "clear reverse keys by source type commit failed: {}",
+                    e
+                ))
+            })?;
+        }
+
+        if rows.len() < batch_size.max(1) {
+            break;
+        }
+        if let Some((last_key, _)) = rows.last() {
+            let mut next = last_key.clone();
+            next.push(0x00);
+            range_start = next;
+        } else {
+            break;
+        }
+    }
+
+    Ok(cleared)
+}
+
+async fn count_prefix_entries_up_to(
+    db: &PelagoDb,
+    prefix: &[u8],
+    cap: usize,
+) -> Result<usize, pelago_core::PelagoError> {
+    if cap == 0 {
+        return Ok(0);
+    }
+    let mut range_end = prefix.to_vec();
+    range_end.push(0xFF);
+    let rows = db.get_range(prefix, &range_end, cap).await?;
+    Ok(rows.len())
 }

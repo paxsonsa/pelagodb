@@ -118,30 +118,40 @@ pub enum PelagoError {
         current_count: u32,
     },
 
-    // Watch System errors (Phase 4)
-    #[error("Subscription limit reached: {current}/{limit}")]
-    WatchSubscriptionLimit { limit: usize, current: usize },
-
-    #[error("Query watch limit reached: {current}/{limit}")]
-    WatchQueryLimit { limit: usize, current: usize },
-
-    #[error("Resume position expired (oldest available: {oldest_available})")]
-    WatchPositionExpired {
-        requested: String,
-        oldest_available: String,
+    #[error(
+        "Mutation scope too large for inline execution ({operation}): keys={estimated_mutated_keys}, bytes={estimated_write_bytes}, edges={estimated_cascade_edges}, recommended_mode={recommended_mode}"
+    )]
+    MutationScopeTooLarge {
+        operation: String,
+        estimated_mutated_keys: usize,
+        estimated_write_bytes: usize,
+        estimated_cascade_edges: usize,
+        recommended_mode: String,
     },
 
-    #[error("Invalid watch query '{expression}': {error}")]
-    WatchInvalidQuery { expression: String, error: String },
+    #[error("Transaction conflict retry budget exhausted ({operation}) after {attempts} attempts")]
+    TxConflictRetryExhausted { operation: String, attempts: u32 },
 
-    #[error("Watch query too complex: complexity {complexity} exceeds limit {limit}")]
-    WatchQueryTooComplex { complexity: u64, limit: u64 },
+    #[error("Transaction wall time budget exceeded ({operation}): {elapsed_ms}ms > {budget_ms}ms")]
+    TxWallBudgetExceeded {
+        operation: String,
+        elapsed_ms: u64,
+        budget_ms: u64,
+    },
 
-    #[error("Subscription not found: {subscription_id}")]
-    WatchSubscriptionNotFound { subscription_id: String },
+    #[error(
+        "Strict snapshot budget exceeded ({operation}): scanned_keys={scanned_keys}, result_bytes={result_bytes}, elapsed_ms={elapsed_ms}, budget_ms={budget_ms}"
+    )]
+    SnapshotBudgetExceeded {
+        operation: String,
+        scanned_keys: usize,
+        result_bytes: usize,
+        elapsed_ms: u64,
+        budget_ms: u64,
+    },
 
-    #[error("Requested TTL {requested_secs}s exceeds maximum {max_secs}s")]
-    WatchTtlExceeded { requested_secs: u32, max_secs: u32 },
+    #[error("Strict snapshot expired ({operation})")]
+    SnapshotExpired { operation: String },
 
     // Internal errors
     #[error("FDB unavailable: {0}")]
@@ -177,13 +187,15 @@ impl PelagoError {
             PelagoError::TraversalTimeout { .. } => "ERR_TIMEOUT_TRAVERSAL",
             PelagoError::TransactionTimeout => "ERR_TIMEOUT_TRANSACTION",
             PelagoError::TraversalLimit { .. } => "ERR_RESOURCE_TRAVERSAL_LIMIT",
-            PelagoError::WatchSubscriptionLimit { .. } => "ERR_WATCH_SUBSCRIPTION_LIMIT",
-            PelagoError::WatchQueryLimit { .. } => "ERR_WATCH_QUERY_LIMIT",
-            PelagoError::WatchPositionExpired { .. } => "ERR_WATCH_POSITION_EXPIRED",
-            PelagoError::WatchInvalidQuery { .. } => "ERR_WATCH_INVALID_QUERY",
-            PelagoError::WatchQueryTooComplex { .. } => "ERR_WATCH_QUERY_TOO_COMPLEX",
-            PelagoError::WatchSubscriptionNotFound { .. } => "ERR_WATCH_SUBSCRIPTION_NOT_FOUND",
-            PelagoError::WatchTtlExceeded { .. } => "ERR_WATCH_TTL_EXCEEDED",
+            PelagoError::MutationScopeTooLarge { .. } => "ERR_RESOURCE_MUTATION_SCOPE_TOO_LARGE",
+            PelagoError::TxConflictRetryExhausted { .. } => {
+                "ERR_CONSISTENCY_TX_CONFLICT_RETRY_EXHAUSTED"
+            }
+            PelagoError::TxWallBudgetExceeded { .. } => "ERR_TIMEOUT_TX_WALL_BUDGET_EXCEEDED",
+            PelagoError::SnapshotBudgetExceeded { .. } => {
+                "ERR_CONSISTENCY_SNAPSHOT_BUDGET_EXCEEDED"
+            }
+            PelagoError::SnapshotExpired { .. } => "ERR_CONSISTENCY_SNAPSHOT_EXPIRED",
             PelagoError::FdbUnavailable(_) => "ERR_INTERNAL_FDB_UNAVAILABLE",
             PelagoError::Internal(_) => "ERR_INTERNAL_UNEXPECTED",
         }
@@ -211,23 +223,19 @@ impl PelagoError {
 
             PelagoError::UniqueConstraintViolation { .. }
             | PelagoError::VersionConflict { .. }
-            | PelagoError::SchemaMismatch { .. } => "CONSISTENCY",
+            | PelagoError::SchemaMismatch { .. }
+            | PelagoError::TxConflictRetryExhausted { .. }
+            | PelagoError::SnapshotBudgetExceeded { .. }
+            | PelagoError::SnapshotExpired { .. } => "CONSISTENCY",
 
             PelagoError::QueryTimeout { .. }
             | PelagoError::TraversalTimeout { .. }
-            | PelagoError::TransactionTimeout => "TIMEOUT",
+            | PelagoError::TransactionTimeout
+            | PelagoError::TxWallBudgetExceeded { .. } => "TIMEOUT",
 
-            PelagoError::TraversalLimit { .. }
-            | PelagoError::WatchSubscriptionLimit { .. }
-            | PelagoError::WatchQueryLimit { .. } => "RESOURCE",
-
-            PelagoError::WatchPositionExpired { .. } => "WATCH",
-
-            PelagoError::WatchInvalidQuery { .. }
-            | PelagoError::WatchQueryTooComplex { .. }
-            | PelagoError::WatchTtlExceeded { .. } => "VALIDATION",
-
-            PelagoError::WatchSubscriptionNotFound { .. } => "REFERENTIAL",
+            PelagoError::TraversalLimit { .. } | PelagoError::MutationScopeTooLarge { .. } => {
+                "RESOURCE"
+            }
 
             PelagoError::FdbUnavailable(_) | PelagoError::Internal(_) => "INTERNAL",
         }
@@ -307,23 +315,59 @@ impl PelagoError {
                 m.insert("max_results".into(), max_results.to_string());
                 m.insert("current_count".into(), current_count.to_string());
             }
-            PelagoError::WatchSubscriptionLimit { limit, current } => {
-                m.insert("limit".into(), limit.to_string());
-                m.insert("current".into(), current.to_string());
-            }
-            PelagoError::WatchQueryLimit { limit, current } => {
-                m.insert("limit".into(), limit.to_string());
-                m.insert("current".into(), current.to_string());
-            }
-            PelagoError::WatchPositionExpired {
-                requested,
-                oldest_available,
+            PelagoError::MutationScopeTooLarge {
+                operation,
+                estimated_mutated_keys,
+                estimated_write_bytes,
+                estimated_cascade_edges,
+                recommended_mode,
             } => {
-                m.insert("requested".into(), requested.clone());
-                m.insert("oldest_available".into(), oldest_available.clone());
+                m.insert("operation".into(), operation.clone());
+                m.insert(
+                    "estimated_mutated_keys".into(),
+                    estimated_mutated_keys.to_string(),
+                );
+                m.insert(
+                    "estimated_write_bytes".into(),
+                    estimated_write_bytes.to_string(),
+                );
+                m.insert(
+                    "estimated_cascade_edges".into(),
+                    estimated_cascade_edges.to_string(),
+                );
+                m.insert("recommended_mode".into(), recommended_mode.clone());
             }
-            PelagoError::WatchSubscriptionNotFound { subscription_id } => {
-                m.insert("subscription_id".into(), subscription_id.clone());
+            PelagoError::TxConflictRetryExhausted {
+                operation,
+                attempts,
+            } => {
+                m.insert("operation".into(), operation.clone());
+                m.insert("attempts".into(), attempts.to_string());
+            }
+            PelagoError::TxWallBudgetExceeded {
+                operation,
+                elapsed_ms,
+                budget_ms,
+            } => {
+                m.insert("operation".into(), operation.clone());
+                m.insert("elapsed_ms".into(), elapsed_ms.to_string());
+                m.insert("budget_ms".into(), budget_ms.to_string());
+            }
+            PelagoError::SnapshotBudgetExceeded {
+                operation,
+                scanned_keys,
+                result_bytes,
+                elapsed_ms,
+                budget_ms,
+            } => {
+                m.insert("operation".into(), operation.clone());
+                m.insert("scanned_keys".into(), scanned_keys.to_string());
+                m.insert("result_bytes".into(), result_bytes.to_string());
+                m.insert("elapsed_ms".into(), elapsed_ms.to_string());
+                m.insert("budget_ms".into(), budget_ms.to_string());
+            }
+            PelagoError::SnapshotExpired { operation } => {
+                m.insert("operation".into(), operation.clone());
             }
             _ => {}
         }

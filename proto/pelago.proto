@@ -48,6 +48,24 @@ enum ReadConsistency {
   READ_CONSISTENCY_EVENTUAL = 3;  // Cache only
 }
 
+enum SnapshotMode {
+  SNAPSHOT_MODE_UNSPECIFIED = 0;
+  SNAPSHOT_MODE_STRICT = 1;
+  SNAPSHOT_MODE_BEST_EFFORT = 2;
+}
+
+enum SnapshotConsistencyApplied {
+  SNAPSHOT_CONSISTENCY_APPLIED_UNSPECIFIED = 0;
+  SNAPSHOT_CONSISTENCY_APPLIED_STRICT = 1;
+  SNAPSHOT_CONSISTENCY_APPLIED_BEST_EFFORT = 2;
+}
+
+enum MutationExecutionMode {
+  MUTATION_EXECUTION_MODE_UNSPECIFIED = 0;
+  MUTATION_EXECUTION_MODE_INLINE_STRICT = 1;
+  MUTATION_EXECUTION_MODE_ASYNC_ALLOWED = 2;
+}
+
 enum EdgeDirection {
   EDGE_DIRECTION_UNSPECIFIED = 0;
   EDGE_DIRECTION_OUTGOING = 1;
@@ -215,10 +233,12 @@ message DeleteNodeRequest {
   RequestContext context = 1;
   string entity_type = 2;
   string node_id = 3;
+  MutationExecutionMode mutation_mode = 4;
 }
 
 message DeleteNodeResponse {
   bool deleted = 1;
+  string cleanup_job_id = 2;
 }
 
 message TransferOwnershipRequest {
@@ -320,11 +340,17 @@ message FindNodesRequest {
   repeated string fields = 5;
   uint32 limit = 6;
   bytes cursor = 7;
+  SnapshotMode snapshot_mode = 8;
+  bool allow_degrade_to_best_effort = 9;
 }
 
 message NodeResult {
   Node node = 1;
   bytes next_cursor = 2;
+  SnapshotConsistencyApplied consistency_applied = 3;
+  int64 snapshot_read_version = 4;
+  bool degraded = 5;
+  string degraded_reason = 6;
 }
 
 message TraverseRequest {
@@ -337,6 +363,8 @@ message TraverseRequest {
   ReadConsistency consistency = 7;
   bool cascade = 8;           // Require all nested paths exist
   bytes cursor = 9;           // Continuation token from previous TraverseResult.next_cursor
+  SnapshotMode snapshot_mode = 10;
+  bool allow_degrade_to_best_effort = 11;
 }
 
 message TraversalStep {
@@ -362,6 +390,10 @@ message TraverseResult {
   Node node = 3;
   Edge edge = 4;
   bytes next_cursor = 5;
+  SnapshotConsistencyApplied consistency_applied = 6;
+  int64 snapshot_read_version = 7;
+  bool degraded = 8;
+  string degraded_reason = 9;
 }
 
 message ExplainRequest {
@@ -479,6 +511,7 @@ enum JobStatus {
 message DropEntityTypeRequest {
   RequestContext context = 1;
   string entity_type = 2;
+  MutationExecutionMode mutation_mode = 3;
 }
 
 message DropEntityTypeResponse {
@@ -626,6 +659,7 @@ message EdgeDeleteOp {
 message SchemaRegisterOp {
   string entity_type = 1;
   uint32 version = 2;
+  EntitySchema schema = 3;
 }
 
 message OwnershipTransferOp {

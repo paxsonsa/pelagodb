@@ -175,6 +175,7 @@ impl SchemaRegistry {
         cdc.push(CdcOperation::SchemaRegister {
             entity_type: schema.name.clone(),
             version: new_version,
+            schema: schema.clone(),
         });
 
         // Flush CDC into same transaction
@@ -222,6 +223,85 @@ impl SchemaRegistry {
         }
 
         Ok(new_version)
+    }
+
+    /// Apply a replicated schema registration without emitting CDC.
+    ///
+    /// Returns `true` when the local schema state changed.
+    pub async fn apply_replica_schema_register(
+        &self,
+        database: &str,
+        namespace: &str,
+        mut schema: EntitySchema,
+        expected_version: u32,
+    ) -> Result<bool, PelagoError> {
+        Self::validate_schema(&schema)?;
+
+        let subspace = Subspace::namespace(database, namespace).schema();
+        let latest_key = Self::latest_version_key(&subspace, &schema.name);
+        let current_version = match self.db.get(latest_key.as_ref()).await? {
+            Some(bytes) => Self::decode_version(&bytes)?,
+            None => 0,
+        };
+
+        if current_version >= expected_version {
+            // Idempotent replay or stale event.
+            return Ok(false);
+        }
+
+        if current_version + 1 != expected_version {
+            return Err(PelagoError::SchemaMismatch {
+                expected: current_version + 1,
+                actual: expected_version,
+            });
+        }
+
+        schema.version = expected_version;
+        let schema_bytes = encode_cbor(&schema)?;
+
+        let trx = self.db.create_transaction()?;
+        trx.set(latest_key.as_ref(), &Self::encode_version(expected_version));
+        let version_key = Self::version_key(&subspace, &schema.name, expected_version);
+        trx.set(version_key.as_ref(), &schema_bytes);
+        trx.commit().await.map_err(|e| {
+            PelagoError::Internal(format!("Replicated schema register failed: {}", e))
+        })?;
+
+        self.cache.insert(database, namespace, schema.clone()).await;
+
+        // Mirror local register behavior: create backfill jobs for newly-indexed fields.
+        if current_version > 0 {
+            if let Ok(Some(old_schema)) = self
+                .get_schema_version(database, namespace, &schema.name, current_version)
+                .await
+            {
+                let job_store = JobStore::new(self.db.clone());
+                for (prop_name, new_def) in &schema.properties {
+                    if new_def.index != IndexType::None {
+                        let old_index = old_schema
+                            .properties
+                            .get(prop_name)
+                            .map(|d| d.index)
+                            .unwrap_or(IndexType::None);
+                        if old_index == IndexType::None {
+                            let _ = job_store
+                                .create_job(
+                                    database,
+                                    namespace,
+                                    JobType::IndexBackfill {
+                                        entity_type: schema.name.clone(),
+                                        property_name: prop_name.clone(),
+                                        index_type: new_def.index,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(true)
     }
 
     /// Get the current version of a schema

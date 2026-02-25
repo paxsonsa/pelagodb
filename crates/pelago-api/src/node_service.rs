@@ -9,17 +9,23 @@
 use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
+use pelago_core::PelagoError;
 use pelago_proto::{
     node_service_server::NodeService, CreateNodeRequest, CreateNodeResponse, DeleteNodeRequest,
-    DeleteNodeResponse, GetNodeRequest, GetNodeResponse, Node, ReadConsistency,
-    TransferOwnershipRequest, TransferOwnershipResponse, UpdateNodeRequest, UpdateNodeResponse,
+    DeleteNodeResponse, GetNodeRequest, GetNodeResponse, MutationExecutionMode, Node,
+    ReadConsistency, TransferOwnershipRequest, TransferOwnershipResponse, UpdateNodeRequest,
+    UpdateNodeResponse,
 };
 use pelago_storage::{
-    CachedReadPath, IdAllocator, NodeStore, PelagoDb, ReadConsistency as CacheReadConsistency,
-    SchemaRegistry,
+    CachedReadPath, IdAllocator, JobStore, JobType, NodeStore, PelagoDb,
+    ReadConsistency as CacheReadConsistency, SchemaRegistry,
 };
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+
+const C4_TX_MAX_MUTATED_KEYS: usize = 5_000;
+const C4_TX_MAX_WRITE_BYTES: usize = 2 * 1024 * 1024;
+const C4_INLINE_CASCADE_MAX_EDGES: usize = 1_000;
 
 /// Node service implementation
 pub struct NodeServiceImpl {
@@ -228,6 +234,12 @@ impl NodeService for NodeServiceImpl {
             .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
         let node_id = req.node_id;
+        let mutation_mode = match MutationExecutionMode::try_from(req.mutation_mode)
+            .unwrap_or(MutationExecutionMode::Unspecified)
+        {
+            MutationExecutionMode::Unspecified => MutationExecutionMode::AsyncAllowed,
+            other => other,
+        };
         authorize(
             &self.db,
             principal.as_ref(),
@@ -238,6 +250,57 @@ impl NodeService for NodeServiceImpl {
         )
         .await?;
 
+        let estimate = self
+            .node_store
+            .estimate_delete_scope(
+                &ctx.database,
+                &ctx.namespace,
+                &entity_type,
+                &node_id,
+                C4_INLINE_CASCADE_MAX_EDGES,
+            )
+            .await
+            .map_err(|e| e.into_status())?;
+        let exceeds_inline_budget = estimate.exceeded_cascade_probe_limit
+            || estimate.estimated_cascade_edges > C4_INLINE_CASCADE_MAX_EDGES
+            || estimate.estimated_mutated_keys > C4_TX_MAX_MUTATED_KEYS
+            || estimate.estimated_write_bytes > C4_TX_MAX_WRITE_BYTES;
+        if exceeds_inline_budget {
+            let mode_label = match mutation_mode {
+                MutationExecutionMode::InlineStrict => "INLINE_STRICT",
+                MutationExecutionMode::AsyncAllowed => "ASYNC_ALLOWED",
+                MutationExecutionMode::Unspecified => "UNSPECIFIED",
+            };
+            if mutation_mode == MutationExecutionMode::AsyncAllowed {
+                let job = JobStore::new(self.db.clone())
+                    .create_job(
+                        &ctx.database,
+                        &ctx.namespace,
+                        JobType::DeleteNodeCascade {
+                            entity_type: entity_type.clone(),
+                            node_id: node_id.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!("failed to create delete-node cleanup job: {}", e))
+                    })?;
+                return Ok(Response::new(DeleteNodeResponse {
+                    deleted: false,
+                    cleanup_job_id: job.job_id,
+                }));
+            }
+
+            return Err(PelagoError::MutationScopeTooLarge {
+                operation: format!("delete_node({mode_label})"),
+                estimated_mutated_keys: estimate.estimated_mutated_keys,
+                estimated_write_bytes: estimate.estimated_write_bytes,
+                estimated_cascade_edges: estimate.estimated_cascade_edges,
+                recommended_mode: "ASYNC_ALLOWED".to_string(),
+            }
+            .into_status());
+        }
+
         // Delete node from FDB
         let deleted = self
             .node_store
@@ -245,7 +308,10 @@ impl NodeService for NodeServiceImpl {
             .await
             .map_err(|e| e.into_status())?;
 
-        Ok(Response::new(DeleteNodeResponse { deleted }))
+        Ok(Response::new(DeleteNodeResponse {
+            deleted,
+            cleanup_job_id: String::new(),
+        }))
     }
 
     async fn transfer_ownership(

@@ -179,7 +179,7 @@ pub async fn list_posting_node_ids(
     value: &Value,
     limit: usize,
 ) -> Result<Vec<Vec<u8>>, PelagoError> {
-    list_posting_node_ids_after(
+    list_posting_node_ids_after_at_read_version(
         db,
         database,
         namespace,
@@ -188,6 +188,7 @@ pub async fn list_posting_node_ids(
         value,
         None,
         limit,
+        None,
     )
     .await
 }
@@ -202,6 +203,31 @@ pub async fn list_posting_node_ids_after(
     after_node_id: Option<&[u8]>,
     limit: usize,
 ) -> Result<Vec<Vec<u8>>, PelagoError> {
+    list_posting_node_ids_after_at_read_version(
+        db,
+        database,
+        namespace,
+        entity_type,
+        field,
+        value,
+        after_node_id,
+        limit,
+        None,
+    )
+    .await
+}
+
+pub async fn list_posting_node_ids_after_at_read_version(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    entity_type: &str,
+    field: &str,
+    value: &Value,
+    after_node_id: Option<&[u8]>,
+    limit: usize,
+    read_version: Option<i64>,
+) -> Result<Vec<Vec<u8>>, PelagoError> {
     let Some(encoded) = encode_term_value(value)? else {
         return Ok(Vec::new());
     };
@@ -215,7 +241,9 @@ pub async fn list_posting_node_ids_after(
     let mut end = prefix.to_vec();
     end.push(0xFF);
 
-    let rows = db.get_range(&range_start, &end, limit.max(1)).await?;
+    let rows = db
+        .get_range_at_read_version(&range_start, &end, limit.max(1), read_version)
+        .await?;
     let mut out = Vec::with_capacity(rows.len());
     for (key, _) in rows {
         out.push(extract_node_id_from_posting_key(&key)?);
@@ -231,12 +259,25 @@ pub async fn get_document_frequency(
     field: &str,
     value: &Value,
 ) -> Result<Option<u64>, PelagoError> {
+    get_document_frequency_at_read_version(db, database, namespace, entity_type, field, value, None)
+        .await
+}
+
+pub async fn get_document_frequency_at_read_version(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    entity_type: &str,
+    field: &str,
+    value: &Value,
+    read_version: Option<i64>,
+) -> Result<Option<u64>, PelagoError> {
     let Some(encoded) = encode_term_value(value)? else {
         return Ok(Some(0));
     };
     let idx_subspace = Subspace::namespace(database, namespace).index();
     let key = df_key(&idx_subspace, entity_type, field, &encoded);
-    match db.get(key.as_ref()).await? {
+    match db.get_at_read_version(key.as_ref(), read_version).await? {
         Some(bytes) => {
             if bytes.len() != 8 {
                 return Err(PelagoError::Internal(format!(
@@ -258,9 +299,19 @@ pub async fn get_document_count(
     namespace: &str,
     entity_type: &str,
 ) -> Result<Option<u64>, PelagoError> {
+    get_document_count_at_read_version(db, database, namespace, entity_type, None).await
+}
+
+pub async fn get_document_count_at_read_version(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    entity_type: &str,
+    read_version: Option<i64>,
+) -> Result<Option<u64>, PelagoError> {
     let idx_subspace = Subspace::namespace(database, namespace).index();
     let key = n_docs_key(&idx_subspace, entity_type);
-    match db.get(key.as_ref()).await? {
+    match db.get_at_read_version(key.as_ref(), read_version).await? {
         Some(bytes) => {
             if bytes.len() != 8 {
                 return Err(PelagoError::Internal(format!(

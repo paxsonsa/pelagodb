@@ -10,10 +10,11 @@
 //! - create_node: Validate, allocate ID, write data + indexes + CDC
 //! - get_node: Point lookup by ID
 //! - update_node: Read-modify-write with index diff
-//! - delete_node: Remove data, indexes, cascade edges, emit CDC
+//! - delete_node: Remove data, indexes, cascade incident edges, emit CDC
 
 use crate::cdc::{CdcAccumulator, CdcOperation};
 use crate::db::PelagoDb;
+use crate::edge::EdgeStore;
 use crate::ids::IdAllocator;
 use crate::index::{compute_index_entries, compute_index_removals, IndexEntry, IndexEntryType};
 use crate::schema::SchemaRegistry;
@@ -27,15 +28,24 @@ use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::schema::{EntitySchema, ExtrasPolicy, IndexType};
 use pelago_core::{NodeId, PelagoError, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Node storage operations
+#[derive(Clone)]
 pub struct NodeStore {
     db: PelagoDb,
     schema_registry: Arc<SchemaRegistry>,
     id_allocator: Arc<IdAllocator>,
     site_id: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MutationScopeEstimate {
+    pub estimated_mutated_keys: usize,
+    pub estimated_write_bytes: usize,
+    pub estimated_cascade_edges: usize,
+    pub exceeded_cascade_probe_limit: bool,
 }
 
 impl NodeStore {
@@ -336,6 +346,18 @@ impl NodeStore {
         trx.commit().await.map_err(|e| {
             PelagoError::Internal(format!("Failed to apply replicated node delete: {}", e))
         })?;
+
+        let edge_store = EdgeStore::new(
+            self.db.clone(),
+            Arc::clone(&self.schema_registry),
+            Arc::clone(&self.id_allocator),
+            Arc::new(self.clone()),
+            self.site_id.clone(),
+        );
+        let _ = edge_store
+            .delete_edges_for_node_replica(database, namespace, entity_type, node_id)
+            .await?;
+
         Ok(true)
     }
 
@@ -515,6 +537,19 @@ impl NodeStore {
         entity_type: &str,
         node_id: &str,
     ) -> Result<Option<StoredNode>, PelagoError> {
+        self.get_node_at_read_version(database, namespace, entity_type, node_id, None)
+            .await
+    }
+
+    /// Get a node by ID at an optional pinned read version.
+    pub async fn get_node_at_read_version(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        read_version: Option<i64>,
+    ) -> Result<Option<StoredNode>, PelagoError> {
         let parsed_id: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
             value: node_id.to_string(),
         })?;
@@ -523,7 +558,11 @@ impl NodeStore {
         let subspace = Subspace::namespace(database, namespace).data();
         let data_key = Self::data_key(&subspace, entity_type, &node_id_bytes);
 
-        match self.db.get(data_key.as_ref()).await? {
+        match self
+            .db
+            .get_at_read_version(data_key.as_ref(), read_version)
+            .await?
+        {
             Some(bytes) => {
                 let data: NodeData = decode_cbor(&bytes)?;
                 Ok(Some(StoredNode {
@@ -549,12 +588,28 @@ impl NodeStore {
         entity_type: &str,
         node_ids: &[String],
     ) -> Result<Vec<Option<StoredNode>>, PelagoError> {
+        self.get_nodes_batch_at_read_version(database, namespace, entity_type, node_ids, None)
+            .await
+    }
+
+    /// Get multiple nodes by ID using one transaction at an optional read version.
+    pub async fn get_nodes_batch_at_read_version(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_ids: &[String],
+        read_version: Option<i64>,
+    ) -> Result<Vec<Option<StoredNode>>, PelagoError> {
         if node_ids.is_empty() {
             return Ok(Vec::new());
         }
 
         let data_subspace = Subspace::namespace(database, namespace).data();
         let trx = self.db.create_transaction()?;
+        if let Some(version) = read_version {
+            trx.set_read_version(version);
+        }
         let mut out = Vec::with_capacity(node_ids.len());
 
         for node_id in node_ids {
@@ -805,7 +860,90 @@ impl NodeStore {
             .await
             .map_err(|e| PelagoError::Internal(format!("Failed to delete node: {}", e)))?;
 
+        let edge_store = EdgeStore::new(
+            self.db.clone(),
+            Arc::clone(&self.schema_registry),
+            Arc::clone(&self.id_allocator),
+            Arc::new(self.clone()),
+            self.site_id.clone(),
+        );
+        let _ = edge_store
+            .delete_edges_for_node(database, namespace, entity_type, node_id)
+            .await?;
+
         Ok(true)
+    }
+
+    /// Estimate node-delete scope before execution.
+    pub async fn estimate_delete_scope(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        cascade_probe_limit: usize,
+    ) -> Result<MutationScopeEstimate, PelagoError> {
+        let edge_store = EdgeStore::new(
+            self.db.clone(),
+            Arc::clone(&self.schema_registry),
+            Arc::clone(&self.id_allocator),
+            Arc::new(self.clone()),
+            self.site_id.clone(),
+        );
+
+        let mut candidates = edge_store
+            .list_edges(
+                database,
+                namespace,
+                entity_type,
+                node_id,
+                None,
+                cascade_probe_limit.saturating_add(1),
+            )
+            .await?;
+        candidates.extend(
+            edge_store
+                .list_incoming_edges(
+                    database,
+                    namespace,
+                    entity_type,
+                    node_id,
+                    None,
+                    cascade_probe_limit.saturating_add(1),
+                )
+                .await?,
+        );
+
+        let mut seen = HashSet::new();
+        let mut edge_count = 0usize;
+        for edge in candidates {
+            let key = format!(
+                "{}|{}|{}|{}|{}|{}|{}",
+                edge.edge_id,
+                edge.source.entity_type,
+                edge.source.node_id,
+                edge.label,
+                edge.target.entity_type,
+                edge.target.node_id,
+                edge.created_at
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            edge_count = edge_count.saturating_add(1);
+            if edge_count > cascade_probe_limit {
+                break;
+            }
+        }
+
+        let estimated_mutated_keys = 2usize.saturating_add(edge_count.saturating_mul(3));
+        let estimated_write_bytes = estimated_mutated_keys.saturating_mul(256);
+        Ok(MutationScopeEstimate {
+            estimated_mutated_keys,
+            estimated_write_bytes,
+            estimated_cascade_edges: edge_count,
+            exceeded_cascade_probe_limit: edge_count > cascade_probe_limit,
+        })
     }
 
     /// Transfer node ownership (locality) to another site.

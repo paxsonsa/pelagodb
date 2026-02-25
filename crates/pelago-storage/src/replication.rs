@@ -2,14 +2,10 @@
 
 use crate::cdc::Versionstamp;
 use crate::db::PelagoDb;
+use crate::Subspace;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::PelagoError;
 use serde::{Deserialize, Serialize};
-
-const SITE_CLAIM_PREFIX: &str = "_sys:site_claim:";
-const REPL_POS_PREFIX: &str = "_sys:repl_position:";
-const REPL_POS_SCOPED_PREFIX: &str = "_sys:repl_position_scoped:";
-const REPL_LEASE_PREFIX: &str = "_sys:repl_lease:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteClaim {
@@ -64,10 +60,10 @@ pub async fn claim_site(
 }
 
 pub async fn list_sites(db: &PelagoDb) -> Result<Vec<SiteClaim>, PelagoError> {
-    let start = SITE_CLAIM_PREFIX.as_bytes().to_vec();
-    let mut end = start.clone();
-    end.push(0xFF);
-    let rows = db.get_range(&start, &end, 10_000).await?;
+    let subspace = site_claim_subspace();
+    let rows = db
+        .get_range(subspace.prefix(), &subspace.range_end(), 10_000)
+        .await?;
     let mut out = Vec::with_capacity(rows.len());
     for (_, value) in rows {
         out.push(decode_cbor::<SiteClaim>(&value)?);
@@ -99,10 +95,10 @@ pub async fn update_replication_position(
 pub async fn get_replication_positions(
     db: &PelagoDb,
 ) -> Result<Vec<ReplicationPosition>, PelagoError> {
-    let start = REPL_POS_PREFIX.as_bytes().to_vec();
-    let mut end = start.clone();
-    end.push(0xFF);
-    let rows = db.get_range(&start, &end, 10_000).await?;
+    let subspace = replication_position_subspace();
+    let rows = db
+        .get_range(subspace.prefix(), &subspace.range_end(), 10_000)
+        .await?;
     let mut out = Vec::with_capacity(rows.len());
     for (_, value) in rows {
         out.push(decode_cbor::<ReplicationPosition>(&value)?);
@@ -138,10 +134,10 @@ pub async fn get_replication_positions_scoped(
     database: &str,
     namespace: &str,
 ) -> Result<Vec<ReplicationPosition>, PelagoError> {
-    let start = scoped_replication_position_prefix(database, namespace);
-    let mut end = start.clone();
-    end.push(0xFF);
-    let rows = db.get_range(&start, &end, 10_000).await?;
+    let subspace = scoped_replication_position_subspace(database, namespace);
+    let rows = db
+        .get_range(subspace.prefix(), &subspace.range_end(), 10_000)
+        .await?;
     let mut out = Vec::with_capacity(rows.len());
     for (_, value) in rows {
         out.push(decode_cbor::<ReplicationPosition>(&value)?);
@@ -219,15 +215,19 @@ pub async fn try_acquire_replicator_lease(
 }
 
 fn site_claim_key(site_id: &str) -> Vec<u8> {
-    format!("{}{}", SITE_CLAIM_PREFIX, site_id).into_bytes()
+    site_claim_subspace()
+        .pack()
+        .add_string(site_id)
+        .build()
+        .to_vec()
 }
 
 fn replication_position_key(remote_site_id: &str) -> Vec<u8> {
-    format!("{}{}", REPL_POS_PREFIX, remote_site_id).into_bytes()
-}
-
-fn scoped_replication_position_prefix(database: &str, namespace: &str) -> Vec<u8> {
-    format!("{}{}:{}:", REPL_POS_SCOPED_PREFIX, database, namespace).into_bytes()
+    replication_position_subspace()
+        .pack()
+        .add_string(remote_site_id)
+        .build()
+        .to_vec()
 }
 
 fn scoped_replication_position_key(
@@ -235,17 +235,40 @@ fn scoped_replication_position_key(
     namespace: &str,
     remote_site_id: &str,
 ) -> Vec<u8> {
-    let mut key = scoped_replication_position_prefix(database, namespace);
-    key.extend_from_slice(remote_site_id.as_bytes());
-    key
+    scoped_replication_position_subspace(database, namespace)
+        .pack()
+        .add_string(remote_site_id)
+        .build()
+        .to_vec()
 }
 
 fn replicator_lease_key(site_id: &str, database: &str, namespace: &str) -> Vec<u8> {
-    format!(
-        "{}{}:{}:{}",
-        REPL_LEASE_PREFIX, site_id, database, namespace
-    )
-    .into_bytes()
+    replicator_lease_subspace(site_id, database, namespace)
+        .prefix()
+        .to_vec()
+}
+
+fn site_claim_subspace() -> Subspace {
+    Subspace::system().child("site_claim")
+}
+
+fn replication_position_subspace() -> Subspace {
+    Subspace::system().child("repl_position")
+}
+
+fn scoped_replication_position_subspace(database: &str, namespace: &str) -> Subspace {
+    Subspace::system()
+        .child("repl_position_scoped")
+        .child(database)
+        .child(namespace)
+}
+
+fn replicator_lease_subspace(site_id: &str, database: &str, namespace: &str) -> Subspace {
+    Subspace::system()
+        .child("repl_lease")
+        .child(site_id)
+        .child(database)
+        .child(namespace)
 }
 
 fn now_micros() -> i64 {

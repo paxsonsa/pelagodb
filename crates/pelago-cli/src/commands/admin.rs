@@ -261,6 +261,7 @@ pub async fn run(
                 .drop_entity_type(DropEntityTypeRequest {
                     context: Some(context),
                     entity_type: entity_type.clone(),
+                    mutation_mode: pelago_proto::MutationExecutionMode::AsyncAllowed as i32,
                 })
                 .await?
                 .into_inner();

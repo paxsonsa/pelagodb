@@ -1,15 +1,11 @@
 //! Security metadata: policies and audit events.
 
 use crate::db::PelagoDb;
+use crate::Subspace;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::PelagoError;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-const POLICY_PREFIX: &str = "_sys:policies:";
-const AUDIT_PREFIX: &str = "_sys:audit:";
-const AUTH_ACCESS_PREFIX: &str = "_sys:auth:access:";
-const AUTH_REFRESH_PREFIX: &str = "_sys:auth:refresh:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyPermission {
@@ -84,10 +80,10 @@ pub async fn list_policies(
     db: &PelagoDb,
     principal_filter: Option<&str>,
 ) -> Result<Vec<AuthPolicy>, PelagoError> {
-    let start = POLICY_PREFIX.as_bytes().to_vec();
-    let mut end = start.clone();
-    end.push(0xFF);
-    let rows = db.get_range(&start, &end, 10_000).await?;
+    let subspace = policy_subspace();
+    let rows = db
+        .get_range(subspace.prefix(), &subspace.range_end(), 10_000)
+        .await?;
 
     let mut out = Vec::new();
     for (_, value) in rows {
@@ -230,19 +226,8 @@ pub async fn query_audit_records(
     to_ts: Option<i64>,
     limit: usize,
 ) -> Result<Vec<AuditRecord>, PelagoError> {
-    let start = if let Some(ts) = from_ts {
-        format!("{}{:020}:", AUDIT_PREFIX, ts).into_bytes()
-    } else {
-        AUDIT_PREFIX.as_bytes().to_vec()
-    };
-
-    let end = if let Some(ts) = to_ts {
-        format!("{}{:020}:\u{10FFFF}", AUDIT_PREFIX, ts).into_bytes()
-    } else {
-        let mut end = AUDIT_PREFIX.as_bytes().to_vec();
-        end.push(0xFF);
-        end
-    };
+    let start = audit_range_start(from_ts);
+    let end = audit_range_end_inclusive(to_ts);
 
     let rows = db.get_range(&start, &end, limit.max(1) * 4).await?;
     let mut out = Vec::new();
@@ -273,8 +258,8 @@ pub async fn cleanup_audit_records(
 ) -> Result<usize, PelagoError> {
     let now = now_micros();
     let cutoff = now - (retention_secs as i64 * 1_000_000);
-    let start = AUDIT_PREFIX.as_bytes().to_vec();
-    let end = format!("{}{:020}:\u{10FFFF}", AUDIT_PREFIX, cutoff).into_bytes();
+    let start = audit_subspace().prefix().to_vec();
+    let end = audit_range_end_inclusive(Some(cutoff));
     let rows = db.get_range(&start, &end, batch_limit.max(1)).await?;
     if rows.is_empty() {
         return Ok(0);
@@ -293,19 +278,78 @@ pub async fn cleanup_audit_records(
 }
 
 fn policy_key(policy_id: &str) -> Vec<u8> {
-    format!("{}{}", POLICY_PREFIX, policy_id).into_bytes()
+    policy_subspace()
+        .pack()
+        .add_string(policy_id)
+        .build()
+        .to_vec()
 }
 
 fn access_token_key(token: &str) -> Vec<u8> {
-    format!("{}{}", AUTH_ACCESS_PREFIX, token).into_bytes()
+    auth_access_subspace()
+        .pack()
+        .add_string(token)
+        .build()
+        .to_vec()
 }
 
 fn refresh_token_key(token: &str) -> Vec<u8> {
-    format!("{}{}", AUTH_REFRESH_PREFIX, token).into_bytes()
+    auth_refresh_subspace()
+        .pack()
+        .add_string(token)
+        .build()
+        .to_vec()
 }
 
 fn audit_key(ts: i64, event_id: &str) -> Vec<u8> {
-    format!("{}{:020}:{}", AUDIT_PREFIX, ts, event_id).into_bytes()
+    audit_subspace()
+        .pack()
+        .add_int(ts)
+        .add_string(event_id)
+        .build()
+        .to_vec()
+}
+
+fn policy_subspace() -> Subspace {
+    Subspace::system().child("policies")
+}
+
+fn auth_access_subspace() -> Subspace {
+    Subspace::system().child("auth").child("access")
+}
+
+fn auth_refresh_subspace() -> Subspace {
+    Subspace::system().child("auth").child("refresh")
+}
+
+fn audit_subspace() -> Subspace {
+    Subspace::system().child("audit")
+}
+
+fn audit_range_start(from_ts: Option<i64>) -> Vec<u8> {
+    let subspace = audit_subspace();
+    match from_ts {
+        Some(ts) => subspace.pack().add_int(ts).build().to_vec(),
+        None => subspace.prefix().to_vec(),
+    }
+}
+
+fn audit_range_end_inclusive(to_ts: Option<i64>) -> Vec<u8> {
+    let subspace = audit_subspace();
+    match to_ts {
+        Some(ts) => {
+            if ts == i64::MAX {
+                subspace.range_end().to_vec()
+            } else {
+                subspace
+                    .pack()
+                    .add_int(ts.saturating_add(1))
+                    .build()
+                    .to_vec()
+            }
+        }
+        None => subspace.range_end().to_vec(),
+    }
 }
 
 fn now_secs() -> i64 {

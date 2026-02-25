@@ -9,6 +9,9 @@
 
 use crate::cel::CelEnvironment;
 use crate::plan::{ExecutionPlan, IndexPredicate, PredicateValue, QueryPlan};
+use crate::predicate::{
+    parse_comparison, split_boolean_expression, ComparisonOperator, PredicateLiteral,
+};
 use pelago_core::encoding::encode_value_for_index;
 use pelago_core::{NodeId, PelagoError, Value};
 use pelago_storage::index::markers;
@@ -16,6 +19,7 @@ use pelago_storage::term_index;
 use pelago_storage::{IdAllocator, NodeStore, PelagoDb, SchemaRegistry, StoredNode, Subspace};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 const NODE_BATCH_FETCH_SIZE: usize = 256;
@@ -55,6 +59,11 @@ pub struct QueryExecutor {
 struct ScanCandidate {
     node: StoredNode,
     cursor_key: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReadExecutionOptions {
+    pub read_version: Option<i64>,
 }
 
 impl QueryExecutor {
@@ -98,6 +107,18 @@ impl QueryExecutor {
         namespace: &str,
         plan: &ExecutionPlan,
     ) -> Result<QueryResults, PelagoError> {
+        self.execute_with_options(database, namespace, plan, ReadExecutionOptions::default())
+            .await
+    }
+
+    pub async fn execute_with_options(
+        &self,
+        database: &str,
+        namespace: &str,
+        plan: &ExecutionPlan,
+        read_options: ReadExecutionOptions,
+    ) -> Result<QueryResults, PelagoError> {
+        let started_at = Instant::now();
         // Get schema for the entity type
         let schema = self
             .schema_registry
@@ -135,8 +156,14 @@ impl QueryExecutor {
         // Execute based on primary plan
         let candidates = match &plan.primary_plan {
             QueryPlan::PointLookup { node_id } => {
-                self.execute_point_lookup(database, namespace, &plan.entity_type, node_id)
-                    .await?
+                self.execute_point_lookup(
+                    database,
+                    namespace,
+                    &plan.entity_type,
+                    node_id,
+                    read_options.read_version,
+                )
+                .await?
             }
             QueryPlan::IndexScan {
                 property,
@@ -152,6 +179,7 @@ impl QueryExecutor {
                     predicate,
                     plan.cursor.as_deref(),
                     scan_limit.max(1),
+                    read_options.read_version,
                 )
                 .await?
             }
@@ -162,6 +190,7 @@ impl QueryExecutor {
                     &plan.entity_type,
                     plan.cursor.as_deref(),
                     scan_limit.max(1),
+                    read_options.read_version,
                 )
                 .await?
             }
@@ -225,10 +254,16 @@ impl QueryExecutor {
             "query execution summary"
         );
 
+        let result_bytes = estimate_nodes_size_bytes(&results);
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+
         Ok(QueryResults {
             nodes: results,
             cursor,
             has_more,
+            scanned_keys: candidate_count,
+            result_bytes,
+            elapsed_ms,
         })
     }
 
@@ -251,6 +286,31 @@ impl QueryExecutor {
         limit: Option<u32>,
         cursor: Option<&[u8]>,
     ) -> Result<Option<QueryResults>, PelagoError> {
+        self.execute_term_expression_with_options(
+            database,
+            namespace,
+            entity_type,
+            expression,
+            projection,
+            limit,
+            cursor,
+            ReadExecutionOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn execute_term_expression_with_options(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        expression: &str,
+        projection: Option<HashSet<String>>,
+        limit: Option<u32>,
+        cursor: Option<&[u8]>,
+        read_options: ReadExecutionOptions,
+    ) -> Result<Option<QueryResults>, PelagoError> {
+        let started_at = Instant::now();
         let parsed = match parse_term_expression(expression) {
             Some(p) => p,
             None => return Ok(None),
@@ -271,6 +331,7 @@ impl QueryExecutor {
                 &groups,
                 cursor_node_id.as_ref(),
                 fetch_limit,
+                read_options.read_version,
             )
             .await?;
         let candidate_count = node_ids.len();
@@ -293,7 +354,13 @@ impl QueryExecutor {
         }
 
         let mut nodes = self
-            .fetch_nodes_in_order(database, namespace, entity_type, &ordered_node_ids)
+            .fetch_nodes_in_order(
+                database,
+                namespace,
+                entity_type,
+                &ordered_node_ids,
+                read_options.read_version,
+            )
             .await?;
         if let Some(ref fields) = projection {
             nodes = nodes
@@ -323,10 +390,16 @@ impl QueryExecutor {
             "term-expression query summary"
         );
 
+        let result_bytes = estimate_nodes_size_bytes(&nodes);
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+
         Ok(Some(QueryResults {
             nodes,
             cursor,
             has_more,
+            scanned_keys: candidate_count,
+            result_bytes,
+            elapsed_ms,
         }))
     }
 
@@ -337,6 +410,7 @@ impl QueryExecutor {
         namespace: &str,
         entity_type: &str,
         node_id: &str,
+        read_version: Option<i64>,
     ) -> Result<Vec<ScanCandidate>, PelagoError> {
         let node_store = NodeStore::new(
             self.db.clone(),
@@ -346,7 +420,7 @@ impl QueryExecutor {
         );
 
         match node_store
-            .get_node(database, namespace, entity_type, node_id)
+            .get_node_at_read_version(database, namespace, entity_type, node_id, read_version)
             .await?
         {
             Some(node) => Ok(vec![ScanCandidate {
@@ -368,6 +442,7 @@ impl QueryExecutor {
         predicate: &IndexPredicate,
         cursor: Option<&[u8]>,
         limit: usize,
+        read_version: Option<i64>,
     ) -> Result<Vec<ScanCandidate>, PelagoError> {
         let subspace = Subspace::namespace(database, namespace);
         let idx_subspace = subspace.index();
@@ -403,7 +478,7 @@ impl QueryExecutor {
                 }
                 let index_results = self
                     .db
-                    .get_range(&range_start, &range_end, limit.max(1))
+                    .get_range_at_read_version(&range_start, &range_end, limit.max(1), read_version)
                     .await?;
                 for (key, value) in index_results {
                     let node_id = match index_type {
@@ -474,7 +549,7 @@ impl QueryExecutor {
                 }
                 let index_results = self
                     .db
-                    .get_range(&range_start, &range_end, limit.max(1))
+                    .get_range_at_read_version(&range_start, &range_end, limit.max(1), read_version)
                     .await?;
                 for (key, value) in index_results {
                     let node_id = match index_type {
@@ -512,7 +587,12 @@ impl QueryExecutor {
 
                     let rows = self
                         .db
-                        .get_range(&key_prefix, &end, per_value_limit.max(1))
+                        .get_range_at_read_version(
+                            &key_prefix,
+                            &end,
+                            per_value_limit.max(1),
+                            read_version,
+                        )
                         .await?;
                     for (key, value_bytes) in rows {
                         let node_id = match index_type {
@@ -561,8 +641,14 @@ impl QueryExecutor {
             let arr: [u8; 9] = node_id_bytes.try_into().unwrap();
             keyed_node_ids_text.push((cursor_key, NodeId::from_bytes(&arr).to_string()));
         }
-        self.fetch_scan_candidates_in_order(database, namespace, entity_type, &keyed_node_ids_text)
-            .await
+        self.fetch_scan_candidates_in_order(
+            database,
+            namespace,
+            entity_type,
+            &keyed_node_ids_text,
+            read_version,
+        )
+        .await
     }
 
     async fn execute_term_groups(
@@ -573,6 +659,7 @@ impl QueryExecutor {
         groups: &[Vec<TermPredicate>],
         after_node_id: Option<&[u8; 9]>,
         target_limit: usize,
+        read_version: Option<i64>,
     ) -> Result<Vec<Vec<u8>>, PelagoError> {
         // Keep bounded memory for OR unions while still allowing broad result sets.
         let hard_cap = (self.config.max_limit as usize)
@@ -590,6 +677,7 @@ impl QueryExecutor {
                     after_node_id,
                     target_limit,
                     hard_cap,
+                    read_version,
                 )
                 .await?;
             for id in group_ids {
@@ -617,6 +705,7 @@ impl QueryExecutor {
         after_node_id: Option<&[u8; 9]>,
         target_limit: usize,
         hard_cap: usize,
+        read_version: Option<i64>,
     ) -> Result<Vec<Vec<u8>>, PelagoError> {
         if group.is_empty() {
             return Ok(Vec::new());
@@ -625,13 +714,14 @@ impl QueryExecutor {
         // Selectivity-first ordering using DF counters when present.
         let mut ordered_terms = Vec::with_capacity(group.len());
         for term in group {
-            let df = term_index::get_document_frequency(
+            let df = term_index::get_document_frequency_at_read_version(
                 &self.db,
                 database,
                 namespace,
                 entity_type,
                 &term.field,
                 &term.value,
+                read_version,
             )
             .await?
             .unwrap_or(u64::MAX / 4);
@@ -642,7 +732,7 @@ impl QueryExecutor {
         let mut running: Option<HashSet<Vec<u8>>> = None;
         for (df, term) in ordered_terms {
             let fetch_limit = estimate_posting_fetch_limit(df, target_limit, hard_cap);
-            let posting_ids = term_index::list_posting_node_ids_after(
+            let posting_ids = term_index::list_posting_node_ids_after_at_read_version(
                 &self.db,
                 database,
                 namespace,
@@ -651,6 +741,7 @@ impl QueryExecutor {
                 &term.value,
                 after_node_id.map(|id| id.as_slice()),
                 fetch_limit,
+                read_version,
             )
             .await?;
             let posting_set: HashSet<Vec<u8>> = posting_ids.into_iter().collect();
@@ -676,6 +767,7 @@ impl QueryExecutor {
         entity_type: &str,
         cursor: Option<&[u8]>,
         limit: usize,
+        read_version: Option<i64>,
     ) -> Result<Vec<ScanCandidate>, PelagoError> {
         let subspace = Subspace::namespace(database, namespace);
         let data_subspace = subspace.data();
@@ -693,7 +785,7 @@ impl QueryExecutor {
         // Scan all node keys
         let results = self
             .db
-            .get_range(&range_start, &range_end, limit.max(1))
+            .get_range_at_read_version(&range_start, &range_end, limit.max(1), read_version)
             .await?;
 
         let mut keyed_node_ids = Vec::with_capacity(results.len());
@@ -706,8 +798,14 @@ impl QueryExecutor {
             }
         }
 
-        self.fetch_scan_candidates_in_order(database, namespace, entity_type, &keyed_node_ids)
-            .await
+        self.fetch_scan_candidates_in_order(
+            database,
+            namespace,
+            entity_type,
+            &keyed_node_ids,
+            read_version,
+        )
+        .await
     }
 
     async fn fetch_nodes_in_order(
@@ -716,6 +814,7 @@ impl QueryExecutor {
         namespace: &str,
         entity_type: &str,
         node_ids: &[String],
+        read_version: Option<i64>,
     ) -> Result<Vec<StoredNode>, PelagoError> {
         if node_ids.is_empty() {
             return Ok(Vec::new());
@@ -732,7 +831,13 @@ impl QueryExecutor {
         for chunk in node_ids.chunks(NODE_BATCH_FETCH_SIZE) {
             let ids: Vec<String> = chunk.to_vec();
             let rows = node_store
-                .get_nodes_batch(database, namespace, entity_type, &ids)
+                .get_nodes_batch_at_read_version(
+                    database,
+                    namespace,
+                    entity_type,
+                    &ids,
+                    read_version,
+                )
                 .await?;
             for row in rows {
                 if let Some(node) = row {
@@ -750,6 +855,7 @@ impl QueryExecutor {
         namespace: &str,
         entity_type: &str,
         keyed_node_ids: &[(Vec<u8>, String)],
+        read_version: Option<i64>,
     ) -> Result<Vec<ScanCandidate>, PelagoError> {
         if keyed_node_ids.is_empty() {
             return Ok(Vec::new());
@@ -766,7 +872,13 @@ impl QueryExecutor {
         for chunk in keyed_node_ids.chunks(NODE_BATCH_FETCH_SIZE) {
             let ids: Vec<String> = chunk.iter().map(|(_, id)| id.clone()).collect();
             let rows = node_store
-                .get_nodes_batch(database, namespace, entity_type, &ids)
+                .get_nodes_batch_at_read_version(
+                    database,
+                    namespace,
+                    entity_type,
+                    &ids,
+                    read_version,
+                )
                 .await?;
 
             for ((cursor_key, _), row) in chunk.iter().zip(rows.into_iter()) {
@@ -831,6 +943,12 @@ pub struct QueryResults {
     pub cursor: Option<Vec<u8>>,
     /// Whether there are more results
     pub has_more: bool,
+    /// Approximate keys scanned for this page.
+    pub scanned_keys: usize,
+    /// Approximate serialized bytes in returned nodes.
+    pub result_bytes: usize,
+    /// Wall time spent executing the query page.
+    pub elapsed_ms: u64,
 }
 
 /// Streaming query results
@@ -893,6 +1011,14 @@ fn make_exclusive_start(key: &[u8]) -> Vec<u8> {
     out
 }
 
+fn estimate_nodes_size_bytes(nodes: &[StoredNode]) -> usize {
+    nodes
+        .iter()
+        .filter_map(|n| pelago_core::encoding::encode_cbor(n).ok())
+        .map(|b| b.len())
+        .sum()
+}
+
 /// Encode a predicate value for index key construction
 fn encode_predicate_value(value: &PredicateValue) -> Result<Vec<u8>, PelagoError> {
     let pelago_value = match value {
@@ -937,98 +1063,30 @@ struct ParsedTermExpression {
 }
 
 fn parse_term_expression(expression: &str) -> Option<ParsedTermExpression> {
-    let expression = expression.trim();
-    if expression.is_empty() {
-        return None;
-    }
-
-    // Parenthesized expressions should go through the normal planner/executor path.
-    if expression.contains('(') || expression.contains(')') {
-        return None;
-    }
-
-    let mut groups = Vec::new();
-    for or_part in expression.split("||") {
-        let or_part = or_part.trim();
-        if or_part.is_empty() {
-            return None;
-        }
-
-        let mut group = Vec::new();
-        for and_part in or_part.split("&&") {
-            let and_part = and_part.trim();
-            if and_part.is_empty() {
+    let raw_groups = split_boolean_expression(expression)?;
+    let mut groups = Vec::with_capacity(raw_groups.len());
+    for raw_group in raw_groups {
+        let mut group = Vec::with_capacity(raw_group.len());
+        for raw_term in raw_group {
+            let parsed = parse_comparison(&raw_term)?;
+            if parsed.operator != ComparisonOperator::Eq {
                 return None;
             }
-            let predicate = parse_term_predicate(and_part)?;
-            group.push(predicate);
+            let value = match parsed.value {
+                PredicateLiteral::String(v) => Value::String(v),
+                PredicateLiteral::Int(v) => Value::Int(v),
+                PredicateLiteral::Float(v) => Value::Float(v),
+                PredicateLiteral::Bool(v) => Value::Bool(v),
+            };
+            group.push(TermPredicate {
+                field: parsed.field,
+                value,
+            });
         }
         groups.push(group);
     }
 
-    if groups.is_empty() {
-        None
-    } else {
-        Some(ParsedTermExpression { groups })
-    }
-}
-
-fn parse_term_predicate(expr: &str) -> Option<TermPredicate> {
-    if expr.contains("!=")
-        || expr.contains(">=")
-        || expr.contains("<=")
-        || expr.contains('>')
-        || expr.contains('<')
-    {
-        return None;
-    }
-
-    let pos = expr.find("==")?;
-    let field = expr[..pos].trim();
-    let value_str = expr[pos + 2..].trim();
-
-    if field.is_empty() || field.contains(' ') {
-        return None;
-    }
-
-    let value = parse_term_value(value_str)?;
-    Some(TermPredicate {
-        field: field.to_string(),
-        value,
-    })
-}
-
-fn parse_term_value(raw: &str) -> Option<Value> {
-    let raw = raw.trim();
-
-    if raw.len() < 2 {
-        if let Ok(i) = raw.parse::<i64>() {
-            return Some(Value::Int(i));
-        }
-        return None;
-    }
-
-    if (raw.starts_with('"') && raw.ends_with('"'))
-        || (raw.starts_with('\'') && raw.ends_with('\''))
-    {
-        return Some(Value::String(raw[1..raw.len() - 1].to_string()));
-    }
-    if raw == "true" {
-        return Some(Value::Bool(true));
-    }
-    if raw == "false" {
-        return Some(Value::Bool(false));
-    }
-    if raw.contains('.') {
-        if let Ok(f) = raw.parse::<f64>() {
-            return Some(Value::Float(f));
-        }
-    }
-    if let Ok(i) = raw.parse::<i64>() {
-        return Some(Value::Int(i));
-    }
-
-    None
+    Some(ParsedTermExpression { groups })
 }
 
 fn rewrite_template_term_groups(groups: Vec<Vec<TermPredicate>>) -> Vec<Vec<TermPredicate>> {

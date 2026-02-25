@@ -4,7 +4,7 @@
 //! ```text
 //! Forward:  (db, ns, edge, f, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id) → CBOR edge data
 //! Metadata: (db, ns, edge, m, src_type, src_id, label, [sort_key], tgt_db, tgt_ns, tgt_type, tgt_id) → CBOR edge data (compat)
-//! Reverse:  (db, ns, edge, r, tgt_db, tgt_ns, tgt_type, tgt_id, label, src_type, src_id)
+//! Reverse:  (db, ns, edge, r, tgt_db, tgt_ns, tgt_type, tgt_id, label, src_type, src_id) → CBOR edge data
 //! ```
 //!
 //! Operations:
@@ -24,7 +24,7 @@ use pelago_core::encoding::{decode_cbor, encode_cbor, encode_value_for_index};
 use pelago_core::schema::{EdgeDirection, EntitySchema, OwnershipMode};
 use pelago_core::{EdgeId, PelagoError, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Reference to a node (for edge endpoints)
@@ -141,6 +141,179 @@ impl EdgeStore {
         Ok(())
     }
 
+    /// Delete all edges connected to a node and emit edge-delete CDC operations.
+    pub async fn delete_edges_for_node(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+    ) -> Result<usize, PelagoError> {
+        self.delete_edges_for_node_internal(database, namespace, entity_type, node_id, true)
+            .await
+    }
+
+    /// Delete all edges connected to a node without emitting CDC.
+    ///
+    /// Used by replication apply paths where CDC has already been emitted at source.
+    pub async fn delete_edges_for_node_replica(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+    ) -> Result<usize, PelagoError> {
+        self.delete_edges_for_node_internal(database, namespace, entity_type, node_id, false)
+            .await
+    }
+
+    async fn delete_edges_for_node_internal(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        emit_cdc: bool,
+    ) -> Result<usize, PelagoError> {
+        const CASCADE_FETCH_LIMIT: usize = 2048;
+        const CASCADE_TX_EDGE_LIMIT: usize = 256;
+
+        let mut total_deleted = 0usize;
+
+        loop {
+            let mut candidates = self
+                .list_edges(
+                    database,
+                    namespace,
+                    entity_type,
+                    node_id,
+                    None,
+                    CASCADE_FETCH_LIMIT,
+                )
+                .await?;
+            candidates.extend(
+                self.list_incoming_edges(
+                    database,
+                    namespace,
+                    entity_type,
+                    node_id,
+                    None,
+                    CASCADE_FETCH_LIMIT,
+                )
+                .await?,
+            );
+
+            if candidates.is_empty() {
+                break;
+            }
+
+            let mut seen = HashSet::new();
+            let mut planned: Vec<(EdgeKeys, NodeRef, NodeRef, String)> = Vec::new();
+
+            for edge in candidates {
+                let dedupe_key = format!(
+                    "{}|{}|{}|{}|{}|{}|{}",
+                    edge.edge_id,
+                    edge.source.entity_type,
+                    edge.source.node_id,
+                    edge.label,
+                    edge.target.entity_type,
+                    edge.target.node_id,
+                    edge.created_at
+                );
+                if !seen.insert(dedupe_key) {
+                    continue;
+                }
+
+                let schema = self
+                    .schema_registry
+                    .get_schema(
+                        &edge.source.database,
+                        &edge.source.namespace,
+                        &edge.source.entity_type,
+                    )
+                    .await?;
+                let is_bidirectional = schema
+                    .as_ref()
+                    .and_then(|s| s.edges.get(&edge.label))
+                    .map(|e| e.direction == EdgeDirection::Bidirectional)
+                    .unwrap_or(false);
+                let edge_data = match self
+                    .find_edge_data_by_endpoints(
+                        &edge.source.database,
+                        &edge.source.namespace,
+                        &edge.source,
+                        &edge.target,
+                        &edge.label,
+                    )
+                    .await?
+                {
+                    Some(data) => data,
+                    None => continue,
+                };
+                let sort_key_value = sort_key_for_label(
+                    schema.as_ref().map(|s| s.as_ref()),
+                    &edge.label,
+                    &edge_data.properties,
+                );
+                let subspace = Subspace::namespace(&edge.source.database, &edge.source.namespace);
+                let keys = compute_edge_keys(
+                    &subspace,
+                    &edge.source,
+                    &edge.target,
+                    &edge.label,
+                    sort_key_value,
+                    is_bidirectional,
+                )?;
+                planned.push((keys, edge.source, edge.target, edge.label));
+                if planned.len() >= CASCADE_TX_EDGE_LIMIT {
+                    break;
+                }
+            }
+
+            if planned.is_empty() {
+                return Err(PelagoError::Internal(
+                    "Unable to resolve edge keys during node cascade delete".to_string(),
+                ));
+            }
+
+            let trx = self.db.create_transaction()?;
+            let mut cdc = CdcAccumulator::new(&self.site_id);
+
+            for (keys, source, target, label) in &planned {
+                trx.clear(keys.forward_key.as_ref());
+                trx.clear(keys.meta_key.as_ref());
+                trx.clear(keys.reverse_key.as_ref());
+                if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
+                    trx.clear(rev_forward.as_ref());
+                    trx.clear(rev_reverse.as_ref());
+                }
+
+                if emit_cdc {
+                    cdc.push(CdcOperation::EdgeDelete {
+                        source_type: source.entity_type.clone(),
+                        source_id: source.node_id.clone(),
+                        target_type: target.entity_type.clone(),
+                        target_id: target.node_id.clone(),
+                        edge_type: label.clone(),
+                    });
+                }
+            }
+
+            if emit_cdc {
+                cdc.flush(&trx, database, namespace)?;
+            }
+
+            trx.commit().await.map_err(|e| {
+                PelagoError::Internal(format!("Failed to cascade-delete edges for node: {}", e))
+            })?;
+
+            total_deleted = total_deleted.saturating_add(planned.len());
+        }
+
+        Ok(total_deleted)
+    }
+
     /// Apply replicated edge creation without emitting CDC.
     pub async fn apply_replica_edge_create(
         &self,
@@ -234,10 +407,10 @@ impl EdgeStore {
         let trx = self.db.create_transaction()?;
         trx.set(keys.forward_key.as_ref(), &edge_bytes);
         trx.set(keys.meta_key.as_ref(), &edge_bytes);
-        trx.set(keys.reverse_key.as_ref(), &[]);
+        trx.set(keys.reverse_key.as_ref(), &edge_bytes);
         if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
             trx.set(rev_forward.as_ref(), &edge_bytes);
-            trx.set(rev_reverse.as_ref(), &[]);
+            trx.set(rev_reverse.as_ref(), &edge_bytes);
         }
         trx.commit().await.map_err(|e| {
             PelagoError::Internal(format!("Failed to apply replicated edge create: {}", e))
@@ -293,9 +466,27 @@ impl EdgeStore {
             .unwrap_or(false);
 
         let subspace = Subspace::namespace(database, namespace);
-        let keys = compute_edge_keys(&subspace, &source, &target, label, None, is_bidirectional)?;
-        let exists = self.db.get(keys.forward_key.as_ref()).await?.is_some();
-        if !exists {
+        let edge_data = match self
+            .find_edge_data_by_endpoints(database, namespace, &source, &target, label)
+            .await?
+        {
+            Some(data) => data,
+            None => return Ok(false),
+        };
+        let sort_key_value = sort_key_for_label(
+            schema.as_ref().map(|s| s.as_ref()),
+            label,
+            &edge_data.properties,
+        );
+        let keys = compute_edge_keys(
+            &subspace,
+            &source,
+            &target,
+            label,
+            sort_key_value,
+            is_bidirectional,
+        )?;
+        if self.db.get(keys.forward_key.as_ref()).await?.is_none() {
             return Ok(false);
         }
 
@@ -415,13 +606,13 @@ impl EdgeStore {
         // Write metadata key (edge properties)
         trx.set(keys.meta_key.as_ref(), &edge_bytes);
 
-        // Write reverse key (empty value)
-        trx.set(keys.reverse_key.as_ref(), &[]);
+        // Write reverse key (stores edge data for incoming scans)
+        trx.set(keys.reverse_key.as_ref(), &edge_bytes);
 
         // Write bidirectional keys if needed
         if let Some((rev_forward, rev_reverse)) = &keys.reverse_direction_keys {
             trx.set(rev_forward.as_ref(), &edge_bytes);
-            trx.set(rev_reverse.as_ref(), &[]);
+            trx.set(rev_reverse.as_ref(), &edge_bytes);
         }
 
         // Accumulate CDC operation
@@ -489,11 +680,28 @@ impl EdgeStore {
             .unwrap_or(false);
 
         let subspace = Subspace::namespace(database, namespace);
-        let keys = compute_edge_keys(&subspace, &source, &target, label, None, is_bidirectional)?;
+        let edge_data = match self
+            .find_edge_data_by_endpoints(database, namespace, &source, &target, label)
+            .await?
+        {
+            Some(data) => data,
+            None => return Ok(false),
+        };
+        let sort_key_value = sort_key_for_label(
+            schema.as_ref().map(|s| s.as_ref()),
+            label,
+            &edge_data.properties,
+        );
+        let keys = compute_edge_keys(
+            &subspace,
+            &source,
+            &target,
+            label,
+            sort_key_value,
+            is_bidirectional,
+        )?;
 
-        // Check if edge exists
-        let exists = self.db.get(keys.forward_key.as_ref()).await?.is_some();
-        if !exists {
+        if self.db.get(keys.forward_key.as_ref()).await?.is_none() {
             return Ok(false);
         }
 
@@ -530,7 +738,81 @@ impl EdgeStore {
         Ok(true)
     }
 
-    /// List outgoing edges from a node
+    async fn find_edge_data_by_endpoints(
+        &self,
+        database: &str,
+        namespace: &str,
+        source: &NodeRef,
+        target: &NodeRef,
+        label: &str,
+    ) -> Result<Option<EdgeData>, PelagoError> {
+        self.find_edge_data_by_endpoints_at_read_version(
+            database, namespace, source, target, label, None,
+        )
+        .await
+    }
+
+    async fn find_edge_data_by_endpoints_at_read_version(
+        &self,
+        database: &str,
+        namespace: &str,
+        source: &NodeRef,
+        target: &NodeRef,
+        label: &str,
+        read_version: Option<i64>,
+    ) -> Result<Option<EdgeData>, PelagoError> {
+        let edge_subspace = Subspace::namespace(database, namespace).edge();
+        let range_start = edge_subspace
+            .pack()
+            .add_marker(edge_markers::FORWARD)
+            .add_string(&source.entity_type)
+            .add_string(&source.node_id)
+            .add_string(label)
+            .build();
+        let range_end = {
+            let mut end = range_start.to_vec();
+            end.push(0xFF);
+            end
+        };
+
+        let rows = self
+            .db
+            .get_range_at_read_version(range_start.as_ref(), &range_end, 2048, read_version)
+            .await?;
+        let marker_pos = edge_subspace.prefix().len();
+
+        for (key, forward_value) in rows {
+            let edge_data = if !forward_value.is_empty() {
+                decode_cbor::<EdgeData>(&forward_value).ok()
+            } else {
+                let mut meta_key = key.clone();
+                if meta_key.len() > marker_pos {
+                    meta_key[marker_pos] = edge_markers::FORWARD_META;
+                }
+                self.db
+                    .get_at_read_version(meta_key.as_ref(), read_version)
+                    .await?
+                    .map(|bytes| decode_cbor::<EdgeData>(&bytes))
+                    .transpose()?
+            };
+
+            let Some(edge_data) = edge_data else {
+                continue;
+            };
+
+            let edge_label = edge_data.label.clone().unwrap_or_else(|| label.to_string());
+            let edge_source = edge_data.source.clone().unwrap_or_else(|| source.clone());
+            let edge_target = edge_data.target.clone().unwrap_or_else(|| target.clone());
+
+            if edge_label == label && edge_source == *source && edge_target == *target {
+                return Ok(Some(edge_data));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// List outgoing edges from a node.
     pub async fn list_edges(
         &self,
         database: &str,
@@ -539,6 +821,29 @@ impl EdgeStore {
         node_id: &str,
         label_filter: Option<&str>,
         limit: usize,
+    ) -> Result<Vec<StoredEdge>, PelagoError> {
+        self.list_edges_at_read_version(
+            database,
+            namespace,
+            entity_type,
+            node_id,
+            label_filter,
+            limit,
+            None,
+        )
+        .await
+    }
+
+    /// List outgoing edges from a node at an optional pinned read version.
+    pub async fn list_edges_at_read_version(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        label_filter: Option<&str>,
+        limit: usize,
+        read_version: Option<i64>,
     ) -> Result<Vec<StoredEdge>, PelagoError> {
         let subspace = Subspace::namespace(database, namespace).edge();
 
@@ -562,7 +867,7 @@ impl EdgeStore {
 
         let results = self
             .db
-            .get_range(range_start.as_ref(), &range_end, limit)
+            .get_range_at_read_version(range_start.as_ref(), &range_end, limit, read_version)
             .await?;
 
         let mut edges = Vec::new();
@@ -582,7 +887,7 @@ impl EdgeStore {
 
             let meta_rows = self
                 .db
-                .get_range(meta_start.as_ref(), &meta_end, limit)
+                .get_range_at_read_version(meta_start.as_ref(), &meta_end, limit, read_version)
                 .await?;
             legacy_meta_by_key.extend(meta_rows);
         }
@@ -639,6 +944,128 @@ impl EdgeStore {
 
         Ok(edges)
     }
+
+    /// List incoming edges to a node.
+    pub async fn list_incoming_edges(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        label_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StoredEdge>, PelagoError> {
+        self.list_incoming_edges_at_read_version(
+            database,
+            namespace,
+            entity_type,
+            node_id,
+            label_filter,
+            limit,
+            None,
+        )
+        .await
+    }
+
+    /// List incoming edges to a node at an optional pinned read version.
+    pub async fn list_incoming_edges_at_read_version(
+        &self,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+        label_filter: Option<&str>,
+        limit: usize,
+        read_version: Option<i64>,
+    ) -> Result<Vec<StoredEdge>, PelagoError> {
+        let edge_subspace = Subspace::namespace(database, namespace).edge();
+        let mut prefix_builder = edge_subspace
+            .pack()
+            .add_marker(edge_markers::REVERSE)
+            .add_string(database)
+            .add_string(namespace)
+            .add_string(entity_type)
+            .add_string(node_id);
+
+        if let Some(label) = label_filter {
+            prefix_builder = prefix_builder.add_string(label);
+        }
+
+        let range_start = prefix_builder.build();
+        let range_end = {
+            let mut end = range_start.to_vec();
+            end.push(0xFF);
+            end
+        };
+
+        let rows = self
+            .db
+            .get_range_at_read_version(range_start.as_ref(), &range_end, limit, read_version)
+            .await?;
+        let marker_pos = edge_subspace.prefix().len();
+        let mut edges = Vec::new();
+
+        for (key, reverse_value) in rows {
+            let edge_data = if !reverse_value.is_empty() {
+                decode_cbor::<EdgeData>(&reverse_value).ok()
+            } else {
+                let Some(parsed) = parse_reverse_key_parts(&key, marker_pos) else {
+                    continue;
+                };
+                let source = NodeRef::new(
+                    database,
+                    namespace,
+                    &parsed.source_entity_type,
+                    &parsed.source_node_id,
+                );
+                let target = NodeRef::new(
+                    &parsed.target_database,
+                    &parsed.target_namespace,
+                    &parsed.target_entity_type,
+                    &parsed.target_node_id,
+                );
+                self.find_edge_data_by_endpoints_at_read_version(
+                    database,
+                    namespace,
+                    &source,
+                    &target,
+                    &parsed.label,
+                    read_version,
+                )
+                .await?
+            };
+
+            let Some(edge_data) = edge_data else {
+                continue;
+            };
+
+            let label = edge_data
+                .label
+                .clone()
+                .unwrap_or_else(|| label_filter.unwrap_or("unknown").to_string());
+            let target = edge_data
+                .target
+                .clone()
+                .unwrap_or_else(|| NodeRef::new(database, namespace, entity_type, node_id));
+            let source = edge_data
+                .source
+                .clone()
+                .unwrap_or_else(|| NodeRef::new(database, namespace, "Unknown", "Unknown"));
+
+            if target.entity_type == entity_type && target.node_id == node_id {
+                edges.push(StoredEdge {
+                    edge_id: edge_data.edge_id,
+                    source,
+                    target,
+                    label,
+                    properties: edge_data.properties,
+                    created_at: edge_data.created_at,
+                });
+            }
+        }
+
+        Ok(edges)
+    }
 }
 
 /// Internal edge data for storage
@@ -653,6 +1080,79 @@ struct EdgeData {
     target: Option<NodeRef>,
     #[serde(default)]
     label: Option<String>,
+}
+
+fn sort_key_for_label<'a>(
+    schema: Option<&EntitySchema>,
+    label: &str,
+    properties: &'a HashMap<String, Value>,
+) -> Option<&'a Value> {
+    schema
+        .and_then(|s| s.edges.get(label))
+        .and_then(|def| def.sort_key.as_ref())
+        .and_then(|sort_key| properties.get(sort_key))
+}
+
+#[derive(Debug)]
+struct ReverseKeyParts {
+    target_database: String,
+    target_namespace: String,
+    target_entity_type: String,
+    target_node_id: String,
+    label: String,
+    source_entity_type: String,
+    source_node_id: String,
+}
+
+fn parse_reverse_key_parts(key: &[u8], marker_pos: usize) -> Option<ReverseKeyParts> {
+    if key.get(marker_pos).copied()? != edge_markers::REVERSE {
+        return None;
+    }
+
+    let mut idx = marker_pos + 1;
+    let target_database = decode_tuple_string(key, &mut idx)?;
+    let target_namespace = decode_tuple_string(key, &mut idx)?;
+    let target_entity_type = decode_tuple_string(key, &mut idx)?;
+    let target_node_id = decode_tuple_string(key, &mut idx)?;
+    let label = decode_tuple_string(key, &mut idx)?;
+    let source_entity_type = decode_tuple_string(key, &mut idx)?;
+    let source_node_id = decode_tuple_string(key, &mut idx)?;
+
+    Some(ReverseKeyParts {
+        target_database,
+        target_namespace,
+        target_entity_type,
+        target_node_id,
+        label,
+        source_entity_type,
+        source_node_id,
+    })
+}
+
+fn decode_tuple_string(bytes: &[u8], idx: &mut usize) -> Option<String> {
+    if bytes.get(*idx).copied()? != 0x02 {
+        return None;
+    }
+    *idx += 1;
+
+    let mut out = Vec::new();
+    while *idx < bytes.len() {
+        let byte = bytes[*idx];
+        *idx += 1;
+
+        if byte == 0x00 {
+            if *idx < bytes.len() && bytes[*idx] == 0xFF {
+                out.push(0x00);
+                *idx += 1;
+                continue;
+            }
+            return String::from_utf8(out).ok();
+        }
+
+        out.push(byte);
+    }
+
+    None
 }
 
 /// Compute the FDB keys for an edge
@@ -961,5 +1461,33 @@ mod tests {
         assert!(!ref1.is_cross_namespace("db", "ns"));
         assert!(ref2.is_cross_namespace("db", "ns"));
         assert!(ref3.is_cross_namespace("db", "ns"));
+    }
+
+    #[test]
+    fn test_parse_reverse_key_parts_round_trip() {
+        let subspace = Subspace::namespace("db", "ns");
+        let source = NodeRef::new("db", "ns", "Person", "1_100");
+        let target = NodeRef::new("db", "ns", "Company", "1_200");
+        let keys = compute_edge_keys(&subspace, &source, &target, "WORKS_AT", None, false)
+            .expect("compute edge keys");
+
+        let marker_pos = subspace.edge().prefix().len();
+        let parsed = parse_reverse_key_parts(keys.reverse_key.as_ref(), marker_pos)
+            .expect("parse reverse key");
+
+        assert_eq!(parsed.target_database, "db");
+        assert_eq!(parsed.target_namespace, "ns");
+        assert_eq!(parsed.target_entity_type, "Company");
+        assert_eq!(parsed.target_node_id, "1_200");
+        assert_eq!(parsed.label, "WORKS_AT");
+        assert_eq!(parsed.source_entity_type, "Person");
+        assert_eq!(parsed.source_node_id, "1_100");
+    }
+
+    #[test]
+    fn test_decode_tuple_string_rejects_invalid_element_type() {
+        let bytes = vec![0x01, b'a', 0x00];
+        let mut idx = 0usize;
+        assert!(decode_tuple_string(&bytes, &mut idx).is_none());
     }
 }

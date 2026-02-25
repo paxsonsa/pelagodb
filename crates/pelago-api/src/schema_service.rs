@@ -191,7 +191,7 @@ impl SchemaService for SchemaServiceImpl {
 }
 
 /// Convert proto EntitySchema to core EntitySchema
-fn proto_to_core_schema(proto: &EntitySchema) -> Result<CoreSchema, Status> {
+pub fn proto_to_core_schema(proto: &EntitySchema) -> Result<CoreSchema, Status> {
     let mut schema = CoreSchema::new(&proto.name);
 
     for (name, prop_def) in &proto.properties {
@@ -216,7 +216,7 @@ fn proto_to_core_schema(proto: &EntitySchema) -> Result<CoreSchema, Status> {
 }
 
 /// Convert core EntitySchema to proto EntitySchema
-fn core_to_proto_schema(core: &CoreSchema) -> EntitySchema {
+pub fn core_to_proto_schema(core: &CoreSchema) -> EntitySchema {
     let mut properties = HashMap::new();
     let mut edges = HashMap::new();
 

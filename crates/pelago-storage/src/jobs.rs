@@ -9,6 +9,8 @@
 //! - `StripProperty` — remove a property from all nodes of a type
 //! - `CdcRetention` — delete expired CDC entries
 //! - `OrphanedEdgeCleanup` — remove edges to deleted nodes
+//! - `DeleteNodeCascade` — delete one node and all incident edges
+//! - `DropEntityTypeCleanup` — remove all type-scoped schema/data/index/edge keys
 
 use crate::db::PelagoDb;
 use crate::Subspace;
@@ -36,6 +38,13 @@ pub enum JobType {
     OrphanedEdgeCleanup {
         deleted_entity_type: String,
     },
+    DeleteNodeCascade {
+        entity_type: String,
+        node_id: String,
+    },
+    DropEntityTypeCleanup {
+        entity_type: String,
+    },
 }
 
 impl JobType {
@@ -46,6 +55,8 @@ impl JobType {
             JobType::StripProperty { .. } => "StripProperty",
             JobType::CdcRetention { .. } => "CdcRetention",
             JobType::OrphanedEdgeCleanup { .. } => "OrphanedEdgeCleanup",
+            JobType::DeleteNodeCascade { .. } => "DeleteNodeCascade",
+            JobType::DropEntityTypeCleanup { .. } => "DropEntityTypeCleanup",
         }
     }
 }
@@ -266,6 +277,13 @@ mod tests {
             },
             JobType::OrphanedEdgeCleanup {
                 deleted_entity_type: "T".into(),
+            },
+            JobType::DeleteNodeCascade {
+                entity_type: "T".into(),
+                node_id: "1_1".into(),
+            },
+            JobType::DropEntityTypeCleanup {
+                entity_type: "T".into(),
             },
         ];
 
