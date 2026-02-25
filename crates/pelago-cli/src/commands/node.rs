@@ -171,16 +171,23 @@ pub async fn run(
                     context: Some(context),
                     entity_type,
                     node_id,
+                    mutation_mode: pelago_proto::MutationExecutionMode::AsyncAllowed as i32,
                 })
                 .await?
                 .into_inner();
 
             match format {
                 OutputFormat::Json => {
-                    crate::output::print_json(&serde_json::json!({ "deleted": resp.deleted }));
+                    crate::output::print_json(&serde_json::json!({
+                        "deleted": resp.deleted,
+                        "cleanup_job_id": resp.cleanup_job_id,
+                    }));
                 }
                 _ => {
                     println!("Deleted: {}", resp.deleted);
+                    if !resp.cleanup_job_id.is_empty() {
+                        println!("Cleanup job: {}", resp.cleanup_job_id);
+                    }
                 }
             }
         }
@@ -199,6 +206,8 @@ pub async fn run(
                     fields: vec![],
                     limit,
                     cursor: vec![],
+                    snapshot_mode: pelago_proto::SnapshotMode::Strict as i32,
+                    allow_degrade_to_best_effort: false,
                 })
                 .await?
                 .into_inner();

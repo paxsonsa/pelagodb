@@ -17,6 +17,7 @@ use pelago_storage::{
     CachedReadPath, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb,
     ReadConsistency as CacheReadConsistency, SchemaRegistry,
 };
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
@@ -224,26 +225,50 @@ impl EdgeService for EdgeServiceImpl {
             ReadConsistency::Session => CacheReadConsistency::Session,
             ReadConsistency::Eventual => CacheReadConsistency::Eventual,
         };
+        let direction = EdgeDirection::try_from(req.direction).unwrap_or(EdgeDirection::Outgoing);
+        let needs_outgoing = matches!(
+            direction,
+            EdgeDirection::Outgoing | EdgeDirection::Unspecified | EdgeDirection::Both
+        );
+        let needs_incoming = matches!(direction, EdgeDirection::Incoming | EdgeDirection::Both);
 
-        let mut edges = Vec::new();
-        if let Some(cache) = &self.cached_read_path {
-            edges = cache
-                .list_edges_cached(
-                    &ctx.database,
-                    &ctx.namespace,
-                    &entity_type,
-                    &node_id,
-                    label_filter,
-                    consistency,
-                )
-                .await
-                .map_err(|e| e.into_status())?;
+        let mut outgoing = Vec::new();
+        if needs_outgoing {
+            if let Some(cache) = &self.cached_read_path {
+                outgoing = cache
+                    .list_edges_cached(
+                        &ctx.database,
+                        &ctx.namespace,
+                        &entity_type,
+                        &node_id,
+                        label_filter,
+                        consistency,
+                    )
+                    .await
+                    .map_err(|e| e.into_status())?;
+            }
+
+            if outgoing.is_empty() {
+                outgoing = self
+                    .edge_store
+                    .list_edges(
+                        &ctx.database,
+                        &ctx.namespace,
+                        &entity_type,
+                        &node_id,
+                        label_filter,
+                        fetch_limit,
+                    )
+                    .await
+                    .map_err(|e| e.into_status())?;
+            }
         }
 
-        if edges.is_empty() {
-            edges = self
+        let mut incoming = Vec::new();
+        if needs_incoming {
+            incoming = self
                 .edge_store
-                .list_edges(
+                .list_incoming_edges(
                     &ctx.database,
                     &ctx.namespace,
                     &entity_type,
@@ -255,8 +280,33 @@ impl EdgeService for EdgeServiceImpl {
                 .map_err(|e| e.into_status())?;
         }
 
-        let direction = EdgeDirection::try_from(req.direction).unwrap_or(EdgeDirection::Outgoing);
-        if direction != EdgeDirection::Both {
+        let mut edges = if needs_outgoing && needs_incoming {
+            let mut merged = Vec::with_capacity(outgoing.len().saturating_add(incoming.len()));
+            let mut seen = HashSet::new();
+
+            for edge in outgoing.into_iter().chain(incoming.into_iter()) {
+                let key = format!(
+                    "{}|{}|{}|{}|{}|{}|{}",
+                    edge.edge_id,
+                    edge.source.entity_type,
+                    edge.source.node_id,
+                    edge.label,
+                    edge.target.entity_type,
+                    edge.target.node_id,
+                    edge.created_at
+                );
+                if seen.insert(key) {
+                    merged.push(edge);
+                }
+            }
+            merged
+        } else if needs_outgoing {
+            outgoing
+        } else {
+            incoming
+        };
+
+        if direction_filter_required(direction) {
             edges.retain(|e| match direction {
                 EdgeDirection::Outgoing | EdgeDirection::Unspecified => {
                     e.source.entity_type == entity_type && e.source.node_id == node_id
@@ -303,6 +353,10 @@ impl EdgeService for EdgeServiceImpl {
 
         Ok(Response::new(Box::pin(stream)))
     }
+}
+
+fn direction_filter_required(direction: EdgeDirection) -> bool {
+    !matches!(direction, EdgeDirection::Both)
 }
 
 fn decode_offset_cursor(cursor: &[u8]) -> Result<usize, Status> {

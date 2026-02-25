@@ -48,12 +48,8 @@ impl CelEnvironment {
             message: e.to_string(),
         })?;
 
-        // Check that referenced fields exist in schema
-        // This is a simple heuristic - we look for identifiers that might be field names
-        for prop_name in self.schema.properties.keys() {
-            // The expression is valid if it compiles
-            // Full type checking would require walking the AST
-        }
+        // The expression is currently considered valid if it compiles.
+        // Full schema-aware type checking requires walking the CEL AST.
 
         Ok(expression.to_string())
     }

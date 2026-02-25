@@ -29,15 +29,22 @@ pub fn to_status(err: PelagoError) -> Status {
 
         // Consistency errors
         PelagoError::UniqueConstraintViolation { .. } => Code::AlreadyExists,
-        PelagoError::VersionConflict { .. } | PelagoError::SchemaMismatch { .. } => Code::Aborted,
+        PelagoError::VersionConflict { .. }
+        | PelagoError::SchemaMismatch { .. }
+        | PelagoError::TxConflictRetryExhausted { .. }
+        | PelagoError::SnapshotExpired { .. } => Code::Aborted,
+        PelagoError::SnapshotBudgetExceeded { .. } => Code::FailedPrecondition,
 
         // Timeout errors -> DEADLINE_EXCEEDED
         PelagoError::QueryTimeout { .. }
         | PelagoError::TraversalTimeout { .. }
-        | PelagoError::TransactionTimeout => Code::DeadlineExceeded,
+        | PelagoError::TransactionTimeout
+        | PelagoError::TxWallBudgetExceeded { .. } => Code::DeadlineExceeded,
 
         // Resource errors -> RESOURCE_EXHAUSTED
-        PelagoError::TraversalLimit { .. } => Code::ResourceExhausted,
+        PelagoError::TraversalLimit { .. } | PelagoError::MutationScopeTooLarge { .. } => {
+            Code::ResourceExhausted
+        }
 
         // Internal errors -> INTERNAL / UNAVAILABLE
         PelagoError::FdbUnavailable(_) => Code::Unavailable,

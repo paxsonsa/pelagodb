@@ -118,6 +118,41 @@ pub enum PelagoError {
         current_count: u32,
     },
 
+    #[error(
+        "Mutation scope too large for inline execution ({operation}): keys={estimated_mutated_keys}, bytes={estimated_write_bytes}, edges={estimated_cascade_edges}, recommended_mode={recommended_mode}"
+    )]
+    MutationScopeTooLarge {
+        operation: String,
+        estimated_mutated_keys: usize,
+        estimated_write_bytes: usize,
+        estimated_cascade_edges: usize,
+        recommended_mode: String,
+    },
+
+    #[error("Transaction conflict retry budget exhausted ({operation}) after {attempts} attempts")]
+    TxConflictRetryExhausted { operation: String, attempts: u32 },
+
+    #[error("Transaction wall time budget exceeded ({operation}): {elapsed_ms}ms > {budget_ms}ms")]
+    TxWallBudgetExceeded {
+        operation: String,
+        elapsed_ms: u64,
+        budget_ms: u64,
+    },
+
+    #[error(
+        "Strict snapshot budget exceeded ({operation}): scanned_keys={scanned_keys}, result_bytes={result_bytes}, elapsed_ms={elapsed_ms}, budget_ms={budget_ms}"
+    )]
+    SnapshotBudgetExceeded {
+        operation: String,
+        scanned_keys: usize,
+        result_bytes: usize,
+        elapsed_ms: u64,
+        budget_ms: u64,
+    },
+
+    #[error("Strict snapshot expired ({operation})")]
+    SnapshotExpired { operation: String },
+
     // Internal errors
     #[error("FDB unavailable: {0}")]
     FdbUnavailable(String),
@@ -152,6 +187,15 @@ impl PelagoError {
             PelagoError::TraversalTimeout { .. } => "ERR_TIMEOUT_TRAVERSAL",
             PelagoError::TransactionTimeout => "ERR_TIMEOUT_TRANSACTION",
             PelagoError::TraversalLimit { .. } => "ERR_RESOURCE_TRAVERSAL_LIMIT",
+            PelagoError::MutationScopeTooLarge { .. } => "ERR_RESOURCE_MUTATION_SCOPE_TOO_LARGE",
+            PelagoError::TxConflictRetryExhausted { .. } => {
+                "ERR_CONSISTENCY_TX_CONFLICT_RETRY_EXHAUSTED"
+            }
+            PelagoError::TxWallBudgetExceeded { .. } => "ERR_TIMEOUT_TX_WALL_BUDGET_EXCEEDED",
+            PelagoError::SnapshotBudgetExceeded { .. } => {
+                "ERR_CONSISTENCY_SNAPSHOT_BUDGET_EXCEEDED"
+            }
+            PelagoError::SnapshotExpired { .. } => "ERR_CONSISTENCY_SNAPSHOT_EXPIRED",
             PelagoError::FdbUnavailable(_) => "ERR_INTERNAL_FDB_UNAVAILABLE",
             PelagoError::Internal(_) => "ERR_INTERNAL_UNEXPECTED",
         }
@@ -179,13 +223,19 @@ impl PelagoError {
 
             PelagoError::UniqueConstraintViolation { .. }
             | PelagoError::VersionConflict { .. }
-            | PelagoError::SchemaMismatch { .. } => "CONSISTENCY",
+            | PelagoError::SchemaMismatch { .. }
+            | PelagoError::TxConflictRetryExhausted { .. }
+            | PelagoError::SnapshotBudgetExceeded { .. }
+            | PelagoError::SnapshotExpired { .. } => "CONSISTENCY",
 
             PelagoError::QueryTimeout { .. }
             | PelagoError::TraversalTimeout { .. }
-            | PelagoError::TransactionTimeout => "TIMEOUT",
+            | PelagoError::TransactionTimeout
+            | PelagoError::TxWallBudgetExceeded { .. } => "TIMEOUT",
 
-            PelagoError::TraversalLimit { .. } => "RESOURCE",
+            PelagoError::TraversalLimit { .. } | PelagoError::MutationScopeTooLarge { .. } => {
+                "RESOURCE"
+            }
 
             PelagoError::FdbUnavailable(_) | PelagoError::Internal(_) => "INTERNAL",
         }
@@ -264,6 +314,60 @@ impl PelagoError {
             } => {
                 m.insert("max_results".into(), max_results.to_string());
                 m.insert("current_count".into(), current_count.to_string());
+            }
+            PelagoError::MutationScopeTooLarge {
+                operation,
+                estimated_mutated_keys,
+                estimated_write_bytes,
+                estimated_cascade_edges,
+                recommended_mode,
+            } => {
+                m.insert("operation".into(), operation.clone());
+                m.insert(
+                    "estimated_mutated_keys".into(),
+                    estimated_mutated_keys.to_string(),
+                );
+                m.insert(
+                    "estimated_write_bytes".into(),
+                    estimated_write_bytes.to_string(),
+                );
+                m.insert(
+                    "estimated_cascade_edges".into(),
+                    estimated_cascade_edges.to_string(),
+                );
+                m.insert("recommended_mode".into(), recommended_mode.clone());
+            }
+            PelagoError::TxConflictRetryExhausted {
+                operation,
+                attempts,
+            } => {
+                m.insert("operation".into(), operation.clone());
+                m.insert("attempts".into(), attempts.to_string());
+            }
+            PelagoError::TxWallBudgetExceeded {
+                operation,
+                elapsed_ms,
+                budget_ms,
+            } => {
+                m.insert("operation".into(), operation.clone());
+                m.insert("elapsed_ms".into(), elapsed_ms.to_string());
+                m.insert("budget_ms".into(), budget_ms.to_string());
+            }
+            PelagoError::SnapshotBudgetExceeded {
+                operation,
+                scanned_keys,
+                result_bytes,
+                elapsed_ms,
+                budget_ms,
+            } => {
+                m.insert("operation".into(), operation.clone());
+                m.insert("scanned_keys".into(), scanned_keys.to_string());
+                m.insert("result_bytes".into(), result_bytes.to_string());
+                m.insert("elapsed_ms".into(), elapsed_ms.to_string());
+                m.insert("budget_ms".into(), budget_ms.to_string());
+            }
+            PelagoError::SnapshotExpired { operation } => {
+                m.insert("operation".into(), operation.clone());
             }
             _ => {}
         }

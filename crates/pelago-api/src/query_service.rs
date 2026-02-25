@@ -9,11 +9,13 @@ use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::core_to_proto_properties;
 use cel_interpreter::{Context as CelContext, Program as CelProgram, Value as CelValue};
+use pelago_core::PelagoError;
 use pelago_core::Value as CoreValue;
 use pelago_proto::{
     query_service_server::QueryService, Edge, EdgeDirection, ExecutePqlRequest, ExplainRequest,
     ExplainResponse, FindNodesRequest, IndexOperation, Node, NodeRef as ProtoNodeRef, NodeResult,
-    PqlResult, QueryPlan, TraverseRequest, TraverseResult,
+    PqlResult, QueryPlan, SnapshotConsistencyApplied, SnapshotMode, TraverseRequest,
+    TraverseResult,
 };
 use pelago_query::plan::QueryExplanation;
 use pelago_query::planner::QueryPlanner;
@@ -21,8 +23,10 @@ use pelago_query::pql::{
     explain_query, parse_pql, InMemorySchemaProvider, PqlCompiler, PqlParseError, PqlResolver,
     SchemaInfo, SetOp,
 };
-use pelago_query::traversal::{TraversalConfig, TraversalDirection, TraversalEngine, TraversalHop};
-use pelago_query::QueryExecutor;
+use pelago_query::traversal::{
+    TraversalConfig, TraversalDirection, TraversalEngine, TraversalHop, TraversalReadOptions,
+};
+use pelago_query::{QueryExecutor, ReadExecutionOptions};
 use pelago_storage::{
     IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode,
 };
@@ -35,10 +39,21 @@ use tonic::{Request, Response, Status};
 const OFFSET_CURSOR_LEN: usize = 8;
 const NODE_ID_CURSOR_LEN: usize = 9;
 const KEYSET_CURSOR_VERSION: u8 = 1;
+const C5_STRICT_MAX_SNAPSHOT_MS: u64 = 2_000;
+const C5_STRICT_MAX_SCAN_KEYS: usize = 50_000;
+const C5_STRICT_MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 
 enum FindNodesCursor {
     Offset(usize),
     Keyset(Option<Vec<u8>>),
+}
+
+#[derive(Clone)]
+struct SnapshotResponseMeta {
+    consistency_applied: SnapshotConsistencyApplied,
+    snapshot_read_version: Option<i64>,
+    degraded: bool,
+    degraded_reason: String,
 }
 
 /// Query service implementation
@@ -96,6 +111,22 @@ impl QueryService for QueryServiceImpl {
         )
         .await?;
         let cel_expression = req.cel_expression;
+        let snapshot_mode = default_find_nodes_snapshot_mode(req.snapshot_mode);
+        let allow_degrade = req.allow_degrade_to_best_effort;
+        let strict_read_version = if snapshot_mode == SnapshotMode::Strict {
+            Some(
+                self.db
+                    .get_read_version()
+                    .await
+                    .map_err(|e| e.into_status())?,
+            )
+        } else {
+            None
+        };
+        let read_options = ReadExecutionOptions {
+            read_version: strict_read_version,
+        };
+
         let page_size = if req.limit > 0 {
             req.limit as usize
         } else {
@@ -110,7 +141,7 @@ impl QueryService for QueryServiceImpl {
             Some(req.fields.into_iter().collect())
         };
 
-        let (page_nodes, next_cursor) = match cursor_mode {
+        let (page_nodes, next_cursor, scanned_keys, result_bytes, elapsed_ms) = match cursor_mode {
             // Legacy compatibility path for older offset cursors.
             FindNodesCursor::Offset(cursor_offset) => {
                 let fetch_limit = cursor_offset
@@ -121,7 +152,7 @@ impl QueryService for QueryServiceImpl {
 
                 let maybe_term_results = self
                     .query_executor
-                    .execute_term_expression(
+                    .execute_term_expression_with_options(
                         &ctx.database,
                         &ctx.namespace,
                         &entity_type,
@@ -129,6 +160,7 @@ impl QueryService for QueryServiceImpl {
                         projection.clone(),
                         limit,
                         None,
+                        read_options,
                     )
                     .await
                     .map_err(|e| e.into_status())?;
@@ -155,10 +187,13 @@ impl QueryService for QueryServiceImpl {
                     .map_err(|e| e.into_status())?;
 
                     self.query_executor
-                        .execute(&ctx.database, &ctx.namespace, &plan)
+                        .execute_with_options(&ctx.database, &ctx.namespace, &plan, read_options)
                         .await
                         .map_err(|e| e.into_status())?
                 };
+                let scanned_keys = results.scanned_keys;
+                let result_bytes = results.result_bytes;
+                let elapsed_ms = results.elapsed_ms;
 
                 let total = results.nodes.len();
                 let start = cursor_offset.min(total);
@@ -175,7 +210,13 @@ impl QueryService for QueryServiceImpl {
                     .skip(start)
                     .take(page_size)
                     .collect();
-                (page_nodes, next_cursor)
+                (
+                    page_nodes,
+                    next_cursor,
+                    scanned_keys,
+                    result_bytes,
+                    elapsed_ms,
+                )
             }
             // Default path: keyset cursor by node id bytes.
             FindNodesCursor::Keyset(cursor_node_id) => {
@@ -184,7 +225,7 @@ impl QueryService for QueryServiceImpl {
 
                 let maybe_term_results = self
                     .query_executor
-                    .execute_term_expression(
+                    .execute_term_expression_with_options(
                         &ctx.database,
                         &ctx.namespace,
                         &entity_type,
@@ -192,6 +233,7 @@ impl QueryService for QueryServiceImpl {
                         projection.clone(),
                         limit,
                         cursor_node_id.as_deref(),
+                        read_options,
                     )
                     .await
                     .map_err(|e| e.into_status())?;
@@ -221,10 +263,13 @@ impl QueryService for QueryServiceImpl {
                     }
 
                     self.query_executor
-                        .execute(&ctx.database, &ctx.namespace, &plan)
+                        .execute_with_options(&ctx.database, &ctx.namespace, &plan, read_options)
                         .await
                         .map_err(|e| e.into_status())?
                 };
+                let scanned_keys = results.scanned_keys;
+                let result_bytes = results.result_bytes;
+                let elapsed_ms = results.elapsed_ms;
 
                 let next_cursor = if results.has_more {
                     results
@@ -235,9 +280,24 @@ impl QueryService for QueryServiceImpl {
                 } else {
                     Vec::new()
                 };
-                (results.nodes, next_cursor)
+                (
+                    results.nodes,
+                    next_cursor,
+                    scanned_keys,
+                    result_bytes,
+                    elapsed_ms,
+                )
             }
         };
+        let snapshot_meta = validate_snapshot_guardrail(
+            "find_nodes",
+            snapshot_mode,
+            allow_degrade,
+            strict_read_version,
+            scanned_keys,
+            result_bytes,
+            elapsed_ms,
+        )?;
         let last_idx = page_nodes.len().saturating_sub(1);
 
         let stream =
@@ -257,6 +317,10 @@ impl QueryService for QueryServiceImpl {
                         updated_at: node.updated_at,
                     }),
                     next_cursor: item_cursor,
+                    consistency_applied: snapshot_meta.consistency_applied as i32,
+                    snapshot_read_version: snapshot_meta.snapshot_read_version.unwrap_or_default(),
+                    degraded: snapshot_meta.degraded,
+                    degraded_reason: snapshot_meta.degraded_reason.clone(),
                 })
             }));
 
@@ -286,6 +350,18 @@ impl QueryService for QueryServiceImpl {
         let start = req
             .start
             .ok_or_else(|| Status::invalid_argument("missing start node"))?;
+        let snapshot_mode = default_traverse_snapshot_mode(req.snapshot_mode);
+        let allow_degrade = req.allow_degrade_to_best_effort;
+        let strict_read_version = if snapshot_mode == SnapshotMode::Strict {
+            Some(
+                self.db
+                    .get_read_version()
+                    .await
+                    .map_err(|e| e.into_status())?,
+            )
+        } else {
+            None
+        };
 
         let hops: Vec<TraversalHop> = req
             .steps
@@ -329,7 +405,7 @@ impl QueryService for QueryServiceImpl {
         );
 
         let results = engine
-            .traverse(
+            .traverse_with_options(
                 &ctx.database,
                 &ctx.namespace,
                 &start.entity_type,
@@ -340,9 +416,21 @@ impl QueryService for QueryServiceImpl {
                 } else {
                     Some(req.cursor.as_slice())
                 },
+                TraversalReadOptions {
+                    read_version: strict_read_version,
+                },
             )
             .await
             .map_err(|e| e.into_status())?;
+        let snapshot_meta = validate_snapshot_guardrail(
+            "traverse",
+            snapshot_mode,
+            allow_degrade,
+            strict_read_version,
+            results.scanned_keys,
+            results.result_bytes,
+            results.elapsed_ms,
+        )?;
 
         let mut out = Vec::new();
         let last_idx = results.paths.len().saturating_sub(1);
@@ -367,6 +455,10 @@ impl QueryService for QueryServiceImpl {
                 node,
                 edge,
                 next_cursor,
+                consistency_applied: snapshot_meta.consistency_applied as i32,
+                snapshot_read_version: snapshot_meta.snapshot_read_version.unwrap_or_default(),
+                degraded: snapshot_meta.degraded,
+                degraded_reason: snapshot_meta.degraded_reason.clone(),
             });
         }
 
@@ -377,6 +469,10 @@ impl QueryService for QueryServiceImpl {
                 node: None,
                 edge: None,
                 next_cursor: results.continuation_token.unwrap_or_default(),
+                consistency_applied: snapshot_meta.consistency_applied as i32,
+                snapshot_read_version: snapshot_meta.snapshot_read_version.unwrap_or_default(),
+                degraded: snapshot_meta.degraded,
+                degraded_reason: snapshot_meta.degraded_reason.clone(),
             });
         }
 
@@ -683,6 +779,69 @@ impl QueryService for QueryServiceImpl {
         let stream = tokio_stream::iter(out.into_iter().map(Ok));
         Ok(Response::new(Box::pin(stream)))
     }
+}
+
+fn default_find_nodes_snapshot_mode(raw: i32) -> SnapshotMode {
+    match SnapshotMode::try_from(raw).unwrap_or(SnapshotMode::Unspecified) {
+        SnapshotMode::Unspecified => SnapshotMode::Strict,
+        other => other,
+    }
+}
+
+fn default_traverse_snapshot_mode(raw: i32) -> SnapshotMode {
+    match SnapshotMode::try_from(raw).unwrap_or(SnapshotMode::Unspecified) {
+        SnapshotMode::Unspecified => SnapshotMode::BestEffort,
+        other => other,
+    }
+}
+
+fn validate_snapshot_guardrail(
+    operation: &str,
+    mode: SnapshotMode,
+    allow_degrade: bool,
+    strict_read_version: Option<i64>,
+    scanned_keys: usize,
+    result_bytes: usize,
+    elapsed_ms: u64,
+) -> Result<SnapshotResponseMeta, Status> {
+    let mut meta = SnapshotResponseMeta {
+        consistency_applied: if mode == SnapshotMode::Strict {
+            SnapshotConsistencyApplied::Strict
+        } else {
+            SnapshotConsistencyApplied::BestEffort
+        },
+        snapshot_read_version: strict_read_version,
+        degraded: false,
+        degraded_reason: String::new(),
+    };
+
+    if mode != SnapshotMode::Strict {
+        return Ok(meta);
+    }
+
+    let exceeded = scanned_keys > C5_STRICT_MAX_SCAN_KEYS
+        || result_bytes > C5_STRICT_MAX_RESULT_BYTES
+        || elapsed_ms > C5_STRICT_MAX_SNAPSHOT_MS;
+    if !exceeded {
+        return Ok(meta);
+    }
+
+    if allow_degrade {
+        meta.consistency_applied = SnapshotConsistencyApplied::BestEffort;
+        meta.snapshot_read_version = None;
+        meta.degraded = true;
+        meta.degraded_reason = "SNAPSHOT_BUDGET_EXCEEDED".to_string();
+        return Ok(meta);
+    }
+
+    Err(PelagoError::SnapshotBudgetExceeded {
+        operation: operation.to_string(),
+        scanned_keys,
+        result_bytes,
+        elapsed_ms,
+        budget_ms: C5_STRICT_MAX_SNAPSHOT_MS,
+    }
+    .into_status())
 }
 
 fn stored_node_ref_to_proto(node: &StoredNode) -> ProtoNodeRef {

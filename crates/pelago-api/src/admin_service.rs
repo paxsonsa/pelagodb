@@ -8,13 +8,16 @@
 //! - DropNamespace: Remove an entire namespace
 
 use crate::authz::{authorize, principal_from_request};
+use crate::error::ToStatus;
+use pelago_core::PelagoError;
 use pelago_proto::{
     admin_service_server::AdminService, DropEntityTypeRequest, DropEntityTypeResponse,
     DropIndexRequest, DropIndexResponse, DropNamespaceRequest, DropNamespaceResponse,
     GetJobStatusRequest, GetJobStatusResponse, GetReplicationStatusRequest,
     GetReplicationStatusResponse, Job, JobStatus, ListJobsRequest, ListJobsResponse,
-    ListSitesRequest, ListSitesResponse, QueryAuditLogRequest, QueryAuditLogResponse,
-    ReplicationPeerStatus, SiteInfo, StripPropertyRequest, StripPropertyResponse,
+    ListSitesRequest, ListSitesResponse, MutationExecutionMode, QueryAuditLogRequest,
+    QueryAuditLogResponse, ReplicationPeerStatus, SiteInfo, StripPropertyRequest,
+    StripPropertyResponse,
 };
 use pelago_storage::{
     get_replication_positions_scoped, list_sites, query_audit_records,
@@ -22,6 +25,9 @@ use pelago_storage::{
 };
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+
+const C4_TX_MAX_MUTATED_KEYS: usize = 5_000;
+const C4_TX_MAX_WRITE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Admin service implementation
 pub struct AdminServiceImpl {
@@ -181,6 +187,12 @@ impl AdminService for AdminServiceImpl {
             .context
             .ok_or_else(|| Status::invalid_argument("missing context"))?;
         let entity_type = req.entity_type;
+        let mutation_mode = match MutationExecutionMode::try_from(req.mutation_mode)
+            .unwrap_or(MutationExecutionMode::Unspecified)
+        {
+            MutationExecutionMode::Unspecified => MutationExecutionMode::AsyncAllowed,
+            other => other,
+        };
         authorize(
             self.db.as_ref(),
             principal.as_ref(),
@@ -218,6 +230,80 @@ impl AdminService for AdminServiceImpl {
             .add_string(&entity_type)
             .build()
             .to_vec();
+
+        let probe_limit = C4_TX_MAX_MUTATED_KEYS.saturating_add(1);
+        let schema_count = count_prefix_entries_up_to(&self.db, &schema_prefix, probe_limit)
+            .await
+            .map_err(|e| Status::internal(format!("failed to estimate schema scope: {}", e)))?;
+        let data_count = count_prefix_entries_up_to(&self.db, &data_prefix, probe_limit)
+            .await
+            .map_err(|e| Status::internal(format!("failed to estimate data scope: {}", e)))?;
+        let idx_count = count_prefix_entries_up_to(&self.db, &idx_prefix, probe_limit)
+            .await
+            .map_err(|e| Status::internal(format!("failed to estimate index scope: {}", e)))?;
+        let edge_forward_count =
+            count_prefix_entries_up_to(&self.db, &edge_forward_prefix, probe_limit)
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("failed to estimate forward edge scope: {}", e))
+                })?;
+        let edge_meta_count = count_prefix_entries_up_to(&self.db, &edge_meta_prefix, probe_limit)
+            .await
+            .map_err(|e| {
+                Status::internal(format!("failed to estimate edge metadata scope: {}", e))
+            })?;
+        let edge_reverse_count =
+            count_prefix_entries_up_to(&self.db, &edge_reverse_target_prefix, probe_limit)
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("failed to estimate reverse edge scope: {}", e))
+                })?;
+
+        let estimated_mutated_keys = schema_count
+            .saturating_add(data_count)
+            .saturating_add(idx_count)
+            .saturating_add(edge_forward_count)
+            .saturating_add(edge_meta_count)
+            .saturating_add(edge_reverse_count);
+        let estimated_write_bytes = estimated_mutated_keys.saturating_mul(256);
+        if estimated_mutated_keys > C4_TX_MAX_MUTATED_KEYS
+            || estimated_write_bytes > C4_TX_MAX_WRITE_BYTES
+        {
+            let mode_label = match mutation_mode {
+                MutationExecutionMode::InlineStrict => "INLINE_STRICT",
+                MutationExecutionMode::AsyncAllowed => "ASYNC_ALLOWED",
+                MutationExecutionMode::Unspecified => "UNSPECIFIED",
+            };
+            if mutation_mode == MutationExecutionMode::AsyncAllowed {
+                let job = JobStore::new(self.db.as_ref().clone())
+                    .create_job(
+                        &ctx.database,
+                        &ctx.namespace,
+                        JobType::DropEntityTypeCleanup {
+                            entity_type: entity_type.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "failed to create drop-entity-type cleanup job: {}",
+                            e
+                        ))
+                    })?;
+                return Ok(Response::new(DropEntityTypeResponse {
+                    cleanup_job_id: job.job_id,
+                }));
+            }
+
+            return Err(PelagoError::MutationScopeTooLarge {
+                operation: format!("drop_entity_type({mode_label})"),
+                estimated_mutated_keys,
+                estimated_write_bytes,
+                estimated_cascade_edges: edge_forward_count.saturating_add(edge_reverse_count),
+                recommended_mode: "ASYNC_ALLOWED".to_string(),
+            }
+            .into_status());
+        }
 
         clear_prefix_entries(&self.db, &schema_prefix)
             .await
@@ -471,4 +557,18 @@ async fn clear_prefix_entries(
     }
 
     Ok(deleted)
+}
+
+async fn count_prefix_entries_up_to(
+    db: &PelagoDb,
+    prefix: &[u8],
+    cap: usize,
+) -> Result<usize, pelago_core::PelagoError> {
+    if cap == 0 {
+        return Ok(0);
+    }
+    let mut range_end = prefix.to_vec();
+    range_end.push(0xFF);
+    let rows = db.get_range(prefix, &range_end, cap).await?;
+    Ok(rows.len())
 }

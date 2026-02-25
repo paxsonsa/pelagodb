@@ -15,7 +15,9 @@ pub mod traversal;
 
 // Re-export main types
 pub use cel::{CelEnvironment, CelExpression};
-pub use executor::{ExecutorConfig, QueryExecutor, QueryResultStream, QueryResults};
+pub use executor::{
+    ExecutorConfig, QueryExecutor, QueryResultStream, QueryResults, ReadExecutionOptions,
+};
 pub use plan::{
     ExecutionPlan, IndexPredicate, PredicateValue, QueryExplanation, QueryPlan, RangeBound,
 };
@@ -26,5 +28,5 @@ pub use pql::{
 };
 pub use traversal::{
     PathHop, TraversalConfig, TraversalDirection, TraversalEngine, TraversalHop, TraversalPath,
-    TraversalResults, TraversalStream,
+    TraversalReadOptions, TraversalResults, TraversalStream,
 };

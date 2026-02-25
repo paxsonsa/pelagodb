@@ -84,6 +84,8 @@ pub async fn run(
                     fields: vec![],
                     limit,
                     cursor,
+                    snapshot_mode: pelago_proto::SnapshotMode::Strict as i32,
+                    allow_degrade_to_best_effort: false,
                 })
                 .await?
                 .into_inner();
@@ -137,6 +139,8 @@ pub async fn run(
                     consistency: ReadConsistency::Strong as i32,
                     cascade: false,
                     cursor: vec![],
+                    snapshot_mode: pelago_proto::SnapshotMode::BestEffort as i32,
+                    allow_degrade_to_best_effort: true,
                 })
                 .await?
                 .into_inner();

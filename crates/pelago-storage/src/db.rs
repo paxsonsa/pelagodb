@@ -119,9 +119,21 @@ impl PelagoDb {
 
     /// Get a value by key
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PelagoError> {
+        self.get_at_read_version(key, None).await
+    }
+
+    /// Get a value by key at an optional pinned read version.
+    pub async fn get_at_read_version(
+        &self,
+        key: &[u8],
+        read_version: Option<i64>,
+    ) -> Result<Option<Vec<u8>>, PelagoError> {
         let trx = self.fdb.create_trx().map_err(|e| {
             PelagoError::FdbUnavailable(format!("Failed to create transaction: {}", e))
         })?;
+        if let Some(version) = read_version {
+            trx.set_read_version(version);
+        }
 
         let result = trx
             .get(key, false)
@@ -183,6 +195,18 @@ impl PelagoDb {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, PelagoError> {
+        self.get_range_at_read_version(begin, end, limit, None)
+            .await
+    }
+
+    /// Get a range of key-value pairs at an optional pinned read version.
+    pub async fn get_range_at_read_version(
+        &self,
+        begin: &[u8],
+        end: &[u8],
+        limit: usize,
+        read_version: Option<i64>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, PelagoError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -190,6 +214,9 @@ impl PelagoDb {
         let trx = self.fdb.create_trx().map_err(|e| {
             PelagoError::FdbUnavailable(format!("Failed to create transaction: {}", e))
         })?;
+        if let Some(version) = read_version {
+            trx.set_read_version(version);
+        }
 
         let mut range_option = RangeOption {
             limit: Some(limit),
