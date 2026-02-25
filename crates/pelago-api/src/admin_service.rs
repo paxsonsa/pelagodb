@@ -9,6 +9,7 @@
 
 use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
+use pelago_core::encoding::decode_cbor;
 use pelago_core::PelagoError;
 use pelago_proto::{
     admin_service_server::AdminService, DropEntityTypeRequest, DropEntityTypeResponse,
@@ -23,6 +24,7 @@ use pelago_storage::{
     get_replication_positions_scoped, list_sites, query_audit_records,
     JobStatus as StorageJobStatus, JobStore, JobType, PelagoDb, Subspace,
 };
+use serde::Deserialize;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
@@ -317,6 +319,20 @@ impl AdminService for AdminServiceImpl {
         clear_prefix_entries(&self.db, &edge_forward_prefix)
             .await
             .map_err(|e| Status::internal(format!("failed to clear forward edges: {}", e)))?;
+        clear_reverse_keys_for_source_type(
+            self.db.as_ref(),
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+            1000,
+        )
+        .await
+        .map_err(|e| {
+            Status::internal(format!(
+                "failed to clear reverse edges by dropped source type: {}",
+                e
+            ))
+        })?;
         clear_prefix_entries(&self.db, &edge_meta_prefix)
             .await
             .map_err(|e| Status::internal(format!("failed to clear edge metadata: {}", e)))?;
@@ -519,6 +535,16 @@ fn storage_status_to_proto(status: StorageJobStatus) -> i32 {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct EdgeMetaEnvelope {
+    #[serde(default)]
+    source: Option<pelago_storage::NodeRef>,
+    #[serde(default)]
+    target: Option<pelago_storage::NodeRef>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
 fn storage_job_to_proto_job(job: pelago_storage::JobState) -> Job {
     Job {
         job_id: job.job_id,
@@ -557,6 +583,95 @@ async fn clear_prefix_entries(
     }
 
     Ok(deleted)
+}
+
+async fn clear_reverse_keys_for_source_type(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    source_entity_type: &str,
+    batch_size: usize,
+) -> Result<i64, pelago_core::PelagoError> {
+    let edge_subspace = Subspace::namespace(database, namespace).edge();
+    let meta_prefix = edge_subspace
+        .pack()
+        .add_marker(pelago_storage::subspace::edge_markers::FORWARD_META)
+        .add_string(source_entity_type)
+        .build()
+        .to_vec();
+    let range_end = {
+        let mut end = meta_prefix.clone();
+        end.push(0xFF);
+        end
+    };
+    let mut range_start = meta_prefix;
+    let mut cleared = 0i64;
+
+    loop {
+        let rows = db
+            .get_range(&range_start, &range_end, batch_size.max(1))
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+
+        let trx = db.create_transaction()?;
+        let mut has_mutations = false;
+
+        for (_meta_key, meta_value) in &rows {
+            let edge: EdgeMetaEnvelope = match decode_cbor(meta_value) {
+                Ok(edge) => edge,
+                Err(_) => continue,
+            };
+            let (source, target, label) = match (
+                edge.source.as_ref(),
+                edge.target.as_ref(),
+                edge.label.as_deref(),
+            ) {
+                (Some(source), Some(target), Some(label)) if !label.is_empty() => {
+                    (source, target, label)
+                }
+                _ => continue,
+            };
+
+            let reverse_key = edge_subspace
+                .pack()
+                .add_marker(pelago_storage::subspace::edge_markers::REVERSE)
+                .add_string(&target.database)
+                .add_string(&target.namespace)
+                .add_string(&target.entity_type)
+                .add_string(&target.node_id)
+                .add_string(label)
+                .add_string(&source.entity_type)
+                .add_string(&source.node_id)
+                .build();
+            trx.clear(reverse_key.as_ref());
+            has_mutations = true;
+            cleared = cleared.saturating_add(1);
+        }
+
+        if has_mutations {
+            trx.commit().await.map_err(|e| {
+                pelago_core::PelagoError::Internal(format!(
+                    "clear reverse keys by source type commit failed: {}",
+                    e
+                ))
+            })?;
+        }
+
+        if rows.len() < batch_size.max(1) {
+            break;
+        }
+        if let Some((last_key, _)) = rows.last() {
+            let mut next = last_key.clone();
+            next.push(0x00);
+            range_start = next;
+        } else {
+            break;
+        }
+    }
+
+    Ok(cleared)
 }
 
 async fn count_prefix_entries_up_to(

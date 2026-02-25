@@ -663,6 +663,15 @@ struct DropEntityTypeCursor {
     next_start: Option<Vec<u8>>,
 }
 
+const DROP_TYPE_PHASE_SCHEMA: u8 = 0;
+const DROP_TYPE_PHASE_DATA: u8 = 1;
+const DROP_TYPE_PHASE_INDEX: u8 = 2;
+const DROP_TYPE_PHASE_EDGE_FORWARD: u8 = 3;
+const DROP_TYPE_PHASE_EDGE_REVERSE_BY_SOURCE: u8 = 4;
+const DROP_TYPE_PHASE_EDGE_META: u8 = 5;
+const DROP_TYPE_PHASE_EDGE_REVERSE_TARGET: u8 = 6;
+const DROP_TYPE_PHASE_DONE: u8 = 7;
+
 /// Deletes all keys for one entity type in bounded batches.
 pub struct DropEntityTypeCleanupExecutor;
 
@@ -681,19 +690,104 @@ impl JobExecutor for DropEntityTypeCleanupExecutor {
 
         let mut state = match &job.progress_cursor {
             Some(raw) => decode_cbor::<DropEntityTypeCursor>(raw).unwrap_or(DropEntityTypeCursor {
-                phase: 0,
+                phase: DROP_TYPE_PHASE_SCHEMA,
                 next_start: None,
             }),
             None => DropEntityTypeCursor {
-                phase: 0,
+                phase: DROP_TYPE_PHASE_SCHEMA,
                 next_start: None,
             },
         };
 
-        let prefixes = drop_type_prefixes(&job.database, &job.namespace, &entity_type);
+        while state.phase < DROP_TYPE_PHASE_DONE {
+            if state.phase == DROP_TYPE_PHASE_EDGE_REVERSE_BY_SOURCE {
+                let edge_subspace = Subspace::namespace(&job.database, &job.namespace).edge();
+                let meta_prefix = edge_subspace
+                    .pack()
+                    .add_marker(edge_markers::FORWARD_META)
+                    .add_string(&entity_type)
+                    .build()
+                    .to_vec();
+                let range_start = state.next_start.clone().unwrap_or_else(|| meta_prefix.clone());
+                let range_end = {
+                    let mut end = meta_prefix.clone();
+                    end.push(0xFF);
+                    end
+                };
 
-        while (state.phase as usize) < prefixes.len() {
-            let phase_prefix = &prefixes[state.phase as usize];
+                let rows = db
+                    .get_range(&range_start, &range_end, batch_size.max(1))
+                    .await?;
+                if rows.is_empty() {
+                    state.phase = state.phase.saturating_add(1);
+                    state.next_start = None;
+                    continue;
+                }
+
+                let mut cleared = 0usize;
+                let trx = db.create_transaction()?;
+                for (_meta_key, meta_value) in &rows {
+                    let edge: EdgeMetaEnvelope = match decode_cbor(meta_value) {
+                        Ok(edge) => edge,
+                        Err(_) => continue,
+                    };
+                    let (source, target, label) = match (
+                        edge.source.as_ref(),
+                        edge.target.as_ref(),
+                        edge.label.as_deref(),
+                    ) {
+                        (Some(source), Some(target), Some(label)) if !label.is_empty() => {
+                            (source, target, label)
+                        }
+                        _ => continue,
+                    };
+                    let reverse_key = edge_subspace
+                        .pack()
+                        .add_marker(edge_markers::REVERSE)
+                        .add_string(&target.database)
+                        .add_string(&target.namespace)
+                        .add_string(&target.entity_type)
+                        .add_string(&target.node_id)
+                        .add_string(label)
+                        .add_string(&source.entity_type)
+                        .add_string(&source.node_id)
+                        .build();
+                    trx.clear(reverse_key.as_ref());
+                    cleared = cleared.saturating_add(1);
+                }
+
+                if cleared > 0 {
+                    trx.commit().await.map_err(|e| {
+                        PelagoError::Internal(format!(
+                            "DropEntityTypeCleanup reverse-source commit failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+
+                job.processed_items = job.processed_items.saturating_add(rows.len() as u64);
+                if rows.len() < batch_size.max(1) {
+                    state.phase = state.phase.saturating_add(1);
+                    state.next_start = None;
+                } else if let Some((last_key, _)) = rows.last() {
+                    let mut next = last_key.clone();
+                    next.push(0x00);
+                    state.next_start = Some(next);
+                }
+
+                if state.phase < DROP_TYPE_PHASE_DONE {
+                    job.progress_cursor = Some(encode_cbor(&state)?);
+                    return Ok(true);
+                }
+                break;
+            }
+
+            let Some(phase_prefix) =
+                drop_type_phase_prefix(&job.database, &job.namespace, &entity_type, state.phase)
+            else {
+                state.phase = DROP_TYPE_PHASE_DONE;
+                break;
+            };
             let range_start = state
                 .next_start
                 .clone()
@@ -731,10 +825,11 @@ impl JobExecutor for DropEntityTypeCleanupExecutor {
                 state.next_start = Some(next);
             }
 
-            if (state.phase as usize) < prefixes.len() {
+            if state.phase < DROP_TYPE_PHASE_DONE {
                 job.progress_cursor = Some(encode_cbor(&state)?);
                 return Ok(true);
             }
+            break;
         }
 
         job.progress_cursor = None;
@@ -742,41 +837,43 @@ impl JobExecutor for DropEntityTypeCleanupExecutor {
     }
 }
 
-fn drop_type_prefixes(database: &str, namespace: &str, entity_type: &str) -> Vec<Vec<u8>> {
+fn drop_type_phase_prefix(
+    database: &str,
+    namespace: &str,
+    entity_type: &str,
+    phase: u8,
+) -> Option<Vec<u8>> {
     let ns = Subspace::namespace(database, namespace);
-    let schema_prefix = ns.schema().pack().add_string(entity_type).build().to_vec();
-    let data_prefix = ns.data().pack().add_string(entity_type).build().to_vec();
-    let idx_prefix = ns.index().pack().add_string(entity_type).build().to_vec();
-    let edge_forward_prefix = ns
-        .edge()
-        .pack()
-        .add_marker(edge_markers::FORWARD)
-        .add_string(entity_type)
-        .build()
-        .to_vec();
-    let edge_meta_prefix = ns
-        .edge()
-        .pack()
-        .add_marker(edge_markers::FORWARD_META)
-        .add_string(entity_type)
-        .build()
-        .to_vec();
-    let edge_reverse_target_prefix = ns
-        .edge()
-        .pack()
-        .add_marker(edge_markers::REVERSE)
-        .add_string(database)
-        .add_string(namespace)
-        .add_string(entity_type)
-        .build()
-        .to_vec();
-
-    vec![
-        schema_prefix,
-        data_prefix,
-        idx_prefix,
-        edge_forward_prefix,
-        edge_meta_prefix,
-        edge_reverse_target_prefix,
-    ]
+    match phase {
+        DROP_TYPE_PHASE_SCHEMA => Some(ns.schema().pack().add_string(entity_type).build().to_vec()),
+        DROP_TYPE_PHASE_DATA => Some(ns.data().pack().add_string(entity_type).build().to_vec()),
+        DROP_TYPE_PHASE_INDEX => Some(ns.index().pack().add_string(entity_type).build().to_vec()),
+        DROP_TYPE_PHASE_EDGE_FORWARD => Some(
+            ns.edge()
+                .pack()
+                .add_marker(edge_markers::FORWARD)
+                .add_string(entity_type)
+                .build()
+                .to_vec(),
+        ),
+        DROP_TYPE_PHASE_EDGE_META => Some(
+            ns.edge()
+                .pack()
+                .add_marker(edge_markers::FORWARD_META)
+                .add_string(entity_type)
+                .build()
+                .to_vec(),
+        ),
+        DROP_TYPE_PHASE_EDGE_REVERSE_TARGET => Some(
+            ns.edge()
+                .pack()
+                .add_marker(edge_markers::REVERSE)
+                .add_string(database)
+                .add_string(namespace)
+                .add_string(entity_type)
+                .build()
+                .to_vec(),
+        ),
+        _ => None,
+    }
 }
