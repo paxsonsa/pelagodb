@@ -15,5 +15,6 @@ prost.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+metrics.workspace = true
 uuid.workspace = true
 cel-interpreter.workspace = true

@@ -9,6 +9,7 @@
 use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
+use metrics::counter;
 use pelago_core::PelagoError;
 use pelago_proto::{
     node_service_server::NodeService, CreateNodeRequest, CreateNodeResponse, DeleteNodeRequest,
@@ -17,7 +18,7 @@ use pelago_proto::{
     UpdateNodeResponse,
 };
 use pelago_storage::{
-    CachedReadPath, IdAllocator, JobStore, JobType, NodeStore, PelagoDb,
+    CacheFallbackReason, CachedReadPath, IdAllocator, JobStore, JobType, NodeStore, PelagoDb,
     ReadConsistency as CacheReadConsistency, SchemaRegistry,
 };
 use std::sync::Arc;
@@ -122,8 +123,9 @@ impl NodeService for NodeServiceImpl {
         };
 
         let mut stored_node = None;
+        let mut fallback_reason: Option<CacheFallbackReason> = None;
         if let Some(cache) = &self.cached_read_path {
-            stored_node = cache
+            let cache_lookup = cache
                 .get_node(
                     &ctx.database,
                     &ctx.namespace,
@@ -133,9 +135,19 @@ impl NodeService for NodeServiceImpl {
                 )
                 .await
                 .map_err(|e| e.into_status())?;
+            fallback_reason = cache_lookup.fallback_reason();
+            stored_node = cache_lookup.value();
         }
 
         if stored_node.is_none() {
+            if let Some(reason) = fallback_reason {
+                counter!(
+                    "pelago.cache.fallback_to_fdb_total",
+                    "operation" => "get_node",
+                    "reason" => reason.as_str()
+                )
+                .increment(1);
+            }
             stored_node = self
                 .node_store
                 .get_node(&ctx.database, &ctx.namespace, &entity_type, &node_id)

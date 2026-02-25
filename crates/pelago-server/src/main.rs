@@ -10,6 +10,7 @@ mod replicator;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use pelago_api::{
     AdminServiceImpl, AuthRuntime, AuthServiceImpl, EdgeServiceImpl, HealthServiceImpl,
     NodeServiceImpl, QueryServiceImpl, ReplicationServiceImpl, SchemaServiceImpl, WatchRegistry,
@@ -30,6 +31,7 @@ use pelago_storage::{
 };
 use replicator::{start_replicators, ReplicatorConfig};
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
@@ -53,6 +55,7 @@ async fn main() -> Result<()> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+    install_metrics_recorder(&config)?;
 
     info!("PelagoDB server starting");
     info!("Site ID: {}", config.site_id);
@@ -537,6 +540,8 @@ fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
         ("site_name", "PELAGO_SITE_NAME"),
         ("listen_addr", "PELAGO_LISTEN_ADDR"),
         ("log_level", "RUST_LOG"),
+        ("metrics_enabled", "PELAGO_METRICS_ENABLED"),
+        ("metrics_addr", "PELAGO_METRICS_ADDR"),
         ("id_batch_size", "PELAGO_ID_BATCH_SIZE"),
         ("default_database", "PELAGO_DEFAULT_DATABASE"),
         ("default_namespace", "PELAGO_DEFAULT_NAMESPACE"),
@@ -623,6 +628,27 @@ fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
             "PELAGO_WATCH_STATE_RETENTION_BATCH",
         ),
     ]
+}
+
+fn install_metrics_recorder(config: &ServerConfig) -> Result<()> {
+    if !config.metrics_enabled {
+        return Ok(());
+    }
+
+    let addr: SocketAddr = config.metrics_addr.parse().with_context(|| {
+        format!(
+            "invalid PELAGO_METRICS_ADDR '{}': expected host:port",
+            config.metrics_addr
+        )
+    })?;
+
+    PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .install_recorder()
+        .map_err(|e| anyhow::anyhow!("failed to install metrics recorder: {}", e))?;
+    info!("Prometheus metrics exporter listening on {}", addr);
+
+    Ok(())
 }
 
 fn resolve_fdb_cluster_file(configured: &str) -> String {

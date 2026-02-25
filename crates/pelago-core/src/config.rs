@@ -37,6 +37,19 @@ pub struct ServerConfig {
     #[arg(long, env = "RUST_LOG", default_value = "info")]
     pub log_level: String,
 
+    /// Enable Prometheus metrics exporter
+    #[arg(
+        long,
+        env = "PELAGO_METRICS_ENABLED",
+        default_value_t = false,
+        action = ArgAction::Set
+    )]
+    pub metrics_enabled: bool,
+
+    /// Prometheus exporter listen address
+    #[arg(long, env = "PELAGO_METRICS_ADDR", default_value = "127.0.0.1:9464")]
+    pub metrics_addr: String,
+
     /// ID allocation batch size
     #[arg(long, env = "PELAGO_ID_BATCH_SIZE", default_value = "100")]
     pub id_batch_size: u64,
@@ -308,6 +321,8 @@ impl Default for ServerConfig {
             site_name: "default".to_string(),
             listen_addr: "[::1]:50051".to_string(),
             log_level: "info".to_string(),
+            metrics_enabled: false,
+            metrics_addr: "127.0.0.1:9464".to_string(),
             id_batch_size: 100,
             default_database: "default".to_string(),
             default_namespace: "default".to_string(),

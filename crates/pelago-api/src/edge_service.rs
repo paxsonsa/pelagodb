@@ -8,13 +8,14 @@
 use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
+use metrics::counter;
 use pelago_proto::{
     edge_service_server::EdgeService, CreateEdgeRequest, CreateEdgeResponse, DeleteEdgeRequest,
     DeleteEdgeResponse, Edge, EdgeDirection, EdgeResult, ListEdgesRequest, NodeRef as ProtoNodeRef,
     ReadConsistency,
 };
 use pelago_storage::{
-    CachedReadPath, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb,
+    CacheFallbackReason, CachedReadPath, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb,
     ReadConsistency as CacheReadConsistency, SchemaRegistry,
 };
 use std::collections::HashSet;
@@ -233,9 +234,10 @@ impl EdgeService for EdgeServiceImpl {
         let needs_incoming = matches!(direction, EdgeDirection::Incoming | EdgeDirection::Both);
 
         let mut outgoing = Vec::new();
+        let mut outgoing_fallback_reason: Option<CacheFallbackReason> = None;
         if needs_outgoing {
             if let Some(cache) = &self.cached_read_path {
-                outgoing = cache
+                let cache_lookup = cache
                     .list_edges_cached(
                         &ctx.database,
                         &ctx.namespace,
@@ -246,9 +248,19 @@ impl EdgeService for EdgeServiceImpl {
                     )
                     .await
                     .map_err(|e| e.into_status())?;
+                outgoing_fallback_reason = cache_lookup.fallback_reason();
+                outgoing = cache_lookup.value().unwrap_or_default();
             }
 
             if outgoing.is_empty() {
+                if let Some(reason) = outgoing_fallback_reason {
+                    counter!(
+                        "pelago.cache.fallback_to_fdb_total",
+                        "operation" => "list_edges_outgoing",
+                        "reason" => reason.as_str()
+                    )
+                    .increment(1);
+                }
                 outgoing = self
                     .edge_store
                     .list_edges(

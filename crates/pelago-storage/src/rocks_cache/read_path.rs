@@ -3,8 +3,11 @@ use crate::cdc::Versionstamp;
 use crate::db::PelagoDb;
 use crate::edge::StoredEdge;
 use crate::node::StoredNode;
+use metrics::{counter, histogram};
 use pelago_core::PelagoError;
 use std::sync::Arc;
+use std::time::Instant;
+use tracing::warn;
 
 /// Read consistency levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +18,88 @@ pub enum ReadConsistency {
     Session,
     /// Read from cache, fall back to FDB on miss
     Eventual,
+}
+
+impl ReadConsistency {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strong => "strong",
+            Self::Session => "session",
+            Self::Eventual => "eventual",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheFallbackReason {
+    StrongForcedFdb,
+    CacheCold,
+    StaleHwm,
+    KeyAbsent,
+    DecodeError,
+}
+
+impl CacheFallbackReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StrongForcedFdb => "strong_forced_fdb",
+            Self::CacheCold => "cold",
+            Self::StaleHwm => "stale_hwm",
+            Self::KeyAbsent => "key_absent",
+            Self::DecodeError => "decode_error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CacheLookup<T> {
+    value: Option<T>,
+    fallback_reason: Option<CacheFallbackReason>,
+}
+
+impl<T> CacheLookup<T> {
+    pub fn hit(value: T) -> Self {
+        Self {
+            value: Some(value),
+            fallback_reason: None,
+        }
+    }
+
+    pub fn miss(reason: CacheFallbackReason) -> Self {
+        Self {
+            value: None,
+            fallback_reason: Some(reason),
+        }
+    }
+
+    pub fn value(self) -> Option<T> {
+        self.value
+    }
+
+    pub fn fallback_reason(&self) -> Option<CacheFallbackReason> {
+        self.fallback_reason
+    }
+
+    pub fn is_hit(&self) -> bool {
+        self.value.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionCacheState {
+    Fresh,
+    Cold,
+    StaleHwm,
+}
+
+impl SessionCacheState {
+    fn fallback_reason(self) -> CacheFallbackReason {
+        match self {
+            Self::Fresh => CacheFallbackReason::KeyAbsent,
+            Self::Cold => CacheFallbackReason::CacheCold,
+            Self::StaleHwm => CacheFallbackReason::StaleHwm,
+        }
+    }
 }
 
 pub struct CachedReadPath {
@@ -35,25 +120,62 @@ impl CachedReadPath {
         entity_type: &str,
         node_id: &str,
         consistency: ReadConsistency,
-    ) -> Result<Option<StoredNode>, PelagoError> {
-        match consistency {
+    ) -> Result<CacheLookup<StoredNode>, PelagoError> {
+        let started = Instant::now();
+        let lookup = match consistency {
             ReadConsistency::Strong => {
                 // Always go to FDB - delegate to caller's normal FDB path
-                Ok(None) // Signal: use FDB
+                CacheLookup::miss(CacheFallbackReason::StrongForcedFdb)
             }
             ReadConsistency::Session => {
                 // Session consistency requires the cache to be at least as fresh as the
                 // current FDB read version.
-                if !self.session_cache_fresh_for_current_read().await? {
-                    return Ok(None);
+                let state = self.session_cache_state_for_current_read().await?;
+                if state != SessionCacheState::Fresh {
+                    return Ok(self.observe_lookup(
+                        "get_node",
+                        consistency,
+                        CacheLookup::miss(state.fallback_reason()),
+                        started,
+                    ));
                 }
-                self.cache.get_node(db, ns, entity_type, node_id)
+                match self.cache.get_node(db, ns, entity_type, node_id) {
+                    Ok(Some(node)) => CacheLookup::hit(node),
+                    Ok(None) => CacheLookup::miss(CacheFallbackReason::KeyAbsent),
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            db,
+                            ns,
+                            entity_type,
+                            node_id,
+                            "cache decode/read failed in get_node; falling back to fdb"
+                        );
+                        CacheLookup::miss(CacheFallbackReason::DecodeError)
+                    }
+                }
             }
             ReadConsistency::Eventual => {
                 // Cache-first, fall through on miss.
-                self.cache.get_node(db, ns, entity_type, node_id)
+                match self.cache.get_node(db, ns, entity_type, node_id) {
+                    Ok(Some(node)) => CacheLookup::hit(node),
+                    Ok(None) => CacheLookup::miss(CacheFallbackReason::KeyAbsent),
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            db,
+                            ns,
+                            entity_type,
+                            node_id,
+                            "cache decode/read failed in get_node; falling back to fdb"
+                        );
+                        CacheLookup::miss(CacheFallbackReason::DecodeError)
+                    }
+                }
             }
-        }
+        };
+
+        Ok(self.observe_lookup("get_node", consistency, lookup, started))
     }
 
     /// Session cache freshness check.
@@ -77,14 +199,22 @@ impl CachedReadPath {
     }
 
     pub async fn session_cache_fresh_for_current_read(&self) -> Result<bool, PelagoError> {
+        Ok(self.session_cache_state_for_current_read().await? == SessionCacheState::Fresh)
+    }
+
+    async fn session_cache_state_for_current_read(&self) -> Result<SessionCacheState, PelagoError> {
         let read_version = self.fdb.get_read_version().await?;
         let cache_hwm = self.cache.get_hwm()?;
         if cache_hwm.is_zero() {
-            return Ok(false);
+            return Ok(SessionCacheState::Cold);
         }
 
         let cache_tx_version = versionstamp_tx_version(&cache_hwm);
-        Ok(cache_tx_version >= read_version as u64)
+        if cache_tx_version >= read_version as u64 {
+            Ok(SessionCacheState::Fresh)
+        } else {
+            Ok(SessionCacheState::StaleHwm)
+        }
     }
 
     pub fn get_hwm(&self) -> Result<Versionstamp, PelagoError> {
@@ -103,25 +233,104 @@ impl CachedReadPath {
         node_id: &str,
         label: Option<&str>,
         consistency: ReadConsistency,
-    ) -> Result<Vec<StoredEdge>, PelagoError> {
-        match consistency {
-            ReadConsistency::Strong => Ok(Vec::new()), // Signal: fallback to FDB caller path
+    ) -> Result<CacheLookup<Vec<StoredEdge>>, PelagoError> {
+        let started = Instant::now();
+        let lookup = match consistency {
+            ReadConsistency::Strong => CacheLookup::miss(CacheFallbackReason::StrongForcedFdb),
             ReadConsistency::Session => {
-                if !self.session_cache_fresh_for_current_read().await? {
-                    return Ok(Vec::new());
+                let state = self.session_cache_state_for_current_read().await?;
+                if state != SessionCacheState::Fresh {
+                    return Ok(self.observe_lookup(
+                        "list_edges_outgoing",
+                        consistency,
+                        CacheLookup::miss(state.fallback_reason()),
+                        started,
+                    ));
                 }
-                self.cache
+                match self
+                    .cache
                     .list_edges_cached(db, ns, entity_type, node_id, label)
+                {
+                    Ok(edges) if !edges.is_empty() => CacheLookup::hit(edges),
+                    Ok(_) => CacheLookup::miss(CacheFallbackReason::KeyAbsent),
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            db,
+                            ns,
+                            entity_type,
+                            node_id,
+                            label = label.unwrap_or(""),
+                            "cache decode/read failed in list_edges_cached; falling back to fdb"
+                        );
+                        CacheLookup::miss(CacheFallbackReason::DecodeError)
+                    }
+                }
             }
             ReadConsistency::Eventual => {
-                self.cache
+                match self
+                    .cache
                     .list_edges_cached(db, ns, entity_type, node_id, label)
+                {
+                    Ok(edges) if !edges.is_empty() => CacheLookup::hit(edges),
+                    Ok(_) => CacheLookup::miss(CacheFallbackReason::KeyAbsent),
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            db,
+                            ns,
+                            entity_type,
+                            node_id,
+                            label = label.unwrap_or(""),
+                            "cache decode/read failed in list_edges_cached; falling back to fdb"
+                        );
+                        CacheLookup::miss(CacheFallbackReason::DecodeError)
+                    }
+                }
             }
-        }
+        };
+
+        Ok(self.observe_lookup("list_edges_outgoing", consistency, lookup, started))
     }
 
     pub fn cache(&self) -> &RocksCacheStore {
         &self.cache
+    }
+
+    fn observe_lookup<T>(
+        &self,
+        operation: &'static str,
+        consistency: ReadConsistency,
+        lookup: CacheLookup<T>,
+        started: Instant,
+    ) -> CacheLookup<T> {
+        let result = if lookup.is_hit() { "hit" } else { "miss" };
+        counter!(
+            "pelago.cache.lookup_total",
+            "operation" => operation,
+            "consistency" => consistency.as_str(),
+            "result" => result
+        )
+        .increment(1);
+        histogram!(
+            "pelago.cache.lookup_latency_ms",
+            "operation" => operation,
+            "consistency" => consistency.as_str(),
+            "result" => result
+        )
+        .record(started.elapsed().as_secs_f64() * 1000.0);
+
+        if let Some(reason) = lookup.fallback_reason() {
+            counter!(
+                "pelago.cache.fallback_total",
+                "operation" => operation,
+                "consistency" => consistency.as_str(),
+                "reason" => reason.as_str()
+            )
+            .increment(1);
+        }
+
+        lookup
     }
 }
 
