@@ -10,6 +10,7 @@ use pelago_storage::{
     CdcOperation, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry,
     Versionstamp,
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -24,11 +25,15 @@ struct ReplicationPeer {
     endpoint: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ReplicationScope {
+    database: String,
+    namespace: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplicatorConfig {
     pub enabled: bool,
-    pub database: String,
-    pub namespace: String,
     pub batch_size: usize,
     pub poll_ms: u64,
     pub api_key: Option<String>,
@@ -36,11 +41,13 @@ pub struct ReplicatorConfig {
     pub lease_ttl_ms: u64,
     pub lease_heartbeat_ms: u64,
     peers: Vec<ReplicationPeer>,
+    scopes: Vec<ReplicationScope>,
 }
 
 impl ReplicatorConfig {
     pub fn from_server_config(config: &ServerConfig) -> Self {
         let peers = parse_peers(&config.replication_peers);
+        let scopes = parse_replication_scopes(config);
         let enabled = config.replication_enabled.unwrap_or(!peers.is_empty());
         let lease_heartbeat_ms = config.replication_lease_heartbeat_ms.max(200);
         let lease_ttl_ms = config
@@ -50,14 +57,6 @@ impl ReplicatorConfig {
 
         Self {
             enabled,
-            database: config
-                .replication_database
-                .clone()
-                .unwrap_or_else(|| config.default_database.clone()),
-            namespace: config
-                .replication_namespace
-                .clone()
-                .unwrap_or_else(|| config.default_namespace.clone()),
             batch_size: config.replication_batch_size.max(1),
             poll_ms: config.replication_poll_ms.max(50),
             api_key: config.replication_api_key.clone(),
@@ -65,11 +64,16 @@ impl ReplicatorConfig {
             lease_ttl_ms,
             lease_heartbeat_ms,
             peers,
+            scopes,
         }
     }
 
     fn peers(&self) -> &[ReplicationPeer] {
         &self.peers
+    }
+
+    fn scopes(&self) -> &[ReplicationScope] {
+        &self.scopes
     }
 }
 
@@ -92,28 +96,37 @@ pub fn start_replicators(
 
     let holder_id = build_replicator_holder_id();
 
-    for peer in config.peers().iter().cloned() {
-        let db = db.clone();
-        let schema_registry = Arc::clone(&schema_registry);
-        let id_allocator = Arc::clone(&id_allocator);
-        let cfg = config.clone();
-        let shutdown_rx = shutdown_rx.clone();
-        let local_site_id = local_site_id.clone();
-        let holder_id = holder_id.clone();
+    if config.scopes().is_empty() {
+        warn!("replicator enabled but no valid replication scopes configured");
+        return;
+    }
 
-        tokio::spawn(async move {
-            run_peer_replicator(
-                db,
-                schema_registry,
-                id_allocator,
-                local_site_id,
-                holder_id,
-                cfg,
-                peer,
-                shutdown_rx,
-            )
-            .await;
-        });
+    for scope in config.scopes().iter().cloned() {
+        for peer in config.peers().iter().cloned() {
+            let db = db.clone();
+            let schema_registry = Arc::clone(&schema_registry);
+            let id_allocator = Arc::clone(&id_allocator);
+            let cfg = config.clone();
+            let shutdown_rx = shutdown_rx.clone();
+            let local_site_id = local_site_id.clone();
+            let holder_id = holder_id.clone();
+            let scope = scope.clone();
+
+            tokio::spawn(async move {
+                run_peer_replicator(
+                    db,
+                    schema_registry,
+                    id_allocator,
+                    local_site_id,
+                    holder_id,
+                    cfg,
+                    scope,
+                    peer,
+                    shutdown_rx,
+                )
+                .await;
+            });
+        }
     }
 }
 
@@ -124,22 +137,18 @@ async fn run_peer_replicator(
     local_site_id: String,
     holder_id: String,
     config: ReplicatorConfig,
+    scope: ReplicationScope,
     peer: ReplicationPeer,
     shutdown_rx: watch::Receiver<bool>,
 ) {
     let peer_endpoint = normalize_endpoint(&peer.endpoint);
     info!(
-        "starting replicator for remote site {} at {}",
-        peer.remote_site_id, peer_endpoint
+        "starting replicator for remote site {} at {} for {}/{}",
+        peer.remote_site_id, peer_endpoint, scope.database, scope.namespace
     );
 
-    let mut after = load_checkpoint(
-        &db,
-        &config.database,
-        &config.namespace,
-        &peer.remote_site_id,
-    )
-    .await;
+    let mut after =
+        load_checkpoint(&db, &scope.database, &scope.namespace, &peer.remote_site_id).await;
     let mut conflict_count: i64 = 0;
     let mut has_lease = !config.lease_enabled;
     let lease_refresh_interval = Duration::from_millis(config.lease_heartbeat_ms);
@@ -161,8 +170,8 @@ async fn run_peer_replicator(
             match try_acquire_replicator_lease(
                 &db,
                 &local_site_id,
-                &config.database,
-                &config.namespace,
+                &scope.database,
+                &scope.namespace,
                 &holder_id,
                 config.lease_ttl_ms,
             )
@@ -172,7 +181,7 @@ async fn run_peer_replicator(
                     if !has_lease {
                         info!(
                             "replicator lease acquired for {}/{} (epoch {})",
-                            config.database, config.namespace, lease.epoch
+                            scope.database, scope.namespace, lease.epoch
                         );
                     }
                     has_lease = true;
@@ -181,7 +190,7 @@ async fn run_peer_replicator(
                     if has_lease {
                         info!(
                             "replicator lease lost for {}/{}; waiting",
-                            config.database, config.namespace
+                            scope.database, scope.namespace
                         );
                     }
                     has_lease = false;
@@ -189,13 +198,13 @@ async fn run_peer_replicator(
                 Err(err) => {
                     warn!(
                         "replicator lease check failed for {}/{}: {}",
-                        config.database, config.namespace, err
+                        scope.database, scope.namespace, err
                     );
                     has_lease = match get_replicator_lease(
                         &db,
                         &local_site_id,
-                        &config.database,
-                        &config.namespace,
+                        &scope.database,
+                        &scope.namespace,
                     )
                     .await
                     {
@@ -228,8 +237,8 @@ async fn run_peer_replicator(
 
         let mut req = Request::new(PullCdcEventsRequest {
             context: Some(RequestContext {
-                database: config.database.clone(),
-                namespace: config.namespace.clone(),
+                database: scope.database.clone(),
+                namespace: scope.namespace.clone(),
                 site_id: local_site_id.clone(),
                 request_id: Uuid::now_v7().to_string(),
             }),
@@ -281,8 +290,8 @@ async fn run_peer_replicator(
                 record_replication_conflict(
                     &db,
                     &peer.remote_site_id,
-                    &config.database,
-                    &config.namespace,
+                    &scope.database,
+                    &scope.namespace,
                     "invalid versionstamp in replication event",
                 )
                 .await;
@@ -293,8 +302,8 @@ async fn run_peer_replicator(
                 record_replication_conflict(
                     &db,
                     &peer.remote_site_id,
-                    &config.database,
-                    &config.namespace,
+                    &scope.database,
+                    &scope.namespace,
                     "missing CDC entry payload",
                 )
                 .await;
@@ -306,8 +315,8 @@ async fn run_peer_replicator(
                 record_replication_conflict(
                     &db,
                     &peer.remote_site_id,
-                    &config.database,
-                    &config.namespace,
+                    &scope.database,
+                    &scope.namespace,
                     &format!(
                         "source-site mismatch: expected {}, got {}",
                         peer.remote_site_id, entry.site
@@ -346,8 +355,8 @@ async fn run_peer_replicator(
                     &edge_store,
                     &schema_registry,
                     &peer.remote_site_id,
-                    &config.database,
-                    &config.namespace,
+                    &scope.database,
+                    &scope.namespace,
                     entry.timestamp,
                     op.operation,
                 )
@@ -361,8 +370,8 @@ async fn run_peer_replicator(
                         record_replication_conflict(
                             &db,
                             &peer.remote_site_id,
-                            &config.database,
-                            &config.namespace,
+                            &scope.database,
+                            &scope.namespace,
                             "operation skipped by ownership/LWW filter",
                         )
                         .await;
@@ -372,8 +381,8 @@ async fn run_peer_replicator(
                         record_replication_conflict(
                             &db,
                             &peer.remote_site_id,
-                            &config.database,
-                            &config.namespace,
+                            &scope.database,
+                            &scope.namespace,
                             &format!("operation apply failed: {}", err),
                         )
                         .await;
@@ -389,14 +398,14 @@ async fn run_peer_replicator(
                     operations: mirrored_ops,
                 };
                 if let Err(err) =
-                    append_cdc_entry(&db, &config.database, &config.namespace, mirror_entry).await
+                    append_cdc_entry(&db, &scope.database, &scope.namespace, mirror_entry).await
                 {
                     conflict_count += 1;
                     record_replication_conflict(
                         &db,
                         &peer.remote_site_id,
-                        &config.database,
-                        &config.namespace,
+                        &scope.database,
+                        &scope.namespace,
                         &format!("failed to append mirrored CDC entry: {}", err),
                     )
                     .await;
@@ -409,8 +418,8 @@ async fn run_peer_replicator(
 
         if let Err(err) = update_replication_position_scoped(
             &db,
-            &config.database,
-            &config.namespace,
+            &scope.database,
+            &scope.namespace,
             &peer.remote_site_id,
             after.clone(),
             conflict_count,
@@ -685,6 +694,55 @@ fn parse_peers(raw: &str) -> Vec<ReplicationPeer> {
         .collect()
 }
 
+fn parse_scopes(raw: &str) -> Vec<ReplicationScope> {
+    let mut scopes = Vec::new();
+    let mut seen = HashSet::new();
+
+    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let Some((database, namespace)) = entry.split_once('/') else {
+            continue;
+        };
+        let database = database.trim();
+        let namespace = namespace.trim();
+        if database.is_empty() || namespace.is_empty() {
+            continue;
+        }
+
+        if seen.insert((database.to_string(), namespace.to_string())) {
+            scopes.push(ReplicationScope {
+                database: database.to_string(),
+                namespace: namespace.to_string(),
+            });
+        }
+    }
+
+    scopes
+}
+
+fn parse_replication_scopes(config: &ServerConfig) -> Vec<ReplicationScope> {
+    if let Some(raw) = config.replication_scopes.as_deref() {
+        let scopes = parse_scopes(raw);
+        if !scopes.is_empty() {
+            return scopes;
+        }
+        warn!(
+            "Ignoring empty/invalid PELAGO_REPLICATION_SCOPES='{}'; falling back to single-scope config",
+            raw
+        );
+    }
+
+    vec![ReplicationScope {
+        database: config
+            .replication_database
+            .clone()
+            .unwrap_or_else(|| config.default_database.clone()),
+        namespace: config
+            .replication_namespace
+            .clone()
+            .unwrap_or_else(|| config.default_namespace.clone()),
+    }]
+}
+
 fn normalize_endpoint(endpoint: &str) -> String {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
@@ -730,5 +788,40 @@ mod tests {
             normalize_endpoint("http://127.0.0.1:5001"),
             "http://127.0.0.1:5001"
         );
+    }
+
+    #[test]
+    fn test_parse_scopes() {
+        let scopes = parse_scopes("db1/ns1, db2/ns2, db1/ns1");
+        assert_eq!(scopes.len(), 2);
+        assert_eq!(scopes[0].database, "db1");
+        assert_eq!(scopes[0].namespace, "ns1");
+        assert_eq!(scopes[1].database, "db2");
+        assert_eq!(scopes[1].namespace, "ns2");
+    }
+
+    #[test]
+    fn test_parse_replication_scopes_override() {
+        let mut config = ServerConfig::default();
+        config.replication_scopes = Some("a/x,b/y".to_string());
+
+        let scopes = parse_replication_scopes(&config);
+        assert_eq!(scopes.len(), 2);
+        assert_eq!(scopes[0].database, "a");
+        assert_eq!(scopes[0].namespace, "x");
+        assert_eq!(scopes[1].database, "b");
+        assert_eq!(scopes[1].namespace, "y");
+    }
+
+    #[test]
+    fn test_parse_replication_scopes_fallback_single_scope() {
+        let mut config = ServerConfig::default();
+        config.replication_database = Some("tenant".to_string());
+        config.replication_namespace = Some("graph".to_string());
+
+        let scopes = parse_replication_scopes(&config);
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].database, "tenant");
+        assert_eq!(scopes[0].namespace, "graph");
     }
 }

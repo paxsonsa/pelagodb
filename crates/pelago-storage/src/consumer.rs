@@ -61,9 +61,9 @@ impl ConsumerConfig {
 
 /// CDC consumer with high-water mark tracking and checkpoint persistence.
 ///
-/// The consumer reads CDC entries from FDB in batches, advancing its HWM
-/// as it processes each batch. The HWM is periodically saved to FDB so
-/// that consumption can resume after a crash.
+/// `poll_batch()` is read-only. Callers must acknowledge successful processing
+/// via `ack_through()`/`ack_batch()` to advance the HWM. The HWM is
+/// periodically checkpointed to FDB so consumption can resume after a crash.
 pub struct CdcConsumer {
     config: ConsumerConfig,
     db: PelagoDb,
@@ -94,7 +94,7 @@ impl CdcConsumer {
     }
 
     /// Save current high-water mark to FDB
-    pub async fn save_hwm(&mut self) -> Result<(), PelagoError> {
+    async fn save_hwm(&mut self) -> Result<(), PelagoError> {
         let key = Self::checkpoint_key(&self.config);
         self.db.set(&key, self.hwm.to_bytes()).await?;
         self.last_checkpoint = Instant::now();
@@ -114,8 +114,8 @@ impl CdcConsumer {
 
     /// Poll for the next batch of CDC entries after the current HWM.
     ///
-    /// Advances the HWM to the last entry in the batch. Periodically
-    /// saves the checkpoint to FDB based on `checkpoint_interval`.
+    /// This method does not advance the HWM. Callers must acknowledge the
+    /// batch with `ack_batch()` or `ack_through()` after successful processing.
     pub async fn poll_batch(&mut self) -> Result<Vec<(Versionstamp, CdcEntry)>, PelagoError> {
         let after = if self.hwm.is_zero() {
             None
@@ -131,17 +131,33 @@ impl CdcConsumer {
             self.config.batch_size,
         )
         .await?;
+        Ok(entries)
+    }
 
-        if let Some((last_vs, _)) = entries.last() {
-            self.hwm = last_vs.clone();
+    /// Acknowledge all entries up to (and including) `versionstamp`.
+    ///
+    /// Periodically persists the checkpoint based on `checkpoint_interval`.
+    pub async fn ack_through(&mut self, versionstamp: &Versionstamp) -> Result<(), PelagoError> {
+        if versionstamp > &self.hwm {
+            self.hwm = versionstamp.clone();
         }
 
-        // Periodic checkpoint
         if self.last_checkpoint.elapsed() >= self.config.checkpoint_interval {
             self.save_hwm().await?;
         }
 
-        Ok(entries)
+        Ok(())
+    }
+
+    /// Acknowledge an entire batch returned by `poll_batch()`.
+    pub async fn ack_batch(
+        &mut self,
+        entries: &[(Versionstamp, CdcEntry)],
+    ) -> Result<(), PelagoError> {
+        if let Some((last_vs, _)) = entries.last() {
+            self.ack_through(last_vs).await?;
+        }
+        Ok(())
     }
 
     /// Force a checkpoint save (e.g. for graceful shutdown)

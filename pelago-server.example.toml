@@ -18,6 +18,8 @@ cache_size_mb = 1024
 cache_write_buffer_mb = 64
 cache_max_write_buffers = 3
 cache_projector_batch_size = 1000
+# optional CSV scopes: "default/default,analytics/live"
+# cache_projector_scopes = "default/default"
 
 # Security and audit
 auth_required = false
@@ -32,6 +34,8 @@ replication_enabled = false
 # replication_peers = "2=127.0.0.1:27616,3=127.0.0.1:27617"
 # replication_database = "default"
 # replication_namespace = "default"
+# optional CSV scopes; overrides replication_database/replication_namespace:
+# replication_scopes = "default/default,analytics/live"
 replication_batch_size = 512
 replication_poll_ms = 300
 # replication_api_key = "replication-key"

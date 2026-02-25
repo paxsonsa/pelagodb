@@ -235,6 +235,7 @@ impl RocksCacheStore {
         db: &str,
         ns: &str,
         operations: &[CdcOperation],
+        entry_timestamp: i64,
         hwm: &Versionstamp,
     ) -> Result<(), PelagoError> {
         let mut batch = rocksdb::WriteBatch::default();
@@ -255,8 +256,8 @@ impl RocksCacheStore {
                         entity_type: entity_type.clone(),
                         properties: properties.clone(),
                         locality: home_site.parse::<u8>().unwrap_or(1),
-                        created_at: 0,
-                        updated_at: 0,
+                        created_at: entry_timestamp,
+                        updated_at: entry_timestamp,
                     };
                     pending_nodes.insert((entity_type.clone(), node_id.clone()), Some(node));
                 }
@@ -281,6 +282,7 @@ impl RocksCacheStore {
                                 node.properties.insert(k.clone(), v.clone());
                             }
                         }
+                        node.updated_at = node.updated_at.max(entry_timestamp);
                         pending_nodes.insert(key, Some(node));
                     }
                 }
@@ -305,7 +307,7 @@ impl RocksCacheStore {
                         label: edge_type.clone(),
                         edge_id: edge_id.clone(),
                         properties: properties.clone(),
-                        created_at: 0,
+                        created_at: entry_timestamp,
                     };
                     let key = Self::edge_key(db, ns, &edge.source, &edge.label, &edge.target);
                     let incoming_key =
@@ -340,6 +342,7 @@ impl RocksCacheStore {
                     // Best-effort locality update for cached node.
                     if let Some(mut node) = self.get_node(db, ns, entity_type, node_id)? {
                         node.locality = current_site_id.parse::<u8>().unwrap_or(node.locality);
+                        node.updated_at = node.updated_at.max(entry_timestamp);
                         let key = Self::node_key(db, ns, &node.entity_type, &node.id);
                         let value = encode_cbor(&node)?;
                         batch.put(key, value);
@@ -381,10 +384,16 @@ impl RocksCacheStore {
 
 #[cfg(test)]
 mod tests {
-    use super::RocksCacheStore;
-    use crate::edge::{NodeRef, StoredEdge};
+    use super::*;
     use pelago_core::Value;
     use std::collections::HashMap;
+
+    fn versionstamp(v: u16) -> Versionstamp {
+        let mut bytes = [0u8; 10];
+        bytes[8] = (v >> 8) as u8;
+        bytes[9] = (v & 0xFF) as u8;
+        Versionstamp::from_bytes(&bytes).expect("invalid versionstamp")
+    }
 
     #[test]
     fn incoming_edge_listing_uses_target_index() {
@@ -443,5 +452,69 @@ mod tests {
 
         assert!(outgoing.is_empty());
         assert!(incoming.is_empty());
+    }
+
+    #[test]
+    fn test_apply_cdc_operations_sets_node_timestamps() {
+        let store = RocksCacheStore::open_temp().expect("open temp rocksdb");
+        let create = CdcOperation::NodeCreate {
+            entity_type: "Person".to_string(),
+            node_id: "1_1".to_string(),
+            properties: HashMap::from([("name".to_string(), Value::String("A".to_string()))]),
+            home_site: "1".to_string(),
+        };
+        store
+            .apply_cdc_operations("db", "ns", &[create], 1_000, &versionstamp(1))
+            .expect("apply create");
+
+        let node = store
+            .get_node("db", "ns", "Person", "1_1")
+            .expect("get node")
+            .expect("node should exist");
+        assert_eq!(node.created_at, 1_000);
+        assert_eq!(node.updated_at, 1_000);
+
+        let update = CdcOperation::NodeUpdate {
+            entity_type: "Person".to_string(),
+            node_id: "1_1".to_string(),
+            changed_properties: HashMap::from([(
+                "name".to_string(),
+                Value::String("B".to_string()),
+            )]),
+            old_properties: HashMap::new(),
+        };
+        store
+            .apply_cdc_operations("db", "ns", &[update], 1_500, &versionstamp(2))
+            .expect("apply update");
+
+        let updated = store
+            .get_node("db", "ns", "Person", "1_1")
+            .expect("get updated node")
+            .expect("updated node should exist");
+        assert_eq!(updated.created_at, 1_000);
+        assert_eq!(updated.updated_at, 1_500);
+    }
+
+    #[test]
+    fn test_apply_cdc_operations_sets_edge_created_at() {
+        let store = RocksCacheStore::open_temp().expect("open temp rocksdb");
+        let create = CdcOperation::EdgeCreate {
+            source_type: "Person".to_string(),
+            source_id: "1_1".to_string(),
+            target_type: "Person".to_string(),
+            target_id: "1_2".to_string(),
+            edge_type: "KNOWS".to_string(),
+            edge_id: "1_99".to_string(),
+            properties: HashMap::new(),
+        };
+        store
+            .apply_cdc_operations("db", "ns", &[create], 2_000, &versionstamp(3))
+            .expect("apply edge create");
+
+        let edges = store
+            .list_edges_cached("db", "ns", "Person", "1_1", Some("KNOWS"))
+            .expect("list cached edges");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].created_at, 2_000);
     }
 }

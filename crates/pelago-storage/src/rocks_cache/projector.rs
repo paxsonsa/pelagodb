@@ -33,7 +33,13 @@ impl CdcProjector {
         database: &str,
         namespace: &str,
     ) -> Result<Self, PelagoError> {
-        let consumer_id = format!("cache_projector_{}", config.site_id);
+        let consumer_id = format!(
+            "cache_projector_{}_{}_{}_{}",
+            config.site_id,
+            database,
+            namespace,
+            projector_instance_id()
+        );
         let consumer_config = ConsumerConfig::new(&consumer_id, database, namespace)
             .with_batch_size(config.projector_batch_size);
         let consumer = CdcConsumer::new(db.clone(), consumer_config).await?;
@@ -92,9 +98,12 @@ impl CdcProjector {
                 &self.database,
                 &self.namespace,
                 &entry.operations,
+                entry.timestamp,
                 vs,
             )?;
         }
+
+        self.consumer.ack_batch(&entries).await?;
 
         Ok(count)
     }
@@ -130,6 +139,7 @@ impl CdcProjector {
                     &self.database,
                     &self.namespace,
                     &entry.operations,
+                    entry.timestamp,
                     vs,
                 )?;
                 stats.entries_processed += 1;
@@ -147,6 +157,8 @@ impl CdcProjector {
                     }
                 }
             }
+
+            replay_consumer.ack_batch(&entries).await?;
         }
 
         info!(
@@ -159,4 +171,12 @@ impl CdcProjector {
     pub fn hwm(&self) -> &Versionstamp {
         self.consumer.hwm()
     }
+}
+
+fn projector_instance_id() -> String {
+    std::env::var("POD_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| format!("pid{}", std::process::id()))
 }

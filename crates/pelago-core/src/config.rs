@@ -95,6 +95,11 @@ pub struct ServerConfig {
     )]
     pub cache_projector_batch_size: usize,
 
+    /// Cache projector scopes (`database/namespace,database2/namespace2`).
+    /// When unset, defaults to the server default scope and (if different) replication scope.
+    #[arg(long, env = "PELAGO_CACHE_PROJECTOR_SCOPES")]
+    pub cache_projector_scopes: Option<String>,
+
     /// Require auth on all gRPC requests
     #[arg(
         long,
@@ -190,6 +195,11 @@ pub struct ServerConfig {
     /// Replication source namespace override
     #[arg(long, env = "PELAGO_REPLICATION_NAMESPACE")]
     pub replication_namespace: Option<String>,
+
+    /// Replication scopes (`database/namespace,database2/namespace2`).
+    /// When set, overrides replication_database/replication_namespace.
+    #[arg(long, env = "PELAGO_REPLICATION_SCOPES")]
+    pub replication_scopes: Option<String>,
 
     /// Replication pull batch size
     #[arg(long, env = "PELAGO_REPLICATION_BATCH_SIZE", default_value_t = 512)]
@@ -332,6 +342,7 @@ impl Default for ServerConfig {
             cache_write_buffer_mb: 64,
             cache_max_write_buffers: 3,
             cache_projector_batch_size: 1000,
+            cache_projector_scopes: None,
             auth_required: false,
             api_keys: None,
             mtls_enabled: false,
@@ -351,6 +362,7 @@ impl Default for ServerConfig {
             replication_peers: String::new(),
             replication_database: None,
             replication_namespace: None,
+            replication_scopes: None,
             replication_batch_size: 512,
             replication_poll_ms: 300,
             replication_api_key: None,

@@ -9,6 +9,8 @@ use crate::authz::{authorize, principal_from_request};
 use crate::error::ToStatus;
 use crate::schema_service::{core_to_proto_properties, proto_to_core_properties};
 use metrics::counter;
+use pelago_core::encoding::encode_value_for_index;
+use pelago_core::schema::EntitySchema;
 use pelago_proto::{
     edge_service_server::EdgeService, CreateEdgeRequest, CreateEdgeResponse, DeleteEdgeRequest,
     DeleteEdgeResponse, Edge, EdgeDirection, EdgeResult, ListEdgesRequest, NodeRef as ProtoNodeRef,
@@ -18,6 +20,7 @@ use pelago_storage::{
     CacheFallbackReason, CachedReadPath, EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb,
     ReadConsistency as CacheReadConsistency, SchemaRegistry,
 };
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -30,6 +33,7 @@ const OFFSET_CURSOR_LEN: usize = 8;
 pub struct EdgeServiceImpl {
     db: PelagoDb,
     edge_store: EdgeStore,
+    schema_registry: Arc<SchemaRegistry>,
     cached_read_path: Option<Arc<CachedReadPath>>,
 }
 
@@ -44,10 +48,56 @@ impl EdgeServiceImpl {
     ) -> Self {
         Self {
             db: db.clone(),
-            edge_store: EdgeStore::new(db, schema_registry, id_allocator, node_store, site_id),
+            edge_store: EdgeStore::new(
+                db,
+                Arc::clone(&schema_registry),
+                id_allocator,
+                node_store,
+                site_id,
+            ),
+            schema_registry,
             cached_read_path,
         }
     }
+}
+
+fn edge_sort_value_bytes(
+    schema: Option<&EntitySchema>,
+    edge: &pelago_storage::StoredEdge,
+) -> Option<Vec<u8>> {
+    let sort_key = schema
+        .and_then(|s| s.edges.get(&edge.label))
+        .and_then(|def| def.sort_key.as_ref())?;
+    let value = edge.properties.get(sort_key)?;
+    encode_value_for_index(value).ok()
+}
+
+fn compare_outgoing_edges(
+    lhs: &pelago_storage::StoredEdge,
+    rhs: &pelago_storage::StoredEdge,
+    schema: Option<&EntitySchema>,
+) -> Ordering {
+    lhs.label
+        .cmp(&rhs.label)
+        .then_with(|| {
+            let lhs_sort = edge_sort_value_bytes(schema, lhs);
+            let rhs_sort = edge_sort_value_bytes(schema, rhs);
+            match (lhs_sort, rhs_sort) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            }
+        })
+        .then_with(|| lhs.target.database.cmp(&rhs.target.database))
+        .then_with(|| lhs.target.namespace.cmp(&rhs.target.namespace))
+        .then_with(|| lhs.target.entity_type.cmp(&rhs.target.entity_type))
+        .then_with(|| lhs.target.node_id.cmp(&rhs.target.node_id))
+        .then_with(|| lhs.edge_id.cmp(&rhs.edge_id))
+}
+
+fn sort_outgoing_edges(edges: &mut [pelago_storage::StoredEdge], schema: Option<&EntitySchema>) {
+    edges.sort_by(|lhs, rhs| compare_outgoing_edges(lhs, rhs, schema));
 }
 
 fn proto_to_core_node_ref(proto: &ProtoNodeRef, ctx_db: &str, ctx_ns: &str) -> NodeRef {
@@ -245,6 +295,7 @@ impl EdgeService for EdgeServiceImpl {
         let needs_incoming = matches!(direction, EdgeDirection::Incoming | EdgeDirection::Both);
 
         let mut outgoing = Vec::new();
+        let mut outgoing_from_cache = false;
         let mut outgoing_fallback_reason: Option<CacheFallbackReason> = None;
         if needs_outgoing {
             if let Some(cache) = &self.cached_read_path {
@@ -260,6 +311,7 @@ impl EdgeService for EdgeServiceImpl {
                     )
                     .await
                     .map_err(|e| e.into_status())?;
+                outgoing_from_cache = cache_lookup.is_hit();
                 outgoing_fallback_reason = cache_lookup.fallback_reason();
                 outgoing = cache_lookup.value().unwrap_or_default();
             }
@@ -285,6 +337,16 @@ impl EdgeService for EdgeServiceImpl {
                     )
                     .await
                     .map_err(|e| e.into_status())?;
+                outgoing_from_cache = false;
+            }
+
+            if outgoing_from_cache && outgoing.len() > 1 {
+                let source_schema = self
+                    .schema_registry
+                    .get_schema(&ctx.database, &ctx.namespace, &entity_type)
+                    .await
+                    .map_err(|e| e.into_status())?;
+                sort_outgoing_edges(&mut outgoing, source_schema.as_deref());
             }
         }
 
@@ -436,6 +498,8 @@ fn encode_offset_cursor(offset: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pelago_core::schema::{EdgeDef, EdgeTarget, EntitySchema, PropertyDef};
+    use pelago_core::{PropertyType, Value};
     use tonic::Code;
 
     #[test]
@@ -448,5 +512,67 @@ mod tests {
     fn test_offset_cursor_invalid_length() {
         let err = decode_offset_cursor(&[1, 2, 3]).unwrap_err();
         assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    fn outgoing_edge(
+        label: &str,
+        target_id: &str,
+        since: Option<i64>,
+    ) -> pelago_storage::StoredEdge {
+        let mut properties = std::collections::HashMap::new();
+        if let Some(v) = since {
+            properties.insert("since".to_string(), Value::Int(v));
+        }
+        pelago_storage::StoredEdge {
+            edge_id: format!("e-{}", target_id),
+            source: NodeRef::new("db", "ns", "Person", "1"),
+            target: NodeRef::new("db", "ns", "Person", target_id),
+            label: label.to_string(),
+            properties,
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn test_sort_outgoing_edges_uses_schema_sort_key_order() {
+        let schema = EntitySchema::new("Person").with_edge(
+            "KNOWS",
+            EdgeDef::new(EdgeTarget::specific("Person"))
+                .with_property("since", PropertyDef::new(PropertyType::Int))
+                .with_sort_key("since"),
+        );
+        let mut edges = vec![
+            outgoing_edge("KNOWS", "3", Some(2024)),
+            outgoing_edge("KNOWS", "2", Some(2022)),
+            outgoing_edge("KNOWS", "1", Some(2023)),
+        ];
+
+        sort_outgoing_edges(&mut edges, Some(&schema));
+
+        let ordered: Vec<_> = edges.into_iter().map(|e| e.target.node_id).collect();
+        assert_eq!(ordered, vec!["2", "1", "3"]);
+    }
+
+    #[test]
+    fn test_sort_outgoing_edges_groups_by_label_then_target() {
+        let schema = EntitySchema::new("Person").with_edge(
+            "KNOWS",
+            EdgeDef::new(EdgeTarget::specific("Person"))
+                .with_property("since", PropertyDef::new(PropertyType::Int))
+                .with_sort_key("since"),
+        );
+        let mut edges = vec![
+            outgoing_edge("LIKES", "2", Some(10)),
+            outgoing_edge("KNOWS", "4", Some(2)),
+            outgoing_edge("KNOWS", "1", Some(2)),
+            outgoing_edge("LIKES", "1", Some(1)),
+        ];
+
+        sort_outgoing_edges(&mut edges, Some(&schema));
+        let ordered: Vec<_> = edges
+            .into_iter()
+            .map(|e| format!("{}:{}", e.label, e.target.node_id))
+            .collect();
+        assert_eq!(ordered, vec!["KNOWS:1", "KNOWS:4", "LIKES:1", "LIKES:2"]);
     }
 }
