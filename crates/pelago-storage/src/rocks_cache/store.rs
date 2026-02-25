@@ -53,6 +53,21 @@ impl RocksCacheStore {
         .into_bytes()
     }
 
+    // Incoming edge key: i:<db>:<ns>:<tgt_type>:<tgt_id>:<label>:<src_type>:<src_id>
+    fn incoming_edge_key(
+        db: &str,
+        ns: &str,
+        source: &NodeRef,
+        label: &str,
+        target: &NodeRef,
+    ) -> Vec<u8> {
+        format!(
+            "i:{}:{}:{}:{}:{}:{}:{}",
+            db, ns, target.entity_type, target.node_id, label, source.entity_type, source.node_id
+        )
+        .into_bytes()
+    }
+
     // Edge prefix for listing: e:<db>:<ns>:<src_type>:<src_id>: or with label
     fn edge_prefix(
         db: &str,
@@ -64,6 +79,20 @@ impl RocksCacheStore {
         match label {
             Some(l) => format!("e:{}:{}:{}:{}:{}:", db, ns, entity_type, node_id, l).into_bytes(),
             None => format!("e:{}:{}:{}:{}:", db, ns, entity_type, node_id).into_bytes(),
+        }
+    }
+
+    // Incoming edge prefix for listing: i:<db>:<ns>:<tgt_type>:<tgt_id>: or with label
+    fn incoming_edge_prefix(
+        db: &str,
+        ns: &str,
+        entity_type: &str,
+        node_id: &str,
+        label: Option<&str>,
+    ) -> Vec<u8> {
+        match label {
+            Some(l) => format!("i:{}:{}:{}:{}:{}:", db, ns, entity_type, node_id, l).into_bytes(),
+            None => format!("i:{}:{}:{}:{}:", db, ns, entity_type, node_id).into_bytes(),
         }
     }
 
@@ -108,9 +137,13 @@ impl RocksCacheStore {
 
     pub fn put_edge(&self, db: &str, ns: &str, edge: &StoredEdge) -> Result<(), PelagoError> {
         let key = Self::edge_key(db, ns, &edge.source, &edge.label, &edge.target);
+        let incoming_key = Self::incoming_edge_key(db, ns, &edge.source, &edge.label, &edge.target);
         let value = encode_cbor(edge)?;
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.put(key, &value);
+        batch.put(incoming_key, &value);
         self.db
-            .put(&key, &value)
+            .write(batch)
             .map_err(|e| PelagoError::Internal(format!("RocksDB put edge: {}", e)))
     }
 
@@ -123,8 +156,12 @@ impl RocksCacheStore {
         target: &NodeRef,
     ) -> Result<(), PelagoError> {
         let key = Self::edge_key(db, ns, source, label, target);
+        let incoming_key = Self::incoming_edge_key(db, ns, source, label, target);
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.delete(key);
+        batch.delete(incoming_key);
         self.db
-            .delete(&key)
+            .write(batch)
             .map_err(|e| PelagoError::Internal(format!("RocksDB delete edge: {}", e)))
     }
 
@@ -137,6 +174,29 @@ impl RocksCacheStore {
         label: Option<&str>,
     ) -> Result<Vec<StoredEdge>, PelagoError> {
         let prefix = Self::edge_prefix(db, ns, entity_type, node_id, label);
+        let mut edges = Vec::new();
+        let iter = self.db.prefix_iterator(&prefix);
+        for item in iter {
+            let (key, value) =
+                item.map_err(|e| PelagoError::Internal(format!("RocksDB iter: {}", e)))?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let edge: StoredEdge = decode_cbor(&value)?;
+            edges.push(edge);
+        }
+        Ok(edges)
+    }
+
+    pub fn list_incoming_edges_cached(
+        &self,
+        db: &str,
+        ns: &str,
+        entity_type: &str,
+        node_id: &str,
+        label: Option<&str>,
+    ) -> Result<Vec<StoredEdge>, PelagoError> {
+        let prefix = Self::incoming_edge_prefix(db, ns, entity_type, node_id, label);
         let mut edges = Vec::new();
         let iter = self.db.prefix_iterator(&prefix);
         for item in iter {
@@ -248,8 +308,11 @@ impl RocksCacheStore {
                         created_at: 0,
                     };
                     let key = Self::edge_key(db, ns, &edge.source, &edge.label, &edge.target);
+                    let incoming_key =
+                        Self::incoming_edge_key(db, ns, &edge.source, &edge.label, &edge.target);
                     let value = encode_cbor(&edge)?;
-                    batch.put(key, value);
+                    batch.put(key, &value);
+                    batch.put(incoming_key, &value);
                 }
                 CdcOperation::EdgeDelete {
                     source_type,
@@ -261,7 +324,9 @@ impl RocksCacheStore {
                     let source = NodeRef::new(db, ns, source_type, source_id);
                     let target = NodeRef::new(db, ns, target_type, target_id);
                     let key = Self::edge_key(db, ns, &source, edge_type, &target);
+                    let incoming_key = Self::incoming_edge_key(db, ns, &source, edge_type, &target);
                     batch.delete(key);
+                    batch.delete(incoming_key);
                 }
                 CdcOperation::SchemaRegister { .. } => {
                     // No cache action for schema registrations.
@@ -311,5 +376,72 @@ impl RocksCacheStore {
                 .map_err(|e| PelagoError::Internal(format!("RocksDB delete: {}", e)))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RocksCacheStore;
+    use crate::edge::{NodeRef, StoredEdge};
+    use pelago_core::Value;
+    use std::collections::HashMap;
+
+    #[test]
+    fn incoming_edge_listing_uses_target_index() {
+        let store = RocksCacheStore::open_temp().expect("open temp rocks cache");
+        let source = NodeRef::new("db", "ns", "Person", "1_1");
+        let target = NodeRef::new("db", "ns", "Person", "1_2");
+        let edge = StoredEdge::new(
+            "e1".to_string(),
+            source.clone(),
+            target.clone(),
+            "KNOWS".to_string(),
+            HashMap::from([(String::from("weight"), Value::Int(7))]),
+        );
+
+        store
+            .put_edge("db", "ns", &edge)
+            .expect("write outgoing+incoming edge");
+
+        let outgoing = store
+            .list_edges_cached("db", "ns", "Person", "1_1", Some("KNOWS"))
+            .expect("list outgoing");
+        let incoming = store
+            .list_incoming_edges_cached("db", "ns", "Person", "1_2", Some("KNOWS"))
+            .expect("list incoming");
+
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(outgoing[0].edge_id, "e1");
+        assert_eq!(incoming[0].edge_id, "e1");
+    }
+
+    #[test]
+    fn deleting_edge_clears_incoming_projection() {
+        let store = RocksCacheStore::open_temp().expect("open temp rocks cache");
+        let source = NodeRef::new("db", "ns", "Person", "1_1");
+        let target = NodeRef::new("db", "ns", "Person", "1_2");
+        let edge = StoredEdge::new(
+            "e1".to_string(),
+            source.clone(),
+            target.clone(),
+            "KNOWS".to_string(),
+            HashMap::new(),
+        );
+
+        store.put_edge("db", "ns", &edge).expect("seed edge");
+        store
+            .delete_edge("db", "ns", &source, "KNOWS", &target)
+            .expect("delete edge");
+
+        let outgoing = store
+            .list_edges_cached("db", "ns", "Person", "1_1", Some("KNOWS"))
+            .expect("list outgoing");
+        let incoming = store
+            .list_incoming_edges_cached("db", "ns", "Person", "1_2", Some("KNOWS"))
+            .expect("list incoming");
+
+        assert!(outgoing.is_empty());
+        assert!(incoming.is_empty());
     }
 }

@@ -121,6 +121,17 @@ impl NodeService for NodeServiceImpl {
             ReadConsistency::Session => CacheReadConsistency::Session,
             ReadConsistency::Eventual => CacheReadConsistency::Eventual,
         };
+        let session_read_version =
+            if consistency == CacheReadConsistency::Session && self.cached_read_path.is_some() {
+                Some(
+                    self.db
+                        .get_read_version()
+                        .await
+                        .map_err(|e| e.into_status())?,
+                )
+            } else {
+                None
+            };
 
         let mut stored_node = None;
         let mut fallback_reason: Option<CacheFallbackReason> = None;
@@ -132,6 +143,7 @@ impl NodeService for NodeServiceImpl {
                     &entity_type,
                     &node_id,
                     consistency,
+                    session_read_version,
                 )
                 .await
                 .map_err(|e| e.into_status())?;
