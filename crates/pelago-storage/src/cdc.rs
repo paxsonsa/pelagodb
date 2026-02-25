@@ -16,6 +16,7 @@ use crate::db::PelagoDb;
 use crate::Subspace;
 use foundationdb::options::MutationType;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
+use pelago_core::schema::EntitySchema;
 use pelago_core::{PelagoError, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -156,6 +157,7 @@ pub enum CdcOperation {
     SchemaRegister {
         entity_type: String,
         version: u32,
+        schema: EntitySchema,
     },
     OwnershipTransfer {
         entity_type: String,
@@ -488,6 +490,7 @@ mod tests {
             CdcOperation::SchemaRegister {
                 entity_type: "T".into(),
                 version: 1,
+                schema: pelago_core::schema::EntitySchema::new("T"),
             },
             CdcOperation::OwnershipTransfer {
                 entity_type: "T".into(),

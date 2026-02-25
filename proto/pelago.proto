@@ -659,6 +659,7 @@ message EdgeDeleteOp {
 message SchemaRegisterOp {
   string entity_type = 1;
   uint32 version = 2;
+  EntitySchema schema = 3;
 }
 
 message OwnershipTransferOp {

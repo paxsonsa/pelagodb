@@ -708,7 +708,10 @@ impl JobExecutor for DropEntityTypeCleanupExecutor {
                     .add_string(&entity_type)
                     .build()
                     .to_vec();
-                let range_start = state.next_start.clone().unwrap_or_else(|| meta_prefix.clone());
+                let range_start = state
+                    .next_start
+                    .clone()
+                    .unwrap_or_else(|| meta_prefix.clone());
                 let range_end = {
                     let mut end = meta_prefix.clone();
                     end.push(0xFF);
