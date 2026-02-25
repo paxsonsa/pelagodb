@@ -84,6 +84,16 @@ impl NodeStore {
             .build()
     }
 
+    /// Build the node-delete guard key.
+    fn delete_guard_key(subspace: &Subspace, entity_type: &str, node_id: &[u8]) -> Bytes {
+        subspace
+            .pack()
+            .add_string("__deleting")
+            .add_string(entity_type)
+            .add_raw_bytes(node_id)
+            .build()
+    }
+
     fn local_site_id(&self) -> Option<u8> {
         self.site_id.parse::<u8>().ok()
     }
@@ -836,6 +846,7 @@ impl NodeStore {
         let subspace = Subspace::namespace(database, namespace);
         let data_subspace = subspace.data();
         let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
+        let guard_key = Self::delete_guard_key(&data_subspace, entity_type, &node_id_bytes);
 
         // Read existing node for CDC and index removal
         let existing_bytes = match self.db.get(data_key.as_ref()).await? {
@@ -872,6 +883,7 @@ impl NodeStore {
 
         // Remove data
         trx.clear(data_key.as_ref());
+        trx.set(guard_key.as_ref(), b"1");
 
         // Remove index entries
         for entry in &removals {
@@ -903,6 +915,16 @@ impl NodeStore {
         let _ = edge_store
             .delete_edges_for_node(database, namespace, entity_type, node_id)
             .await?;
+
+        // Clear delete guard after edge cleanup has completed.
+        let clear_trx = self.db.create_transaction()?;
+        clear_trx.clear(guard_key.as_ref());
+        clear_trx.commit().await.map_err(|e| {
+            PelagoError::Internal(format!(
+                "Failed to clear node delete guard for {}:{}: {}",
+                entity_type, node_id, e
+            ))
+        })?;
 
         Ok(true)
     }

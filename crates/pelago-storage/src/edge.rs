@@ -569,6 +569,38 @@ impl EdgeStore {
         let trx = self.db.create_transaction()?;
         let mut cdc = CdcAccumulator::new(&self.site_id);
 
+        if self
+            .node_delete_guard_exists_in_txn(
+                &trx,
+                &source.database,
+                &source.namespace,
+                &source.entity_type,
+                &source.node_id,
+            )
+            .await?
+        {
+            return Err(PelagoError::VersionConflict {
+                entity_type: source.entity_type.clone(),
+                node_id: source.node_id.clone(),
+            });
+        }
+
+        if self
+            .node_delete_guard_exists_in_txn(
+                &trx,
+                &target.database,
+                &target.namespace,
+                &target.entity_type,
+                &target.node_id,
+            )
+            .await?
+        {
+            return Err(PelagoError::VersionConflict {
+                entity_type: target.entity_type.clone(),
+                node_id: target.node_id.clone(),
+            });
+        }
+
         let source_locality = self
             .read_node_locality_in_txn(
                 &trx,
@@ -672,6 +704,32 @@ impl EdgeStore {
 
         let node_data: EdgeNodeData = decode_cbor(&bytes)?;
         Ok(Some(node_data.locality))
+    }
+
+    async fn node_delete_guard_exists_in_txn(
+        &self,
+        trx: &foundationdb::Transaction,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+    ) -> Result<bool, PelagoError> {
+        let parsed: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
+        let node_id_bytes = parsed.to_bytes();
+        let guard_key = Subspace::namespace(database, namespace)
+            .data()
+            .pack()
+            .add_string("__deleting")
+            .add_string(entity_type)
+            .add_raw_bytes(&node_id_bytes)
+            .build();
+        let value = trx
+            .get(guard_key.as_ref(), false)
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Failed to read delete guard: {}", e)))?;
+        Ok(value.is_some())
     }
 
     /// Delete an edge
