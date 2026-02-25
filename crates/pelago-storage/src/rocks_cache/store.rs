@@ -11,6 +11,27 @@ const CF_NODE: &str = "node";
 const CF_EDGE: &str = "edge";
 const CF_META: &str = "meta";
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EdgeMutationKey {
+    source_type: String,
+    source_id: String,
+    label: String,
+    target_type: String,
+    target_id: String,
+}
+
+impl EdgeMutationKey {
+    fn new(source: &NodeRef, label: &str, target: &NodeRef) -> Self {
+        Self {
+            source_type: source.entity_type.clone(),
+            source_id: source.node_id.clone(),
+            label: label.to_string(),
+            target_type: target.entity_type.clone(),
+            target_id: target.node_id.clone(),
+        }
+    }
+}
+
 pub struct RocksCacheStore {
     db: rocksdb::DB,
     use_column_families: bool,
@@ -375,6 +396,7 @@ impl RocksCacheStore {
 
         // Track node mutations within the same CDC entry so update/delete ordering is preserved.
         let mut pending_nodes: HashMap<(String, String), Option<StoredNode>> = HashMap::new();
+        let mut pending_edges: HashMap<EdgeMutationKey, Option<StoredEdge>> = HashMap::new();
 
         for op in operations {
             match op {
@@ -441,12 +463,8 @@ impl RocksCacheStore {
                         properties: properties.clone(),
                         created_at: 0,
                     };
-                    let key = Self::edge_key(db, ns, &edge.source, &edge.label, &edge.target);
-                    let incoming_key =
-                        Self::incoming_edge_key(db, ns, &edge.source, &edge.label, &edge.target);
-                    let value = encode_cbor(&edge)?;
-                    self.batch_put_cf(&mut batch, CF_EDGE, &key, &value)?;
-                    self.batch_put_cf(&mut batch, CF_EDGE, &incoming_key, &value)?;
+                    let edge_key = EdgeMutationKey::new(&edge.source, &edge.label, &edge.target);
+                    pending_edges.insert(edge_key, Some(edge));
                 }
                 CdcOperation::EdgeDelete {
                     source_type,
@@ -457,10 +475,8 @@ impl RocksCacheStore {
                 } => {
                     let source = NodeRef::new(db, ns, source_type, source_id);
                     let target = NodeRef::new(db, ns, target_type, target_id);
-                    let key = Self::edge_key(db, ns, &source, edge_type, &target);
-                    let incoming_key = Self::incoming_edge_key(db, ns, &source, edge_type, &target);
-                    self.batch_delete_cf(&mut batch, CF_EDGE, &key)?;
-                    self.batch_delete_cf(&mut batch, CF_EDGE, &incoming_key)?;
+                    let edge_key = EdgeMutationKey::new(&source, edge_type, &target);
+                    pending_edges.insert(edge_key, None);
                 }
                 CdcOperation::SchemaRegister { .. } => {
                     // No cache action for schema registrations.
@@ -472,12 +488,35 @@ impl RocksCacheStore {
                     ..
                 } => {
                     // Best-effort locality update for cached node.
-                    if let Some(mut node) = self.get_node(db, ns, entity_type, node_id)? {
+                    let node_key = (entity_type.clone(), node_id.clone());
+                    let existing = if let Some(staged) = pending_nodes.get(&node_key) {
+                        staged.clone()
+                    } else {
+                        self.get_node(db, ns, entity_type, node_id)?
+                    };
+                    if let Some(mut node) = existing {
                         node.locality = current_site_id.parse::<u8>().unwrap_or(node.locality);
-                        let key = Self::node_key(db, ns, &node.entity_type, &node.id);
-                        let value = encode_cbor(&node)?;
-                        self.batch_put_cf(&mut batch, CF_NODE, &key, &value)?;
+                        pending_nodes.insert(node_key, Some(node));
                     }
+                }
+            }
+        }
+
+        for (edge_key, maybe_edge) in pending_edges {
+            let source = NodeRef::new(db, ns, &edge_key.source_type, &edge_key.source_id);
+            let target = NodeRef::new(db, ns, &edge_key.target_type, &edge_key.target_id);
+            let key = Self::edge_key(db, ns, &source, &edge_key.label, &target);
+            let incoming_key = Self::incoming_edge_key(db, ns, &source, &edge_key.label, &target);
+
+            match maybe_edge {
+                Some(edge) => {
+                    let value = encode_cbor(&edge)?;
+                    self.batch_put_cf(&mut batch, CF_EDGE, &key, &value)?;
+                    self.batch_put_cf(&mut batch, CF_EDGE, &incoming_key, &value)?;
+                }
+                None => {
+                    self.batch_delete_cf(&mut batch, CF_EDGE, &key)?;
+                    self.batch_delete_cf(&mut batch, CF_EDGE, &incoming_key)?;
                 }
             }
         }
@@ -529,6 +568,7 @@ impl RocksCacheStore {
 #[cfg(test)]
 mod tests {
     use super::RocksCacheStore;
+    use crate::cdc::{CdcOperation, Versionstamp};
     use crate::edge::{NodeRef, StoredEdge};
     use pelago_core::Value;
     use std::collections::HashMap;
@@ -590,5 +630,73 @@ mod tests {
 
         assert!(outgoing.is_empty());
         assert!(incoming.is_empty());
+    }
+
+    #[test]
+    fn apply_cdc_operations_coalesces_edge_create_delete_sequences() {
+        let store = RocksCacheStore::open_temp().expect("open temp rocks cache");
+        let hwm = Versionstamp::from_bytes(&[1, 0, 0, 0, 0, 0, 0, 0, 0, 1]).expect("valid hwm");
+        let ops = vec![
+            CdcOperation::EdgeCreate {
+                source_type: "Person".to_string(),
+                source_id: "1_1".to_string(),
+                target_type: "Person".to_string(),
+                target_id: "1_2".to_string(),
+                edge_type: "KNOWS".to_string(),
+                edge_id: "e1".to_string(),
+                properties: HashMap::new(),
+            },
+            CdcOperation::EdgeDelete {
+                source_type: "Person".to_string(),
+                source_id: "1_1".to_string(),
+                target_type: "Person".to_string(),
+                target_id: "1_2".to_string(),
+                edge_type: "KNOWS".to_string(),
+            },
+        ];
+
+        store
+            .apply_cdc_operations("db", "ns", &ops, &hwm)
+            .expect("apply coalesced ops");
+
+        let outgoing = store
+            .list_edges_cached("db", "ns", "Person", "1_1", Some("KNOWS"))
+            .expect("list outgoing");
+        let incoming = store
+            .list_incoming_edges_cached("db", "ns", "Person", "1_2", Some("KNOWS"))
+            .expect("list incoming");
+
+        assert!(outgoing.is_empty());
+        assert!(incoming.is_empty());
+    }
+
+    #[test]
+    fn ownership_transfer_updates_staged_node_mutation() {
+        let store = RocksCacheStore::open_temp().expect("open temp rocks cache");
+        let hwm = Versionstamp::from_bytes(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 2]).expect("valid hwm");
+        let ops = vec![
+            CdcOperation::NodeCreate {
+                entity_type: "Person".to_string(),
+                node_id: "1_1".to_string(),
+                properties: HashMap::new(),
+                home_site: "1".to_string(),
+            },
+            CdcOperation::OwnershipTransfer {
+                entity_type: "Person".to_string(),
+                node_id: "1_1".to_string(),
+                previous_site_id: "1".to_string(),
+                current_site_id: "3".to_string(),
+            },
+        ];
+
+        store
+            .apply_cdc_operations("db", "ns", &ops, &hwm)
+            .expect("apply ownership transfer");
+
+        let node = store
+            .get_node("db", "ns", "Person", "1_1")
+            .expect("read node")
+            .expect("node present");
+        assert_eq!(node.locality, 3);
     }
 }
