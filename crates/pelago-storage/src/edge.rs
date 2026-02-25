@@ -22,7 +22,7 @@ use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor, encode_value_for_index};
 use pelago_core::schema::{EdgeDirection, EntitySchema, OwnershipMode};
-use pelago_core::{EdgeId, PelagoError, Value};
+use pelago_core::{EdgeId, NodeId, PelagoError, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -514,37 +514,6 @@ impl EdgeStore {
         label: &str,
         properties: HashMap<String, Value>,
     ) -> Result<StoredEdge, PelagoError> {
-        // Verify source node exists
-        let source_node = self
-            .node_store
-            .get_node(
-                &source.database,
-                &source.namespace,
-                &source.entity_type,
-                &source.node_id,
-            )
-            .await?
-            .ok_or_else(|| PelagoError::SourceNotFound {
-                entity_type: source.entity_type.clone(),
-                node_id: source.node_id.clone(),
-            })?;
-        self.enforce_source_ownership(&source.entity_type, &source.node_id, source_node.locality)?;
-
-        // Verify target node exists
-        let _target_node = self
-            .node_store
-            .get_node(
-                &target.database,
-                &target.namespace,
-                &target.entity_type,
-                &target.node_id,
-            )
-            .await?
-            .ok_or_else(|| PelagoError::TargetNotFound {
-                entity_type: target.entity_type.clone(),
-                node_id: target.node_id.clone(),
-            })?;
-
         // Get source schema and validate edge type
         let schema = self
             .schema_registry
@@ -600,6 +569,38 @@ impl EdgeStore {
         let trx = self.db.create_transaction()?;
         let mut cdc = CdcAccumulator::new(&self.site_id);
 
+        let source_locality = self
+            .read_node_locality_in_txn(
+                &trx,
+                &source.database,
+                &source.namespace,
+                &source.entity_type,
+                &source.node_id,
+            )
+            .await?
+            .ok_or_else(|| PelagoError::SourceNotFound {
+                entity_type: source.entity_type.clone(),
+                node_id: source.node_id.clone(),
+            })?;
+        self.enforce_source_ownership(&source.entity_type, &source.node_id, source_locality)?;
+
+        if self
+            .read_node_locality_in_txn(
+                &trx,
+                &target.database,
+                &target.namespace,
+                &target.entity_type,
+                &target.node_id,
+            )
+            .await?
+            .is_none()
+        {
+            return Err(PelagoError::TargetNotFound {
+                entity_type: target.entity_type.clone(),
+                node_id: target.node_id.clone(),
+            });
+        }
+
         // Write forward key with edge data so scans avoid N+1 metadata fetches.
         trx.set(keys.forward_key.as_ref(), &edge_bytes);
 
@@ -641,6 +642,36 @@ impl EdgeStore {
             label.to_string(),
             properties,
         ))
+    }
+
+    async fn read_node_locality_in_txn(
+        &self,
+        trx: &foundationdb::Transaction,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+    ) -> Result<Option<u8>, PelagoError> {
+        let parsed: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
+        let node_id_bytes = parsed.to_bytes();
+        let data_key = Subspace::namespace(database, namespace)
+            .data()
+            .pack()
+            .add_string(entity_type)
+            .add_raw_bytes(&node_id_bytes)
+            .build();
+        let bytes = trx
+            .get(data_key.as_ref(), false)
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Failed to read node in txn: {}", e)))?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+
+        let node_data: EdgeNodeData = decode_cbor(&bytes)?;
+        Ok(Some(node_data.locality))
     }
 
     /// Delete an edge
@@ -1066,6 +1097,11 @@ impl EdgeStore {
 
         Ok(edges)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct EdgeNodeData {
+    locality: u8,
 }
 
 /// Internal edge data for storage

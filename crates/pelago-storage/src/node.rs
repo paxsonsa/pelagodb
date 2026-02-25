@@ -25,7 +25,7 @@ use crate::term_index::{
 use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
-use pelago_core::schema::{EntitySchema, ExtrasPolicy, IndexType};
+use pelago_core::schema::{EdgeDirection, EntitySchema, ExtrasPolicy, IndexType};
 use pelago_core::{NodeId, PelagoError, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -949,6 +949,7 @@ impl NodeStore {
 
         let mut seen = HashSet::new();
         let mut edge_count = 0usize;
+        let mut estimated_edge_mutations = 0usize;
         for edge in candidates {
             let key = format!(
                 "{}|{}|{}|{}|{}|{}|{}",
@@ -964,12 +965,14 @@ impl NodeStore {
                 continue;
             }
             edge_count = edge_count.saturating_add(1);
+            estimated_edge_mutations = estimated_edge_mutations
+                .saturating_add(self.estimate_edge_mutation_entries_for_scope(&edge).await?);
             if edge_count > cascade_probe_limit {
                 break;
             }
         }
 
-        let estimated_mutated_keys = 2usize.saturating_add(edge_count.saturating_mul(3));
+        let estimated_mutated_keys = 2usize.saturating_add(estimated_edge_mutations);
         let estimated_write_bytes = estimated_mutated_keys.saturating_mul(256);
         Ok(MutationScopeEstimate {
             estimated_mutated_keys,
@@ -977,6 +980,30 @@ impl NodeStore {
             estimated_cascade_edges: edge_count,
             exceeded_cascade_probe_limit: edge_count > cascade_probe_limit,
         })
+    }
+
+    async fn estimate_edge_mutation_entries_for_scope(
+        &self,
+        edge: &crate::edge::StoredEdge,
+    ) -> Result<usize, PelagoError> {
+        let Some(schema) = self
+            .schema_registry
+            .get_schema(
+                &edge.source.database,
+                &edge.source.namespace,
+                &edge.source.entity_type,
+            )
+            .await?
+        else {
+            return Ok(3);
+        };
+
+        let is_bidirectional = schema
+            .edges
+            .get(&edge.label)
+            .map(|def| def.direction == EdgeDirection::Bidirectional)
+            .unwrap_or(false);
+        Ok(if is_bidirectional { 5 } else { 3 })
     }
 
     /// Transfer node ownership (locality) to another site.
