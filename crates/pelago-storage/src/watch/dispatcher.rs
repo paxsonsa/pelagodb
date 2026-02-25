@@ -182,11 +182,13 @@ impl WatchDispatcher {
         namespace: String,
         state: Arc<DispatcherState>,
     ) -> Result<Self, PelagoError> {
-        let consumer_config = ConsumerConfig::new(
-            &format!("watch_dispatcher_{}", namespace),
-            &database,
-            &namespace,
+        let consumer_id = format!(
+            "watch_dispatcher_{}_{}_{}",
+            database,
+            namespace,
+            dispatcher_instance_id()
         );
+        let consumer_config = ConsumerConfig::new(&consumer_id, &database, &namespace);
         let consumer = CdcConsumer::new(db, consumer_config).await?;
 
         Ok(Self {
@@ -222,11 +224,16 @@ impl WatchDispatcher {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
                     }
+                    let last_vs = entries.last().map(|(vs, _)| vs.clone());
 
-                    for (vs, entry) in entries {
+                    for (vs, entry) in &entries {
                         for op in &entry.operations {
-                            self.dispatch_operation(op, &vs).await;
+                            self.dispatch_operation(op, vs).await;
                         }
+                    }
+
+                    if let Some(last_vs) = last_vs {
+                        self.consumer.ack_through(&last_vs).await?;
                     }
                 }
             }
@@ -411,6 +418,14 @@ impl WatchDispatcher {
             }
         }
     }
+}
+
+fn dispatcher_instance_id() -> String {
+    std::env::var("POD_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| format!("pid{}", std::process::id()))
 }
 
 // ─── Event Building ─────────────────────────────────────────────────────

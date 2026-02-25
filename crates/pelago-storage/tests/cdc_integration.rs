@@ -257,6 +257,7 @@ async fn test_cdc_consumer_resumes_from_checkpoint() {
         batch1_count >= 3,
         "Expected schema + 2 nodes = at least 3 entries"
     );
+    consumer.ack_batch(&batch1).await.unwrap();
 
     // Force checkpoint
     consumer.checkpoint().await.unwrap();
@@ -346,8 +347,9 @@ async fn test_multiple_independent_consumers() {
         batch_a.len() >= 2,
         "Expected at least schema + node = 2 entries"
     );
+    consumer_a.ack_batch(&batch_a).await.unwrap();
 
-    // Checkpoint A but not B
+    // Persist A but not B
     consumer_a.checkpoint().await.unwrap();
 
     // Create another mutation
@@ -369,12 +371,12 @@ async fn test_multiple_independent_consumers() {
         "Consumer A should only see new entry after checkpoint"
     );
 
-    // B (no checkpoint) sees the new entry too since its HWM advanced in memory
+    // B did not ack, so it should replay from the beginning
     let batch_b2 = consumer_b.poll_batch().await.unwrap();
     assert_eq!(
         batch_b2.len(),
-        1,
-        "Consumer B should see only new entry (HWM advanced in memory)"
+        batch_b.len() + 1,
+        "Consumer B should replay prior entries plus the new mutation"
     );
 
     // But if we recreate B (simulating restart without checkpoint), it sees everything again

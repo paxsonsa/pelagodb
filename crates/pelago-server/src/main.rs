@@ -30,6 +30,7 @@ use pelago_storage::{
 };
 use replicator::{start_replicators, ReplicatorConfig};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
@@ -169,6 +170,7 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let job_db_name = config.default_database.clone();
     let job_ns_name = config.default_namespace.clone();
+    let projector_scopes = resolve_cache_projector_scopes(&config);
     let job_db_name_for_worker = job_db_name.clone();
     let job_ns_name_for_worker = job_ns_name.clone();
     let shutdown_for_jobs = shutdown_rx.clone();
@@ -186,29 +188,46 @@ async fn main() -> Result<()> {
     });
 
     if let Some(cache_store) = cache_store_for_projector {
-        let projector_db = db.clone();
-        let projector_cfg = cache_cfg.clone();
-        let projector_db_name = job_db_name.clone();
-        let projector_ns_name = job_ns_name.clone();
-        let shutdown_for_projector = shutdown_rx.clone();
-        tokio::spawn(async move {
-            match CdcProjector::new(
-                projector_db,
-                cache_store,
-                &projector_cfg,
-                &projector_db_name,
-                &projector_ns_name,
-            )
-            .await
-            {
-                Ok(mut projector) => {
-                    if let Err(e) = projector.run(shutdown_for_projector).await {
-                        tracing::error!("Cache projector exited with error: {}", e);
+        info!(
+            "Starting {} cache projector scope(s)",
+            projector_scopes.len()
+        );
+        for scope in projector_scopes {
+            let projector_db = db.clone();
+            let projector_cfg = cache_cfg.clone();
+            let projector_db_name = scope.database;
+            let projector_ns_name = scope.namespace;
+            let projector_cache_store = Arc::clone(&cache_store);
+            let shutdown_for_projector = shutdown_rx.clone();
+            tokio::spawn(async move {
+                match CdcProjector::new(
+                    projector_db,
+                    projector_cache_store,
+                    &projector_cfg,
+                    &projector_db_name,
+                    &projector_ns_name,
+                )
+                .await
+                {
+                    Ok(mut projector) => {
+                        if let Err(e) = projector.run(shutdown_for_projector).await {
+                            tracing::error!(
+                                "Cache projector exited for {}/{} with error: {}",
+                                projector_db_name,
+                                projector_ns_name,
+                                e
+                            );
+                        }
                     }
+                    Err(e) => tracing::error!(
+                        "Failed to initialize cache projector for {}/{}: {}",
+                        projector_db_name,
+                        projector_ns_name,
+                        e
+                    ),
                 }
-                Err(e) => tracing::error!("Failed to initialize cache projector: {}", e),
-            }
-        });
+            });
+        }
     }
 
     if config.audit_enabled {
@@ -530,6 +549,90 @@ fn toml_value_to_string(value: &toml::Value) -> Option<String> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ScopeSpec {
+    database: String,
+    namespace: String,
+}
+
+fn parse_scope_specs(raw: &str) -> Vec<ScopeSpec> {
+    let mut scopes = Vec::new();
+    let mut seen = HashSet::new();
+
+    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let Some((database, namespace)) = entry.split_once('/') else {
+            continue;
+        };
+        let database = database.trim();
+        let namespace = namespace.trim();
+        if database.is_empty() || namespace.is_empty() {
+            continue;
+        }
+
+        if seen.insert((database.to_string(), namespace.to_string())) {
+            scopes.push(ScopeSpec {
+                database: database.to_string(),
+                namespace: namespace.to_string(),
+            });
+        }
+    }
+
+    scopes
+}
+
+fn resolve_cache_projector_scopes(config: &ServerConfig) -> Vec<ScopeSpec> {
+    if let Some(raw) = config.cache_projector_scopes.as_deref() {
+        let scopes = parse_scope_specs(raw);
+        if !scopes.is_empty() {
+            return scopes;
+        }
+        warn!(
+            "Ignoring empty/invalid PELAGO_CACHE_PROJECTOR_SCOPES='{}'; falling back to defaults",
+            raw
+        );
+    }
+
+    let mut scopes = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut push_scope = |database: &str, namespace: &str| {
+        if seen.insert((database.to_string(), namespace.to_string())) {
+            scopes.push(ScopeSpec {
+                database: database.to_string(),
+                namespace: namespace.to_string(),
+            });
+        }
+    };
+
+    push_scope(&config.default_database, &config.default_namespace);
+    if let Some(replication_scopes_raw) = config.replication_scopes.as_deref() {
+        let replication_scopes = parse_scope_specs(replication_scopes_raw);
+        if replication_scopes.is_empty() {
+            warn!(
+                "Ignoring empty/invalid PELAGO_REPLICATION_SCOPES='{}' while deriving cache projector defaults",
+                replication_scopes_raw
+            );
+        } else {
+            for scope in &replication_scopes {
+                push_scope(&scope.database, &scope.namespace);
+            }
+            return scopes;
+        }
+    }
+
+    let replication_database = config
+        .replication_database
+        .as_deref()
+        .unwrap_or(&config.default_database);
+    let replication_namespace = config
+        .replication_namespace
+        .as_deref()
+        .unwrap_or(&config.default_namespace);
+    push_scope(replication_database, replication_namespace);
+
+    scopes
+}
+
 fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
     &[
         ("fdb_cluster", "PELAGO_FDB_CLUSTER"),
@@ -549,6 +652,7 @@ fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
             "cache_projector_batch_size",
             "PELAGO_CACHE_PROJECTOR_BATCH_SIZE",
         ),
+        ("cache_projector_scopes", "PELAGO_CACHE_PROJECTOR_SCOPES"),
         ("auth_required", "PELAGO_AUTH_REQUIRED"),
         ("api_keys", "PELAGO_API_KEYS"),
         ("mtls_enabled", "PELAGO_MTLS_ENABLED"),
@@ -571,6 +675,7 @@ fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
         ("replication_peers", "PELAGO_REPLICATION_PEERS"),
         ("replication_database", "PELAGO_REPLICATION_DATABASE"),
         ("replication_namespace", "PELAGO_REPLICATION_NAMESPACE"),
+        ("replication_scopes", "PELAGO_REPLICATION_SCOPES"),
         ("replication_batch_size", "PELAGO_REPLICATION_BATCH_SIZE"),
         ("replication_poll_ms", "PELAGO_REPLICATION_POLL_MS"),
         ("replication_api_key", "PELAGO_REPLICATION_API_KEY"),
