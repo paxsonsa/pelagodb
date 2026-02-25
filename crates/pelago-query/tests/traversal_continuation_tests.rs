@@ -7,6 +7,9 @@ fn test_traversal_results_has_continuation_fields() {
         truncated: false,
         continuation_token: None,
         frontier: vec![],
+        scanned_keys: 0,
+        result_bytes: 0,
+        elapsed_ms: 0,
     };
     assert!(!results.truncated);
     assert!(results.continuation_token.is_none());
@@ -20,6 +23,9 @@ fn test_traversal_results_with_continuation() {
         truncated: true,
         continuation_token: Some(vec![1, 2, 3]),
         frontier: vec![("Person".to_string(), "1_42".to_string())],
+        scanned_keys: 0,
+        result_bytes: 0,
+        elapsed_ms: 0,
     };
     assert!(results.truncated);
     assert!(results.continuation_token.is_some());
@@ -39,6 +45,9 @@ fn test_traversal_results_multiple_frontier_entries() {
             ("Company".to_string(), "1_2".to_string()),
             ("Person".to_string(), "1_3".to_string()),
         ],
+        scanned_keys: 0,
+        result_bytes: 0,
+        elapsed_ms: 0,
     };
     assert_eq!(results.frontier.len(), 3);
     assert_eq!(results.frontier[1].0, "Company");

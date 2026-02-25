@@ -320,6 +320,9 @@ fn phase3_continuation_token_api() {
             ("Person".to_string(), "1_3".to_string()),
             ("Company".to_string(), "1_4".to_string()),
         ],
+        scanned_keys: 0,
+        result_bytes: 0,
+        elapsed_ms: 0,
     };
     assert!(results.truncated);
     assert!(results.continuation_token.is_some());
@@ -333,6 +336,9 @@ fn phase3_continuation_token_api() {
         truncated: false,
         continuation_token: None,
         frontier: vec![],
+        scanned_keys: 0,
+        result_bytes: 0,
+        elapsed_ms: 0,
     };
     assert!(!complete.truncated);
     assert!(complete.continuation_token.is_none());

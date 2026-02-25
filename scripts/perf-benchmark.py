@@ -18,7 +18,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -45,6 +45,68 @@ class BenchResult:
     @property
     def p99_ms(self) -> float:
         return percentile(self.samples_ms, 99.0)
+
+
+@dataclass(frozen=True)
+class ScenarioGate:
+    scenario: str
+    max_p95_ms: float
+    max_p99_ms: float
+    min_cache_hit_ratio: float
+    max_projector_lag_events: float
+    max_fallback_rate: float
+
+
+SCENARIO_GATES: Dict[str, ScenarioGate] = {
+    "S1": ScenarioGate(
+        scenario="S1",
+        max_p95_ms=40.0,
+        max_p99_ms=100.0,
+        min_cache_hit_ratio=0.90,
+        max_projector_lag_events=2_000.0,
+        max_fallback_rate=0.10,
+    ),
+    "S2": ScenarioGate(
+        scenario="S2",
+        max_p95_ms=50.0,
+        max_p99_ms=120.0,
+        min_cache_hit_ratio=0.92,
+        max_projector_lag_events=2_500.0,
+        max_fallback_rate=0.08,
+    ),
+    "S3": ScenarioGate(
+        scenario="S3",
+        max_p95_ms=60.0,
+        max_p99_ms=140.0,
+        min_cache_hit_ratio=0.90,
+        max_projector_lag_events=2_500.0,
+        max_fallback_rate=0.12,
+    ),
+    "S4": ScenarioGate(
+        scenario="S4",
+        max_p95_ms=70.0,
+        max_p99_ms=160.0,
+        min_cache_hit_ratio=0.85,
+        max_projector_lag_events=5_000.0,
+        max_fallback_rate=0.15,
+    ),
+    "S5": ScenarioGate(
+        scenario="S5",
+        max_p95_ms=90.0,
+        max_p99_ms=200.0,
+        min_cache_hit_ratio=0.80,
+        max_projector_lag_events=8_000.0,
+        max_fallback_rate=0.20,
+    ),
+    "S6": ScenarioGate(
+        scenario="S6",
+        max_p95_ms=110.0,
+        max_p99_ms=250.0,
+        min_cache_hit_ratio=0.75,
+        max_projector_lag_events=12_000.0,
+        max_fallback_rate=0.25,
+    ),
+}
 
 
 def percentile(values: List[float], p: float) -> float:
@@ -135,6 +197,112 @@ def print_summary(results: List[BenchResult], targets: Dict[str, float] | None, 
     if failed and enforce:
         return 2
     return 0
+
+
+def load_observability(path: str) -> Dict[str, float]:
+    if not path:
+        return {}
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"observability payload must be an object: {path}")
+
+    metrics: Dict[str, float] = {}
+    for key in ("cache_hit_ratio", "projector_lag_events", "fallback_rate"):
+        raw = payload.get(key)
+        if raw is None:
+            continue
+        try:
+            metrics[key] = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"observability field '{key}' must be numeric") from exc
+    return metrics
+
+
+def evaluate_scenario_gates(
+    scenario: str,
+    results: List[BenchResult],
+    observability: Dict[str, float],
+) -> tuple[bool, List[str], Dict[str, float]]:
+    if scenario not in SCENARIO_GATES:
+        raise ValueError(f"unknown scenario gate '{scenario}'")
+
+    gate = SCENARIO_GATES[scenario]
+    failures: List[str] = []
+
+    peak_p95 = max((r.p95_ms for r in results), default=0.0)
+    peak_p99 = max((r.p99_ms for r in results), default=0.0)
+    if peak_p95 > gate.max_p95_ms:
+        failures.append(
+            f"{scenario} latency gate failed: peak p95 {peak_p95:.3f}ms > {gate.max_p95_ms:.3f}ms"
+        )
+    if peak_p99 > gate.max_p99_ms:
+        failures.append(
+            f"{scenario} latency gate failed: peak p99 {peak_p99:.3f}ms > {gate.max_p99_ms:.3f}ms"
+        )
+
+    cache_hit_ratio = observability.get("cache_hit_ratio")
+    if cache_hit_ratio is None:
+        failures.append(f"{scenario} observability gate failed: missing cache_hit_ratio")
+    elif cache_hit_ratio < gate.min_cache_hit_ratio:
+        failures.append(
+            f"{scenario} cache gate failed: hit ratio {cache_hit_ratio:.4f} < {gate.min_cache_hit_ratio:.4f}"
+        )
+
+    projector_lag = observability.get("projector_lag_events")
+    if projector_lag is None:
+        failures.append(f"{scenario} observability gate failed: missing projector_lag_events")
+    elif projector_lag > gate.max_projector_lag_events:
+        failures.append(
+            f"{scenario} projector gate failed: lag {projector_lag:.1f} > {gate.max_projector_lag_events:.1f}"
+        )
+
+    fallback_rate = observability.get("fallback_rate")
+    if fallback_rate is None:
+        failures.append(f"{scenario} observability gate failed: missing fallback_rate")
+    elif fallback_rate > gate.max_fallback_rate:
+        failures.append(
+            f"{scenario} fallback gate failed: rate {fallback_rate:.4f} > {gate.max_fallback_rate:.4f}"
+        )
+
+    summary = {
+        "scenario": gate.scenario,
+        "peak_p95_ms": peak_p95,
+        "peak_p99_ms": peak_p99,
+        "cache_hit_ratio": cache_hit_ratio if cache_hit_ratio is not None else float("nan"),
+        "projector_lag_events": projector_lag if projector_lag is not None else float("nan"),
+        "fallback_rate": fallback_rate if fallback_rate is not None else float("nan"),
+        "max_p95_ms": gate.max_p95_ms,
+        "max_p99_ms": gate.max_p99_ms,
+        "min_cache_hit_ratio": gate.min_cache_hit_ratio,
+        "max_projector_lag_events": gate.max_projector_lag_events,
+        "max_fallback_rate": gate.max_fallback_rate,
+    }
+
+    return (len(failures) == 0, failures, summary)
+
+
+def print_scenario_gate_summary(summary: Dict[str, float], passed: bool) -> None:
+    print("\nScenario Gate Summary")
+    print(
+        "scenario={scenario} status={status} peak_p95={peak_p95:.3f}ms/{max_p95:.3f}ms "
+        "peak_p99={peak_p99:.3f}ms/{max_p99:.3f}ms "
+        "cache_hit_ratio={cache_hit:.4f}/{min_hit:.4f} "
+        "projector_lag_events={lag:.1f}/{max_lag:.1f} "
+        "fallback_rate={fallback:.4f}/{max_fallback:.4f}".format(
+            scenario=summary["scenario"],
+            status="PASS" if passed else "FAIL",
+            peak_p95=summary["peak_p95_ms"],
+            max_p95=summary["max_p95_ms"],
+            peak_p99=summary["peak_p99_ms"],
+            max_p99=summary["max_p99_ms"],
+            cache_hit=summary["cache_hit_ratio"],
+            min_hit=summary["min_cache_hit_ratio"],
+            lag=summary["projector_lag_events"],
+            max_lag=summary["max_projector_lag_events"],
+            fallback=summary["fallback_rate"],
+            max_fallback=summary["max_fallback_rate"],
+        )
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -230,6 +398,25 @@ def parse_args() -> argparse.Namespace:
         "--enforce-targets",
         action="store_true",
         help="Exit non-zero if any P99 target is missed",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=sorted(SCENARIO_GATES.keys()),
+        default="",
+        help="Optional S1-S6 scenario gate profile for latency/cache/projector thresholds",
+    )
+    parser.add_argument(
+        "--observability-json",
+        default="",
+        help=(
+            "JSON file with cache/projector metrics for scenario gates. "
+            "Expected fields: cache_hit_ratio, projector_lag_events, fallback_rate."
+        ),
+    )
+    parser.add_argument(
+        "--enforce-scenario-gates",
+        action="store_true",
+        help="Exit non-zero if selected S1-S6 scenario gate thresholds are missed",
     )
     parser.add_argument("--output-json", default="", help="Optional file path to write JSON summary")
     return parser.parse_args()
@@ -487,6 +674,30 @@ def main() -> int:
         results.append(run_case(name, cmd, args.warmup, args.runs))
 
     exit_code = print_summary(results, targets, args.enforce_targets)
+    observability: Dict[str, float] = {}
+    scenario_gate_summary: Optional[Dict[str, float]] = None
+    scenario_gate_passed: Optional[bool] = None
+    scenario_gate_failures: List[str] = []
+
+    if args.scenario:
+        try:
+            observability = load_observability(args.observability_json)
+        except Exception as exc:  # noqa: BLE001
+            print(f"scenario gate input failed: {exc}")
+            return 2
+
+        scenario_gate_passed, scenario_gate_failures, scenario_gate_summary = (
+            evaluate_scenario_gates(args.scenario, results, observability)
+        )
+        print_scenario_gate_summary(scenario_gate_summary, scenario_gate_passed)
+        for failure in scenario_gate_failures:
+            print(f"scenario-gate-fail: {failure}")
+
+        if args.enforce_scenario_gates and not scenario_gate_passed:
+            exit_code = 2
+    elif args.enforce_scenario_gates:
+        print("scenario gate enforcement requested but no --scenario was provided")
+        return 2
 
     if args.output_json:
         payload = {
@@ -509,6 +720,18 @@ def main() -> int:
             ],
             "targets_ms": targets,
             "enforced": args.enforce_targets,
+            "scenario": args.scenario,
+            "enforce_scenario_gates": args.enforce_scenario_gates,
+            "observability": observability,
+            "scenario_gate": (
+                {
+                    "passed": scenario_gate_passed,
+                    "summary": scenario_gate_summary,
+                    "failures": scenario_gate_failures,
+                }
+                if args.scenario
+                else None
+            ),
             "exit_code": exit_code,
         }
         out = Path(args.output_json)
