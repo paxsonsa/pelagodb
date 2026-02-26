@@ -260,13 +260,29 @@ impl AdminService for AdminServiceImpl {
                 .map_err(|e| {
                     Status::internal(format!("failed to estimate reverse edge scope: {}", e))
                 })?;
+        let edge_target_forward_meta_count = count_forward_meta_rows_for_target_type_up_to(
+            self.db.as_ref(),
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+            1000,
+            probe_limit,
+        )
+        .await
+        .map_err(|e| {
+            Status::internal(format!(
+                "failed to estimate forward/meta target cleanup scope: {}",
+                e
+            ))
+        })?;
 
         let estimated_mutated_keys = schema_count
             .saturating_add(data_count)
             .saturating_add(idx_count)
             .saturating_add(edge_forward_count)
             .saturating_add(edge_meta_count)
-            .saturating_add(edge_reverse_count);
+            .saturating_add(edge_reverse_count)
+            .saturating_add(edge_target_forward_meta_count.saturating_mul(2));
         let estimated_write_bytes = estimated_mutated_keys.saturating_mul(256);
         if estimated_mutated_keys > C4_TX_MAX_MUTATED_KEYS
             || estimated_write_bytes > C4_TX_MAX_WRITE_BYTES
@@ -330,6 +346,20 @@ impl AdminService for AdminServiceImpl {
         .map_err(|e| {
             Status::internal(format!(
                 "failed to clear reverse edges by dropped source type: {}",
+                e
+            ))
+        })?;
+        clear_forward_meta_for_target_type(
+            self.db.as_ref(),
+            &ctx.database,
+            &ctx.namespace,
+            &entity_type,
+            1000,
+        )
+        .await
+        .map_err(|e| {
+            Status::internal(format!(
+                "failed to clear forward/meta edges by dropped target type: {}",
                 e
             ))
         })?;
@@ -672,6 +702,199 @@ async fn clear_reverse_keys_for_source_type(
     }
 
     Ok(cleared)
+}
+
+async fn clear_forward_meta_for_target_type(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    target_entity_type: &str,
+    batch_size: usize,
+) -> Result<i64, pelago_core::PelagoError> {
+    let edge_subspace = Subspace::namespace(database, namespace).edge();
+    let meta_prefix = edge_subspace
+        .pack()
+        .add_marker(pelago_storage::subspace::edge_markers::FORWARD_META)
+        .build()
+        .to_vec();
+    let range_end = {
+        let mut end = meta_prefix.clone();
+        end.push(0xFF);
+        end
+    };
+    let mut range_start = meta_prefix;
+    let mut cleared = 0i64;
+
+    loop {
+        let rows = db
+            .get_range(&range_start, &range_end, batch_size.max(1))
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+
+        let trx = db.create_transaction()?;
+        let mut has_mutations = false;
+
+        for (meta_key, meta_value) in &rows {
+            let edge: EdgeMetaEnvelope = match decode_cbor(meta_value) {
+                Ok(edge) => edge,
+                Err(_) => continue,
+            };
+            let (source, target, label) = match (
+                edge.source.as_ref(),
+                edge.target.as_ref(),
+                edge.label.as_deref(),
+            ) {
+                (Some(source), Some(target), Some(label)) if !label.is_empty() => {
+                    (source, target, label)
+                }
+                _ => continue,
+            };
+            if target.entity_type != target_entity_type {
+                continue;
+            }
+
+            trx.clear(meta_key);
+
+            if let Some(forward_key) = forward_key_from_meta_key(&edge_subspace, meta_key) {
+                trx.clear(&forward_key);
+            }
+
+            let reverse_key = edge_subspace
+                .pack()
+                .add_marker(pelago_storage::subspace::edge_markers::REVERSE)
+                .add_string(&target.database)
+                .add_string(&target.namespace)
+                .add_string(&target.entity_type)
+                .add_string(&target.node_id)
+                .add_string(label)
+                .add_string(&source.entity_type)
+                .add_string(&source.node_id)
+                .build();
+            trx.clear(reverse_key.as_ref());
+
+            // Bidirectional reverse-direction key (safe clear even if absent).
+            let rev_reverse_key = edge_subspace
+                .pack()
+                .add_marker(pelago_storage::subspace::edge_markers::REVERSE)
+                .add_string(&source.database)
+                .add_string(&source.namespace)
+                .add_string(&source.entity_type)
+                .add_string(&source.node_id)
+                .add_string(label)
+                .add_string(&target.entity_type)
+                .add_string(&target.node_id)
+                .build();
+            trx.clear(rev_reverse_key.as_ref());
+
+            has_mutations = true;
+            cleared = cleared.saturating_add(1);
+        }
+
+        if has_mutations {
+            trx.commit().await.map_err(|e| {
+                pelago_core::PelagoError::Internal(format!(
+                    "clear forward/meta keys by target type commit failed: {}",
+                    e
+                ))
+            })?;
+        }
+
+        if rows.len() < batch_size.max(1) {
+            break;
+        }
+        if let Some((last_key, _)) = rows.last() {
+            let mut next = last_key.clone();
+            next.push(0x00);
+            range_start = next;
+        } else {
+            break;
+        }
+    }
+
+    Ok(cleared)
+}
+
+fn forward_key_from_meta_key(edge_subspace: &Subspace, meta_key: &[u8]) -> Option<Vec<u8>> {
+    let marker_pos = edge_subspace.prefix().len();
+    if meta_key.len() <= marker_pos {
+        return None;
+    }
+    if meta_key[marker_pos] != pelago_storage::subspace::edge_markers::FORWARD_META {
+        return None;
+    }
+
+    let mut out = meta_key.to_vec();
+    out[marker_pos] = pelago_storage::subspace::edge_markers::FORWARD;
+    Some(out)
+}
+
+async fn count_forward_meta_rows_for_target_type_up_to(
+    db: &PelagoDb,
+    database: &str,
+    namespace: &str,
+    target_entity_type: &str,
+    batch_size: usize,
+    cap: usize,
+) -> Result<usize, pelago_core::PelagoError> {
+    if cap == 0 {
+        return Ok(0);
+    }
+
+    let edge_subspace = Subspace::namespace(database, namespace).edge();
+    let meta_prefix = edge_subspace
+        .pack()
+        .add_marker(pelago_storage::subspace::edge_markers::FORWARD_META)
+        .build()
+        .to_vec();
+    let range_end = {
+        let mut end = meta_prefix.clone();
+        end.push(0xFF);
+        end
+    };
+    let mut range_start = meta_prefix;
+    let mut matched = 0usize;
+
+    loop {
+        let rows = db
+            .get_range(&range_start, &range_end, batch_size.max(1))
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+
+        for (_meta_key, meta_value) in &rows {
+            let edge: EdgeMetaEnvelope = match decode_cbor(meta_value) {
+                Ok(edge) => edge,
+                Err(_) => continue,
+            };
+            let Some(target) = edge.target.as_ref() else {
+                continue;
+            };
+            if target.entity_type != target_entity_type {
+                continue;
+            }
+
+            matched = matched.saturating_add(1);
+            if matched >= cap {
+                return Ok(matched);
+            }
+        }
+
+        if rows.len() < batch_size.max(1) {
+            break;
+        }
+        if let Some((last_key, _)) = rows.last() {
+            let mut next = last_key.clone();
+            next.push(0x00);
+            range_start = next;
+        } else {
+            break;
+        }
+    }
+
+    Ok(matched)
 }
 
 async fn count_prefix_entries_up_to(
