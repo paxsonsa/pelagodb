@@ -8,6 +8,7 @@ use crate::Subspace;
 use pelago_core::PelagoError;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
+use tracing::warn;
 
 /// ID allocator that batches allocation from FDB atomic counters
 pub struct IdAllocator {
@@ -94,38 +95,35 @@ impl IdAllocator {
     ) -> Result<u64, PelagoError> {
         let subspace = Subspace::namespace(database, namespace).ids();
         let key = Self::counter_key(&subspace, entity_type, self.site_id);
+        let batch_size = self.batch_size;
+        let counter_key = key.clone();
 
-        // Create a transaction for atomic add
-        let trx = self.db.create_transaction()?;
+        // Use FDB run() retry semantics to absorb retryable conflicts under contention.
+        self.db
+            .transact(move |trx, _| {
+                let key = counter_key.clone();
+                async move {
+                    let current = match trx.get(&key, false).await? {
+                        Some(bytes) if bytes.len() == 8 => {
+                            let arr: [u8; 8] = bytes.as_ref().try_into().unwrap();
+                            u64::from_be_bytes(arr)
+                        }
+                        Some(bytes) => {
+                            warn!(
+                                bytes_len = bytes.len(),
+                                "invalid id counter bytes length; resetting counter to zero"
+                            );
+                            0
+                        }
+                        None => 0,
+                    };
 
-        // Read current value
-        let current = match trx
-            .get(&key, false)
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to read ID counter: {}", e)))?
-        {
-            Some(bytes) => {
-                if bytes.len() != 8 {
-                    return Err(PelagoError::Internal(format!(
-                        "Invalid ID counter bytes length: {}",
-                        bytes.len()
-                    )));
+                    let new_value = current.saturating_add(batch_size);
+                    trx.set(&key, &new_value.to_be_bytes());
+                    Ok(current)
                 }
-                let arr: [u8; 8] = bytes.as_ref().try_into().unwrap();
-                u64::from_be_bytes(arr)
-            }
-            None => 0,
-        };
-
-        // Write new value (current + batch_size)
-        let new_value = current + self.batch_size;
-        trx.set(&key, &new_value.to_be_bytes());
-
-        trx.commit()
+            })
             .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to allocate ID batch: {}", e)))?;
-
-        Ok(current)
     }
 }
 

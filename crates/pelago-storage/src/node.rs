@@ -693,6 +693,24 @@ impl NodeStore {
         // Validate merged properties (not just new ones)
         validate_properties(entity_type, &schema, &merged_properties)?;
 
+        let mut unique_constraints_to_check = Vec::new();
+        for (prop_name, prop_def) in &schema.properties {
+            if prop_def.index != IndexType::Unique {
+                continue;
+            }
+            let Some(new_value) = merged_properties.get(prop_name) else {
+                continue;
+            };
+            if new_value.is_null() {
+                continue;
+            }
+            if old_properties.get(prop_name) == Some(new_value) {
+                continue;
+            }
+
+            unique_constraints_to_check.push((prop_name.clone(), new_value.clone()));
+        }
+
         // Compute index changes between old and merged
         let removals = compute_index_removals(
             &subspace,
@@ -736,6 +754,21 @@ impl NodeStore {
         // Write in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
         let mut cdc = CdcAccumulator::new(&self.site_id);
+
+        // Re-check changed unique values inside the write transaction so unique checks and
+        // index writes share one commit boundary.
+        for (property, value) in &unique_constraints_to_check {
+            self.check_unique_constraint_in_txn(
+                &trx,
+                database,
+                namespace,
+                entity_type,
+                property,
+                value,
+                &node_id_bytes,
+            )
+            .await?;
+        }
 
         // Remove old index entries
         for entry in &removals {
@@ -1058,6 +1091,43 @@ impl NodeStore {
             }
             None => Ok(None),
         }
+    }
+
+    async fn check_unique_constraint_in_txn(
+        &self,
+        trx: &foundationdb::Transaction,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        property: &str,
+        value: &Value,
+        current_node_id: &[u8; 9],
+    ) -> Result<(), PelagoError> {
+        let subspace = Subspace::namespace(database, namespace).index();
+        let encoded_value = pelago_core::encoding::encode_value_for_index(value)?;
+        let key = subspace
+            .pack()
+            .add_string(entity_type)
+            .add_string(property)
+            .add_marker(crate::index::markers::UNIQUE)
+            .add_raw_bytes(&encoded_value)
+            .build();
+
+        let existing = trx
+            .get(key.as_ref(), false)
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Unique constraint check failed: {}", e)))?;
+        if let Some(existing_node_id) = existing {
+            if existing_node_id.as_ref() != current_node_id {
+                return Err(PelagoError::UniqueConstraintViolation {
+                    entity_type: entity_type.to_string(),
+                    field: property.to_string(),
+                    value: format!("{:?}", value),
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 
