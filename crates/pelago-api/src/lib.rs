@@ -18,6 +18,7 @@ pub mod node_service;
 pub mod query_service;
 pub mod replication_service;
 pub mod schema_service;
+mod service_common;
 pub mod watch_service;
 
 pub use admin_service::AdminServiceImpl;

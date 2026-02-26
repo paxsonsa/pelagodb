@@ -17,6 +17,7 @@ pub mod index;
 pub mod job_executor;
 pub mod job_worker;
 pub mod jobs;
+mod mutation;
 pub mod node;
 pub mod replication;
 #[cfg(feature = "cache")]
