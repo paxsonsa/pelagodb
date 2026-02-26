@@ -22,6 +22,8 @@ cache_enabled = true
 auth_required = false
 docs_enabled = true
 docs_addr = "127.0.0.1:4070"
+ui_enabled = false
+ui_addr = "127.0.0.1:4080"
 ```
 
 Reference template: `pelago-server.example.toml`.
@@ -94,6 +96,12 @@ Recommended topology:
 - `PELAGO_DOCS_ADDR` (default: `127.0.0.1:4070`)
 - `PELAGO_DOCS_DIR` (default: `docs`)
 - `PELAGO_DOCS_TITLE` (default: `PelagoDB Documentation`)
+
+## UI Console Controls
+- `PELAGO_UI_ENABLED` (default: `false`)
+- `PELAGO_UI_ADDR` (default: `127.0.0.1:4080`)
+- `PELAGO_UI_ASSETS_DIR` (default: `ui/dist`)
+- `PELAGO_UI_TITLE` (default: `PelagoDB Console`)
 
 ## Common Admin Commands
 ```bash

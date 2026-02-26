@@ -157,6 +157,24 @@ cargo run -p pelago-server --bin pelago-server
 ```
 Open `http://127.0.0.1:4070/docs/`
 
+### 8) Optional: run the embedded UI console
+Build frontend assets once:
+```bash
+cd ui
+npm install
+npm run build
+cd ..
+```
+
+Then start server with UI enabled:
+```bash
+export PELAGO_UI_ENABLED=true
+export PELAGO_UI_ADDR=127.0.0.1:4080
+export PELAGO_UI_ASSETS_DIR=ui/dist
+cargo run -p pelago-server --bin pelago-server
+```
+Open `http://127.0.0.1:4080/ui/`
+
 ## Quick Links
 - Documentation index: `docs/README.md`
 - Getting started: `docs/01-getting-started.md`
@@ -167,6 +185,7 @@ Open `http://127.0.0.1:4070/docs/`
 - Replication runtime architecture: `docs/13-centralized-replication-and-scaling.md`
 - Operations playbook: `docs/09-operations-playbook.md`
 - Hosted docs setup: `docs/12-server-docs-site.md`
+- Embedded UI console: `docs/19-ui-console.md`
 - API protocol: `proto/pelago.proto`
 - CLI: `crates/pelago-cli`
 - Server: `crates/pelago-server`

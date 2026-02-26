@@ -290,6 +290,27 @@ pub struct ServerConfig {
     )]
     pub docs_title: String,
 
+    /// Enable embedded UI HTTP server
+    #[arg(
+        long,
+        env = "PELAGO_UI_ENABLED",
+        default_value_t = false,
+        action = ArgAction::Set
+    )]
+    pub ui_enabled: bool,
+
+    /// Embedded UI bind address
+    #[arg(long, env = "PELAGO_UI_ADDR", default_value = "127.0.0.1:4080")]
+    pub ui_addr: String,
+
+    /// Embedded UI static assets directory
+    #[arg(long, env = "PELAGO_UI_ASSETS_DIR", default_value = "ui/dist")]
+    pub ui_assets_dir: String,
+
+    /// Embedded UI title
+    #[arg(long, env = "PELAGO_UI_TITLE", default_value = "PelagoDB Console")]
+    pub ui_title: String,
+
     /// Max total watch subscriptions
     #[arg(long, env = "PELAGO_WATCH_MAX_SUBSCRIPTIONS")]
     pub watch_max_subscriptions: Option<usize>,
@@ -405,6 +426,10 @@ impl Default for ServerConfig {
             docs_addr: "127.0.0.1:4070".to_string(),
             docs_dir: "docs".to_string(),
             docs_title: "PelagoDB Documentation".to_string(),
+            ui_enabled: false,
+            ui_addr: "127.0.0.1:4080".to_string(),
+            ui_assets_dir: "ui/dist".to_string(),
+            ui_title: "PelagoDB Console".to_string(),
             watch_max_subscriptions: None,
             watch_max_namespace_subscriptions: None,
             watch_max_query_watches: None,

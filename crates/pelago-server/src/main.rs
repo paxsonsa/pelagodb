@@ -5,8 +5,10 @@
 //! Initializes the FDB connection, sets up shared components (schema cache, ID allocator),
 //! and starts the gRPC server with all service handlers.
 
+mod auth_identity;
 mod docs_server;
 mod replicator;
+mod ui_server;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -30,7 +32,6 @@ use pelago_storage::{
     RocksCacheStore, SchemaCache, SchemaRegistry,
 };
 use replicator::{start_replicators, ReplicatorConfig};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -39,6 +40,9 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Status};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use ui_server::{UiServerConfig, UiServerDeps};
+
+use crate::auth_identity::resolve_principal_from_tonic_request;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -173,11 +177,11 @@ async fn main() -> Result<()> {
         watch_registry.clone(),
     );
     let auth_runtime = AuthRuntime::with_db(db.clone());
-    let auth_service = AuthServiceImpl::new(db.clone(), auth_runtime);
+    let auth_service = AuthServiceImpl::new(db.clone(), auth_runtime.clone());
     let auth_required = config.auth_required;
     let interceptor = auth_interceptor(
         auth_required,
-        auth_service.runtime(),
+        auth_runtime.clone(),
         config.mtls_subject_header.clone(),
     );
 
@@ -337,6 +341,38 @@ async fn main() -> Result<()> {
         });
     } else {
         info!("Docs server disabled (--docs-enabled=true to enable)");
+    }
+
+    if config.ui_enabled {
+        let ui_config = UiServerConfig {
+            addr: config.ui_addr.clone(),
+            assets_dir: config.ui_assets_dir.clone(),
+            title: config.ui_title.clone(),
+        };
+        let ui_deps = UiServerDeps {
+            db: db.clone(),
+            schema_registry: Arc::clone(&schema_registry),
+            id_allocator: Arc::clone(&id_allocator),
+            node_store: Arc::clone(&node_store),
+            cached_read_path: cached_read_path.clone(),
+            watch_registry: watch_registry.clone(),
+            auth_runtime: auth_runtime.clone(),
+            auth_required: config.auth_required,
+            mtls_subject_header: config.mtls_subject_header.clone(),
+            default_database: config.default_database.clone(),
+            default_namespace: config.default_namespace.clone(),
+            site_id: config.site_id,
+            metrics_enabled: config.metrics_enabled,
+            metrics_addr: config.metrics_addr.clone(),
+        };
+        let shutdown_for_ui = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = ui_server::serve_ui(ui_config, ui_deps, shutdown_for_ui).await {
+                warn!("UI server exited with error: {}", e);
+            }
+        });
+    } else {
+        info!("UI server disabled (--ui-enabled=true to enable)");
     }
 
     // Parse listen address
@@ -733,6 +769,10 @@ fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
         ("docs_addr", "PELAGO_DOCS_ADDR"),
         ("docs_dir", "PELAGO_DOCS_DIR"),
         ("docs_title", "PELAGO_DOCS_TITLE"),
+        ("ui_enabled", "PELAGO_UI_ENABLED"),
+        ("ui_addr", "PELAGO_UI_ADDR"),
+        ("ui_assets_dir", "PELAGO_UI_ASSETS_DIR"),
+        ("ui_title", "PELAGO_UI_TITLE"),
         ("watch_max_subscriptions", "PELAGO_WATCH_MAX_SUBSCRIPTIONS"),
         (
             "watch_max_namespace_subscriptions",
@@ -818,45 +858,11 @@ fn auth_interceptor(
             return Ok(req);
         }
 
-        if let Some(fingerprint) = request_peer_cert_fingerprint(&req) {
-            if let Some(principal) = runtime.principal_for_mtls_fingerprint(&fingerprint) {
-                req.extensions_mut().insert(principal);
-                return Ok(req);
-            }
-        }
-
-        if let Some(subject) = req
-            .metadata()
-            .get(mtls_subject_header.as_str())
-            .and_then(|v| v.to_str().ok())
+        if let Some(principal) =
+            resolve_principal_from_tonic_request(&runtime, &mtls_subject_header, &req)
         {
-            if let Some(principal) = runtime.principal_for_mtls_subject(subject) {
-                req.extensions_mut().insert(principal);
-                return Ok(req);
-            }
-        }
-
-        if let Some(key) = req
-            .metadata()
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(principal) = runtime.principal_for_api_key(key) {
-                req.extensions_mut().insert(principal);
-                return Ok(req);
-            }
-        }
-
-        if let Some(auth) = req
-            .metadata()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-        {
-            let token = auth.strip_prefix("Bearer ").unwrap_or(auth);
-            if let Some(principal) = runtime.validate_bearer_token_blocking(token) {
-                req.extensions_mut().insert(principal);
-                return Ok(req);
-            }
+            req.extensions_mut().insert(principal);
+            return Ok(req);
         }
 
         Err(Status::unauthenticated(
@@ -946,21 +952,4 @@ fn build_server_tls_config(config: &ServerConfig) -> Result<Option<ServerTlsConf
     }
 
     Ok(Some(tls))
-}
-
-fn request_peer_cert_fingerprint(req: &Request<()>) -> Option<String> {
-    let certs = req.peer_certs()?;
-    let first = certs.first()?;
-    Some(sha256_fingerprint(first.as_ref()))
-}
-
-fn sha256_fingerprint(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::from("sha256:");
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for b in digest {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
 }

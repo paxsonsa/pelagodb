@@ -63,6 +63,7 @@
 
 ## Hosted Docs
 - `docs/12-server-docs-site.md`
+- `docs/19-ui-console.md`
 
 ## Source of Truth
 - Protocol/API contract: `proto/pelago.proto`

@@ -49,6 +49,12 @@ docs_addr = "127.0.0.1:4070"
 docs_dir = "docs"
 docs_title = "PelagoDB Documentation"
 
+# Embedded UI server
+ui_enabled = false
+ui_addr = "127.0.0.1:4080"
+ui_assets_dir = "ui/dist"
+ui_title = "PelagoDB Console"
+
 # Watch limits (optional)
 # watch_max_subscriptions = 1024
 # watch_max_namespace_subscriptions = 256
