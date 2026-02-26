@@ -12,9 +12,10 @@
 //! - delete_edge: Remove all paired entries
 //! - list_edges: Range scan with optional label filter
 
-use crate::cdc::{CdcAccumulator, CdcOperation};
+use crate::cdc::CdcOperation;
 use crate::db::PelagoDb;
 use crate::ids::IdAllocator;
+use crate::mutation;
 use crate::node::NodeStore;
 use crate::schema::SchemaRegistry;
 use crate::subspace::edge_markers;
@@ -278,7 +279,7 @@ impl EdgeStore {
             }
 
             let trx = self.db.create_transaction()?;
-            let mut cdc = CdcAccumulator::new(&self.site_id);
+            let mut cdc = mutation::cdc_for_site(&self.site_id);
 
             for (keys, source, target, label) in &planned {
                 trx.clear(keys.forward_key.as_ref());
@@ -304,9 +305,7 @@ impl EdgeStore {
                 cdc.flush(&trx, database, namespace)?;
             }
 
-            trx.commit().await.map_err(|e| {
-                PelagoError::Internal(format!("Failed to cascade-delete edges for node: {}", e))
-            })?;
+            mutation::commit_or_internal(trx, "cascade-delete edges for node").await?;
 
             total_deleted = total_deleted.saturating_add(planned.len());
         }
@@ -412,9 +411,7 @@ impl EdgeStore {
             trx.set(rev_forward.as_ref(), &edge_bytes);
             trx.set(rev_reverse.as_ref(), &edge_bytes);
         }
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated edge create: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated edge create").await?;
         Ok(true)
     }
 
@@ -498,9 +495,7 @@ impl EdgeStore {
             trx.clear(rev_forward.as_ref());
             trx.clear(rev_reverse.as_ref());
         }
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated edge delete: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated edge delete").await?;
         Ok(true)
     }
 
@@ -567,7 +562,7 @@ impl EdgeStore {
 
         // Write in a single transaction (edge keys + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
 
         if self
             .node_delete_guard_exists_in_txn(
@@ -663,9 +658,7 @@ impl EdgeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to create edge: {}", e)))?;
+        mutation::commit_or_internal(trx, "create edge").await?;
 
         Ok(StoredEdge::new(
             edge_id.to_string(),
@@ -796,7 +789,7 @@ impl EdgeStore {
 
         // Delete in a single transaction (edge keys + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
 
         trx.clear(keys.forward_key.as_ref());
         trx.clear(keys.meta_key.as_ref());
@@ -820,9 +813,7 @@ impl EdgeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to delete edge: {}", e)))?;
+        mutation::commit_or_internal(trx, "delete edge").await?;
 
         Ok(true)
     }

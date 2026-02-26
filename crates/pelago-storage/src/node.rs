@@ -12,11 +12,12 @@
 //! - update_node: Read-modify-write with index diff
 //! - delete_node: Remove data, indexes, cascade incident edges, emit CDC
 
-use crate::cdc::{CdcAccumulator, CdcOperation};
+use crate::cdc::CdcOperation;
 use crate::db::PelagoDb;
 use crate::edge::EdgeStore;
 use crate::ids::IdAllocator;
 use crate::index::{compute_index_entries, compute_index_removals, IndexEntry, IndexEntryType};
+use crate::mutation;
 use crate::schema::SchemaRegistry;
 use crate::term_index::{
     apply_term_posting_changes, compute_term_posting_changes, compute_term_postings,
@@ -188,9 +189,7 @@ impl NodeStore {
             Self::write_index_entry(&trx, entry)?;
         }
         apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, 1).await?;
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated node create: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated node create").await?;
         Ok(true)
     }
 
@@ -288,9 +287,7 @@ impl NodeStore {
         }
         apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, 0).await?;
         trx.set(data_key.as_ref(), &updated_data);
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated node update: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated node update").await?;
         Ok(true)
     }
 
@@ -353,9 +350,7 @@ impl NodeStore {
             trx.clear(entry.key.as_ref());
         }
         apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, -1).await?;
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated node delete: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated node delete").await?;
 
         let edge_store = EdgeStore::new(
             self.db.clone(),
@@ -420,12 +415,7 @@ impl NodeStore {
 
         let trx = self.db.create_transaction()?;
         trx.set(data_key.as_ref(), &node_data);
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!(
-                "Failed to apply replicated ownership transfer: {}",
-                e
-            ))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated ownership transfer").await?;
         Ok(true)
     }
 
@@ -507,7 +497,7 @@ impl NodeStore {
 
         // Write everything in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
 
         // Write data key
         let data_subspace = subspace.data();
@@ -532,9 +522,7 @@ impl NodeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit: mutation + CDC
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to create node: {}", e)))?;
+        mutation::commit_or_internal(trx, "create node").await?;
 
         Ok(stored_node)
     }
@@ -763,7 +751,7 @@ impl NodeStore {
 
         // Write in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
 
         // Re-check changed unique values inside the write transaction so unique checks and
         // index writes share one commit boundary.
@@ -806,9 +794,7 @@ impl NodeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to update node: {}", e)))?;
+        mutation::commit_or_internal(trx, "update node").await?;
 
         Ok(StoredNode {
             id: node_id.to_string(),
@@ -879,7 +865,7 @@ impl NodeStore {
 
         // Delete in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
 
         // Remove data
         trx.clear(data_key.as_ref());
@@ -901,9 +887,7 @@ impl NodeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to delete node: {}", e)))?;
+        mutation::commit_or_internal(trx, "delete node").await?;
 
         let edge_store = EdgeStore::new(
             self.db.clone(),
@@ -919,12 +903,11 @@ impl NodeStore {
         // Clear delete guard after edge cleanup has completed.
         let clear_trx = self.db.create_transaction()?;
         clear_trx.clear(guard_key.as_ref());
-        clear_trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!(
-                "Failed to clear node delete guard for {}:{}: {}",
-                entity_type, node_id, e
-            ))
-        })?;
+        mutation::commit_or_internal(
+            clear_trx,
+            &format!("clear node delete guard for {}:{}", entity_type, node_id),
+        )
+        .await?;
 
         Ok(true)
     }
@@ -1071,7 +1054,7 @@ impl NodeStore {
         let node_data = encode_cbor(&existing_data)?;
 
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
         trx.set(data_key.as_ref(), &node_data);
         cdc.push(CdcOperation::OwnershipTransfer {
             entity_type: entity_type.to_string(),
@@ -1080,9 +1063,7 @@ impl NodeStore {
             current_site_id: target_site_id.to_string(),
         });
         cdc.flush(&trx, database, namespace)?;
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to transfer ownership: {}", e)))?;
+        mutation::commit_or_internal(trx, "transfer ownership").await?;
 
         Ok((true, previous_site_id, target_site_id))
     }
