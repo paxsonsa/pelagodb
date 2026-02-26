@@ -12,11 +12,12 @@
 //! - update_node: Read-modify-write with index diff
 //! - delete_node: Remove data, indexes, cascade incident edges, emit CDC
 
-use crate::cdc::{CdcAccumulator, CdcOperation};
+use crate::cdc::CdcOperation;
 use crate::db::PelagoDb;
 use crate::edge::EdgeStore;
 use crate::ids::IdAllocator;
 use crate::index::{compute_index_entries, compute_index_removals, IndexEntry, IndexEntryType};
+use crate::mutation;
 use crate::schema::SchemaRegistry;
 use crate::term_index::{
     apply_term_posting_changes, compute_term_posting_changes, compute_term_postings,
@@ -25,7 +26,7 @@ use crate::term_index::{
 use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
-use pelago_core::schema::{EntitySchema, ExtrasPolicy, IndexType};
+use pelago_core::schema::{EdgeDirection, EntitySchema, ExtrasPolicy, IndexType};
 use pelago_core::{NodeId, PelagoError, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -80,6 +81,16 @@ impl NodeStore {
             .pack()
             .add_string(entity_type)
             .add_int(site_id as i64)
+            .add_raw_bytes(node_id)
+            .build()
+    }
+
+    /// Build the node-delete guard key.
+    fn delete_guard_key(subspace: &Subspace, entity_type: &str, node_id: &[u8]) -> Bytes {
+        subspace
+            .pack()
+            .add_string("__deleting")
+            .add_string(entity_type)
             .add_raw_bytes(node_id)
             .build()
     }
@@ -178,9 +189,7 @@ impl NodeStore {
             Self::write_index_entry(&trx, entry)?;
         }
         apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, 1).await?;
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated node create: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated node create").await?;
         Ok(true)
     }
 
@@ -278,9 +287,7 @@ impl NodeStore {
         }
         apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, 0).await?;
         trx.set(data_key.as_ref(), &updated_data);
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated node update: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated node update").await?;
         Ok(true)
     }
 
@@ -343,9 +350,7 @@ impl NodeStore {
             trx.clear(entry.key.as_ref());
         }
         apply_term_posting_changes(&trx, &subspace, entity_type, &term_changes, -1).await?;
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated node delete: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated node delete").await?;
 
         let edge_store = EdgeStore::new(
             self.db.clone(),
@@ -410,12 +415,7 @@ impl NodeStore {
 
         let trx = self.db.create_transaction()?;
         trx.set(data_key.as_ref(), &node_data);
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!(
-                "Failed to apply replicated ownership transfer: {}",
-                e
-            ))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated ownership transfer").await?;
         Ok(true)
     }
 
@@ -497,7 +497,7 @@ impl NodeStore {
 
         // Write everything in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
 
         // Write data key
         let data_subspace = subspace.data();
@@ -522,9 +522,7 @@ impl NodeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit: mutation + CDC
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to create node: {}", e)))?;
+        mutation::commit_or_internal(trx, "create node").await?;
 
         Ok(stored_node)
     }
@@ -753,7 +751,7 @@ impl NodeStore {
 
         // Write in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
 
         // Re-check changed unique values inside the write transaction so unique checks and
         // index writes share one commit boundary.
@@ -796,9 +794,7 @@ impl NodeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to update node: {}", e)))?;
+        mutation::commit_or_internal(trx, "update node").await?;
 
         Ok(StoredNode {
             id: node_id.to_string(),
@@ -836,6 +832,7 @@ impl NodeStore {
         let subspace = Subspace::namespace(database, namespace);
         let data_subspace = subspace.data();
         let data_key = Self::data_key(&data_subspace, entity_type, &node_id_bytes);
+        let guard_key = Self::delete_guard_key(&data_subspace, entity_type, &node_id_bytes);
 
         // Read existing node for CDC and index removal
         let existing_bytes = match self.db.get(data_key.as_ref()).await? {
@@ -868,10 +865,11 @@ impl NodeStore {
 
         // Delete in a single transaction (data + indexes + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
 
         // Remove data
         trx.clear(data_key.as_ref());
+        trx.set(guard_key.as_ref(), b"1");
 
         // Remove index entries
         for entry in &removals {
@@ -889,9 +887,7 @@ impl NodeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to delete node: {}", e)))?;
+        mutation::commit_or_internal(trx, "delete node").await?;
 
         let edge_store = EdgeStore::new(
             self.db.clone(),
@@ -903,6 +899,15 @@ impl NodeStore {
         let _ = edge_store
             .delete_edges_for_node(database, namespace, entity_type, node_id)
             .await?;
+
+        // Clear delete guard after edge cleanup has completed.
+        let clear_trx = self.db.create_transaction()?;
+        clear_trx.clear(guard_key.as_ref());
+        mutation::commit_or_internal(
+            clear_trx,
+            &format!("clear node delete guard for {}:{}", entity_type, node_id),
+        )
+        .await?;
 
         Ok(true)
     }
@@ -949,6 +954,7 @@ impl NodeStore {
 
         let mut seen = HashSet::new();
         let mut edge_count = 0usize;
+        let mut estimated_edge_mutations = 0usize;
         for edge in candidates {
             let key = format!(
                 "{}|{}|{}|{}|{}|{}|{}",
@@ -964,12 +970,14 @@ impl NodeStore {
                 continue;
             }
             edge_count = edge_count.saturating_add(1);
+            estimated_edge_mutations = estimated_edge_mutations
+                .saturating_add(self.estimate_edge_mutation_entries_for_scope(&edge).await?);
             if edge_count > cascade_probe_limit {
                 break;
             }
         }
 
-        let estimated_mutated_keys = 2usize.saturating_add(edge_count.saturating_mul(3));
+        let estimated_mutated_keys = 2usize.saturating_add(estimated_edge_mutations);
         let estimated_write_bytes = estimated_mutated_keys.saturating_mul(256);
         Ok(MutationScopeEstimate {
             estimated_mutated_keys,
@@ -977,6 +985,30 @@ impl NodeStore {
             estimated_cascade_edges: edge_count,
             exceeded_cascade_probe_limit: edge_count > cascade_probe_limit,
         })
+    }
+
+    async fn estimate_edge_mutation_entries_for_scope(
+        &self,
+        edge: &crate::edge::StoredEdge,
+    ) -> Result<usize, PelagoError> {
+        let Some(schema) = self
+            .schema_registry
+            .get_schema(
+                &edge.source.database,
+                &edge.source.namespace,
+                &edge.source.entity_type,
+            )
+            .await?
+        else {
+            return Ok(3);
+        };
+
+        let is_bidirectional = schema
+            .edges
+            .get(&edge.label)
+            .map(|def| def.direction == EdgeDirection::Bidirectional)
+            .unwrap_or(false);
+        Ok(if is_bidirectional { 5 } else { 3 })
     }
 
     /// Transfer node ownership (locality) to another site.
@@ -1022,7 +1054,7 @@ impl NodeStore {
         let node_data = encode_cbor(&existing_data)?;
 
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
         trx.set(data_key.as_ref(), &node_data);
         cdc.push(CdcOperation::OwnershipTransfer {
             entity_type: entity_type.to_string(),
@@ -1031,9 +1063,7 @@ impl NodeStore {
             current_site_id: target_site_id.to_string(),
         });
         cdc.flush(&trx, database, namespace)?;
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to transfer ownership: {}", e)))?;
+        mutation::commit_or_internal(trx, "transfer ownership").await?;
 
         Ok((true, previous_site_id, target_site_id))
     }

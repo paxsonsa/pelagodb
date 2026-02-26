@@ -12,9 +12,10 @@
 //! - delete_edge: Remove all paired entries
 //! - list_edges: Range scan with optional label filter
 
-use crate::cdc::{CdcAccumulator, CdcOperation};
+use crate::cdc::CdcOperation;
 use crate::db::PelagoDb;
 use crate::ids::IdAllocator;
+use crate::mutation;
 use crate::node::NodeStore;
 use crate::schema::SchemaRegistry;
 use crate::subspace::edge_markers;
@@ -22,7 +23,7 @@ use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor, encode_value_for_index};
 use pelago_core::schema::{EdgeDirection, EntitySchema, OwnershipMode};
-use pelago_core::{EdgeId, PelagoError, Value};
+use pelago_core::{EdgeId, NodeId, PelagoError, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -278,7 +279,7 @@ impl EdgeStore {
             }
 
             let trx = self.db.create_transaction()?;
-            let mut cdc = CdcAccumulator::new(&self.site_id);
+            let mut cdc = mutation::cdc_for_site(&self.site_id);
 
             for (keys, source, target, label) in &planned {
                 trx.clear(keys.forward_key.as_ref());
@@ -304,9 +305,7 @@ impl EdgeStore {
                 cdc.flush(&trx, database, namespace)?;
             }
 
-            trx.commit().await.map_err(|e| {
-                PelagoError::Internal(format!("Failed to cascade-delete edges for node: {}", e))
-            })?;
+            mutation::commit_or_internal(trx, "cascade-delete edges for node").await?;
 
             total_deleted = total_deleted.saturating_add(planned.len());
         }
@@ -412,9 +411,7 @@ impl EdgeStore {
             trx.set(rev_forward.as_ref(), &edge_bytes);
             trx.set(rev_reverse.as_ref(), &edge_bytes);
         }
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated edge create: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated edge create").await?;
         Ok(true)
     }
 
@@ -498,9 +495,7 @@ impl EdgeStore {
             trx.clear(rev_forward.as_ref());
             trx.clear(rev_reverse.as_ref());
         }
-        trx.commit().await.map_err(|e| {
-            PelagoError::Internal(format!("Failed to apply replicated edge delete: {}", e))
-        })?;
+        mutation::commit_or_internal(trx, "apply replicated edge delete").await?;
         Ok(true)
     }
 
@@ -514,37 +509,6 @@ impl EdgeStore {
         label: &str,
         properties: HashMap<String, Value>,
     ) -> Result<StoredEdge, PelagoError> {
-        // Verify source node exists
-        let source_node = self
-            .node_store
-            .get_node(
-                &source.database,
-                &source.namespace,
-                &source.entity_type,
-                &source.node_id,
-            )
-            .await?
-            .ok_or_else(|| PelagoError::SourceNotFound {
-                entity_type: source.entity_type.clone(),
-                node_id: source.node_id.clone(),
-            })?;
-        self.enforce_source_ownership(&source.entity_type, &source.node_id, source_node.locality)?;
-
-        // Verify target node exists
-        let _target_node = self
-            .node_store
-            .get_node(
-                &target.database,
-                &target.namespace,
-                &target.entity_type,
-                &target.node_id,
-            )
-            .await?
-            .ok_or_else(|| PelagoError::TargetNotFound {
-                entity_type: target.entity_type.clone(),
-                node_id: target.node_id.clone(),
-            })?;
-
         // Get source schema and validate edge type
         let schema = self
             .schema_registry
@@ -598,7 +562,71 @@ impl EdgeStore {
 
         // Write in a single transaction (edge keys + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
+
+        if self
+            .node_delete_guard_exists_in_txn(
+                &trx,
+                &source.database,
+                &source.namespace,
+                &source.entity_type,
+                &source.node_id,
+            )
+            .await?
+        {
+            return Err(PelagoError::VersionConflict {
+                entity_type: source.entity_type.clone(),
+                node_id: source.node_id.clone(),
+            });
+        }
+
+        if self
+            .node_delete_guard_exists_in_txn(
+                &trx,
+                &target.database,
+                &target.namespace,
+                &target.entity_type,
+                &target.node_id,
+            )
+            .await?
+        {
+            return Err(PelagoError::VersionConflict {
+                entity_type: target.entity_type.clone(),
+                node_id: target.node_id.clone(),
+            });
+        }
+
+        let source_locality = self
+            .read_node_locality_in_txn(
+                &trx,
+                &source.database,
+                &source.namespace,
+                &source.entity_type,
+                &source.node_id,
+            )
+            .await?
+            .ok_or_else(|| PelagoError::SourceNotFound {
+                entity_type: source.entity_type.clone(),
+                node_id: source.node_id.clone(),
+            })?;
+        self.enforce_source_ownership(&source.entity_type, &source.node_id, source_locality)?;
+
+        if self
+            .read_node_locality_in_txn(
+                &trx,
+                &target.database,
+                &target.namespace,
+                &target.entity_type,
+                &target.node_id,
+            )
+            .await?
+            .is_none()
+        {
+            return Err(PelagoError::TargetNotFound {
+                entity_type: target.entity_type.clone(),
+                node_id: target.node_id.clone(),
+            });
+        }
 
         // Write forward key with edge data so scans avoid N+1 metadata fetches.
         trx.set(keys.forward_key.as_ref(), &edge_bytes);
@@ -630,9 +658,7 @@ impl EdgeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to create edge: {}", e)))?;
+        mutation::commit_or_internal(trx, "create edge").await?;
 
         Ok(StoredEdge::new(
             edge_id.to_string(),
@@ -641,6 +667,62 @@ impl EdgeStore {
             label.to_string(),
             properties,
         ))
+    }
+
+    async fn read_node_locality_in_txn(
+        &self,
+        trx: &foundationdb::Transaction,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+    ) -> Result<Option<u8>, PelagoError> {
+        let parsed: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
+        let node_id_bytes = parsed.to_bytes();
+        let data_key = Subspace::namespace(database, namespace)
+            .data()
+            .pack()
+            .add_string(entity_type)
+            .add_raw_bytes(&node_id_bytes)
+            .build();
+        let bytes = trx
+            .get(data_key.as_ref(), false)
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Failed to read node in txn: {}", e)))?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+
+        let node_data: EdgeNodeData = decode_cbor(&bytes)?;
+        Ok(Some(node_data.locality))
+    }
+
+    async fn node_delete_guard_exists_in_txn(
+        &self,
+        trx: &foundationdb::Transaction,
+        database: &str,
+        namespace: &str,
+        entity_type: &str,
+        node_id: &str,
+    ) -> Result<bool, PelagoError> {
+        let parsed: NodeId = node_id.parse().map_err(|_| PelagoError::InvalidId {
+            value: node_id.to_string(),
+        })?;
+        let node_id_bytes = parsed.to_bytes();
+        let guard_key = Subspace::namespace(database, namespace)
+            .data()
+            .pack()
+            .add_string("__deleting")
+            .add_string(entity_type)
+            .add_raw_bytes(&node_id_bytes)
+            .build();
+        let value = trx
+            .get(guard_key.as_ref(), false)
+            .await
+            .map_err(|e| PelagoError::Internal(format!("Failed to read delete guard: {}", e)))?;
+        Ok(value.is_some())
     }
 
     /// Delete an edge
@@ -707,7 +789,7 @@ impl EdgeStore {
 
         // Delete in a single transaction (edge keys + CDC)
         let trx = self.db.create_transaction()?;
-        let mut cdc = CdcAccumulator::new(&self.site_id);
+        let mut cdc = mutation::cdc_for_site(&self.site_id);
 
         trx.clear(keys.forward_key.as_ref());
         trx.clear(keys.meta_key.as_ref());
@@ -731,9 +813,7 @@ impl EdgeStore {
         cdc.flush(&trx, database, namespace)?;
 
         // Single atomic commit
-        trx.commit()
-            .await
-            .map_err(|e| PelagoError::Internal(format!("Failed to delete edge: {}", e)))?;
+        mutation::commit_or_internal(trx, "delete edge").await?;
 
         Ok(true)
     }
@@ -1066,6 +1146,11 @@ impl EdgeStore {
 
         Ok(edges)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct EdgeNodeData {
+    locality: u8,
 }
 
 /// Internal edge data for storage

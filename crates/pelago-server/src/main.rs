@@ -25,9 +25,9 @@ use pelago_proto::{
     schema_service_server::SchemaServiceServer, watch_service_server::WatchServiceServer,
 };
 use pelago_storage::{
-    claim_site, cleanup_audit_records, cleanup_query_watch_states, CachedReadPath, CdcProjector,
-    IdAllocator, JobWorker, NodeStore, PelagoDb, RocksCacheConfig, RocksCacheStore, SchemaCache,
-    SchemaRegistry,
+    claim_site, cleanup_audit_records, cleanup_query_watch_states, CacheFreshnessBudgets,
+    CachedReadPath, CdcProjector, IdAllocator, JobWorker, NodeStore, PelagoDb, RocksCacheConfig,
+    RocksCacheStore, SchemaCache, SchemaRegistry,
 };
 use replicator::{start_replicators, ReplicatorConfig};
 use sha2::{Digest, Sha256};
@@ -113,15 +113,28 @@ async fn main() -> Result<()> {
     cache_cfg.cache_size_mb = config.cache_size_mb;
     cache_cfg.write_buffer_mb = config.cache_write_buffer_mb;
     cache_cfg.max_write_buffers = config.cache_max_write_buffers;
+    cache_cfg.bloom_bits_per_key = config.cache_bloom_bits_per_key;
+    cache_cfg.prefix_extractor_bytes = config.cache_prefix_extractor_bytes;
+    cache_cfg.use_column_families = config.cache_use_column_families;
     cache_cfg.projector_batch_size = config.cache_projector_batch_size;
+    cache_cfg.eventual_max_lag_ms = config.cache_eventual_max_lag_ms;
+    cache_cfg.session_max_lag_ms = config.cache_session_max_lag_ms;
     cache_cfg.site_id = config.site_id.to_string();
 
     let mut cache_store_for_projector: Option<Arc<RocksCacheStore>> = None;
     let cached_read_path: Option<Arc<CachedReadPath>> = if cache_cfg.enabled {
         info!("RocksDB cache enabled at {}", cache_cfg.path);
         let cache_store = Arc::new(RocksCacheStore::open(&cache_cfg)?);
+        let freshness_budgets = CacheFreshnessBudgets {
+            eventual_max_lag_ms: cache_cfg.eventual_max_lag_ms,
+            session_max_lag_ms: cache_cfg.session_max_lag_ms,
+        };
         cache_store_for_projector = Some(cache_store.clone());
-        Some(Arc::new(CachedReadPath::new(db.clone(), cache_store)))
+        Some(Arc::new(CachedReadPath::new(
+            db.clone(),
+            cache_store,
+            freshness_budgets,
+        )))
     } else {
         info!("RocksDB cache disabled (--cache-enabled=false)");
         None
@@ -654,10 +667,30 @@ fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
         ("cache_write_buffer_mb", "PELAGO_CACHE_WRITE_BUFFER_MB"),
         ("cache_max_write_buffers", "PELAGO_CACHE_MAX_WRITE_BUFFERS"),
         (
+            "cache_bloom_bits_per_key",
+            "PELAGO_CACHE_BLOOM_BITS_PER_KEY",
+        ),
+        (
+            "cache_prefix_extractor_bytes",
+            "PELAGO_CACHE_PREFIX_EXTRACTOR_BYTES",
+        ),
+        (
+            "cache_use_column_families",
+            "PELAGO_CACHE_USE_COLUMN_FAMILIES",
+        ),
+        (
             "cache_projector_batch_size",
             "PELAGO_CACHE_PROJECTOR_BATCH_SIZE",
         ),
         ("cache_projector_scopes", "PELAGO_CACHE_PROJECTOR_SCOPES"),
+        (
+            "cache_eventual_max_lag_ms",
+            "PELAGO_CACHE_EVENTUAL_MAX_LAG_MS",
+        ),
+        (
+            "cache_session_max_lag_ms",
+            "PELAGO_CACHE_SESSION_MAX_LAG_MS",
+        ),
         ("auth_required", "PELAGO_AUTH_REQUIRED"),
         ("api_keys", "PELAGO_API_KEYS"),
         ("mtls_enabled", "PELAGO_MTLS_ENABLED"),

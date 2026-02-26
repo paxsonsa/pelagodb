@@ -87,6 +87,23 @@ pub struct ServerConfig {
     #[arg(long, env = "PELAGO_CACHE_MAX_WRITE_BUFFERS", default_value_t = 3)]
     pub cache_max_write_buffers: i32,
 
+    /// RocksDB bloom filter bits per key for cache edge/node lookups
+    #[arg(long, env = "PELAGO_CACHE_BLOOM_BITS_PER_KEY", default_value_t = 10)]
+    pub cache_bloom_bits_per_key: i32,
+
+    /// RocksDB fixed-prefix extractor bytes (prefix bloom + prefix iteration hints)
+    #[arg(long, env = "PELAGO_CACHE_PREFIX_EXTRACTOR_BYTES", default_value_t = 8)]
+    pub cache_prefix_extractor_bytes: usize,
+
+    /// Split cache into node/edge/meta column families
+    #[arg(
+        long,
+        env = "PELAGO_CACHE_USE_COLUMN_FAMILIES",
+        default_value_t = true,
+        action = ArgAction::Set
+    )]
+    pub cache_use_column_families: bool,
+
     /// CDC projector batch size for cache projection
     #[arg(
         long,
@@ -99,6 +116,16 @@ pub struct ServerConfig {
     /// When unset, defaults to the server default scope and (if different) replication scope.
     #[arg(long, env = "PELAGO_CACHE_PROJECTOR_SCOPES")]
     pub cache_projector_scopes: Option<String>,
+
+    /// Maximum allowed cache staleness for eventual reads in milliseconds.
+    /// When exceeded, eventual reads bypass cache and fall back to FDB.
+    #[arg(long, env = "PELAGO_CACHE_EVENTUAL_MAX_LAG_MS")]
+    pub cache_eventual_max_lag_ms: Option<u64>,
+
+    /// Maximum allowed cache staleness for session reads in milliseconds.
+    /// Session reads still enforce read-version checks before this budget.
+    #[arg(long, env = "PELAGO_CACHE_SESSION_MAX_LAG_MS")]
+    pub cache_session_max_lag_ms: Option<u64>,
 
     /// Require auth on all gRPC requests
     #[arg(
@@ -341,8 +368,13 @@ impl Default for ServerConfig {
             cache_size_mb: 1024,
             cache_write_buffer_mb: 64,
             cache_max_write_buffers: 3,
+            cache_bloom_bits_per_key: 10,
+            cache_prefix_extractor_bytes: 8,
+            cache_use_column_families: true,
             cache_projector_batch_size: 1000,
             cache_projector_scopes: None,
+            cache_eventual_max_lag_ms: None,
+            cache_session_max_lag_ms: None,
             auth_required: false,
             api_keys: None,
             mtls_enabled: false,

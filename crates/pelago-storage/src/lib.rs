@@ -17,6 +17,7 @@ pub mod index;
 pub mod job_executor;
 pub mod job_worker;
 pub mod jobs;
+mod mutation;
 pub mod node;
 pub mod replication;
 #[cfg(feature = "cache")]
@@ -59,6 +60,6 @@ pub use watch_state::{
 
 #[cfg(feature = "cache")]
 pub use rocks_cache::{
-    CacheFallbackReason, CacheLookup, CachedReadPath, CdcProjector, ReadConsistency,
-    RocksCacheConfig, RocksCacheStore,
+    CacheFallbackReason, CacheFreshnessBudgets, CacheLookup, CachedReadPath, CdcProjector,
+    ReadConsistency, RocksCacheConfig, RocksCacheStore,
 };
