@@ -35,6 +35,7 @@ pub enum CacheFallbackReason {
     StrongForcedFdb,
     CacheCold,
     StaleHwm,
+    StaleFreshnessBudget,
     KeyAbsent,
     DecodeError,
 }
@@ -45,10 +46,17 @@ impl CacheFallbackReason {
             Self::StrongForcedFdb => "strong_forced_fdb",
             Self::CacheCold => "cold",
             Self::StaleHwm => "stale_hwm",
+            Self::StaleFreshnessBudget => "stale_freshness_budget",
             Self::KeyAbsent => "key_absent",
             Self::DecodeError => "decode_error",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CacheFreshnessBudgets {
+    pub eventual_max_lag_ms: Option<u64>,
+    pub session_max_lag_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,11 +114,20 @@ pub struct CachedReadPath {
     #[allow(dead_code)]
     fdb: PelagoDb,
     cache: Arc<RocksCacheStore>,
+    freshness_budgets: CacheFreshnessBudgets,
 }
 
 impl CachedReadPath {
-    pub fn new(fdb: PelagoDb, cache: Arc<RocksCacheStore>) -> Self {
-        Self { fdb, cache }
+    pub fn new(
+        fdb: PelagoDb,
+        cache: Arc<RocksCacheStore>,
+        freshness_budgets: CacheFreshnessBudgets,
+    ) -> Self {
+        Self {
+            fdb,
+            cache,
+            freshness_budgets,
+        }
     }
 
     pub async fn get_node(
@@ -142,6 +159,14 @@ impl CachedReadPath {
                         started,
                     ));
                 }
+                if let Some(reason) = self.freshness_budget_violation(consistency)? {
+                    return Ok(self.observe_lookup(
+                        "get_node",
+                        consistency,
+                        CacheLookup::miss(reason),
+                        started,
+                    ));
+                }
                 match self.cache.get_node(db, ns, entity_type, node_id) {
                     Ok(Some(node)) => CacheLookup::hit(node),
                     Ok(None) => CacheLookup::miss(CacheFallbackReason::KeyAbsent),
@@ -159,6 +184,14 @@ impl CachedReadPath {
                 }
             }
             ReadConsistency::Eventual => {
+                if let Some(reason) = self.freshness_budget_violation(consistency)? {
+                    return Ok(self.observe_lookup(
+                        "get_node",
+                        consistency,
+                        CacheLookup::miss(reason),
+                        started,
+                    ));
+                }
                 // Cache-first, fall through on miss.
                 match self.cache.get_node(db, ns, entity_type, node_id) {
                     Ok(Some(node)) => CacheLookup::hit(node),
@@ -270,6 +303,14 @@ impl CachedReadPath {
                         started,
                     ));
                 }
+                if let Some(reason) = self.freshness_budget_violation(consistency)? {
+                    return Ok(self.observe_lookup(
+                        "list_edges_outgoing",
+                        consistency,
+                        CacheLookup::miss(reason),
+                        started,
+                    ));
+                }
                 match self
                     .cache
                     .list_edges_cached(db, ns, entity_type, node_id, label)
@@ -291,6 +332,14 @@ impl CachedReadPath {
                 }
             }
             ReadConsistency::Eventual => {
+                if let Some(reason) = self.freshness_budget_violation(consistency)? {
+                    return Ok(self.observe_lookup(
+                        "list_edges_outgoing",
+                        consistency,
+                        CacheLookup::miss(reason),
+                        started,
+                    ));
+                }
                 match self
                     .cache
                     .list_edges_cached(db, ns, entity_type, node_id, label)
@@ -341,6 +390,14 @@ impl CachedReadPath {
                         started,
                     ));
                 }
+                if let Some(reason) = self.freshness_budget_violation(consistency)? {
+                    return Ok(self.observe_lookup(
+                        "list_edges_incoming",
+                        consistency,
+                        CacheLookup::miss(reason),
+                        started,
+                    ));
+                }
                 match self
                     .cache
                     .list_incoming_edges_cached(db, ns, entity_type, node_id, label)
@@ -362,6 +419,14 @@ impl CachedReadPath {
                 }
             }
             ReadConsistency::Eventual => {
+                if let Some(reason) = self.freshness_budget_violation(consistency)? {
+                    return Ok(self.observe_lookup(
+                        "list_edges_incoming",
+                        consistency,
+                        CacheLookup::miss(reason),
+                        started,
+                    ));
+                }
                 match self
                     .cache
                     .list_incoming_edges_cached(db, ns, entity_type, node_id, label)
@@ -389,6 +454,33 @@ impl CachedReadPath {
 
     pub fn cache(&self) -> &RocksCacheStore {
         &self.cache
+    }
+
+    fn freshness_budget_violation(
+        &self,
+        consistency: ReadConsistency,
+    ) -> Result<Option<CacheFallbackReason>, PelagoError> {
+        let max_lag_ms = self.max_lag_budget_ms(consistency);
+        if max_lag_ms.is_none() {
+            return Ok(None);
+        }
+
+        let cache_hwm = self.cache.get_hwm()?;
+        let cache_updated_at_ms = self.cache.get_hwm_updated_at_ms()?;
+        Ok(freshness_budget_violation_reason(
+            max_lag_ms,
+            cache_hwm.is_zero(),
+            cache_updated_at_ms,
+            now_unix_ms(),
+        ))
+    }
+
+    fn max_lag_budget_ms(&self, consistency: ReadConsistency) -> Option<u64> {
+        match consistency {
+            ReadConsistency::Strong => None,
+            ReadConsistency::Session => self.freshness_budgets.session_max_lag_ms,
+            ReadConsistency::Eventual => self.freshness_budgets.eventual_max_lag_ms,
+        }
     }
 
     fn observe_lookup<T>(
@@ -433,4 +525,61 @@ fn versionstamp_tx_version(vs: &Versionstamp) -> u64 {
     let mut tx = [0u8; 8];
     tx.copy_from_slice(&bytes[..8]);
     u64::from_be_bytes(tx)
+}
+
+fn freshness_budget_violation_reason(
+    max_lag_ms: Option<u64>,
+    cache_hwm_is_zero: bool,
+    cache_updated_at_ms: Option<u64>,
+    now_ms: u64,
+) -> Option<CacheFallbackReason> {
+    let max_lag_ms = max_lag_ms?;
+    if cache_hwm_is_zero {
+        return Some(CacheFallbackReason::CacheCold);
+    }
+
+    let Some(cache_updated_at_ms) = cache_updated_at_ms else {
+        return Some(CacheFallbackReason::StaleFreshnessBudget);
+    };
+    if now_ms.saturating_sub(cache_updated_at_ms) > max_lag_ms {
+        Some(CacheFallbackReason::StaleFreshnessBudget)
+    } else {
+        None
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{freshness_budget_violation_reason, CacheFallbackReason};
+
+    #[test]
+    fn freshness_budget_disabled_never_forces_fallback() {
+        let reason = freshness_budget_violation_reason(None, false, Some(10), 25);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn freshness_budget_marks_zero_hwm_as_cold() {
+        let reason = freshness_budget_violation_reason(Some(500), true, Some(10), 25);
+        assert_eq!(reason, Some(CacheFallbackReason::CacheCold));
+    }
+
+    #[test]
+    fn freshness_budget_marks_stale_cache() {
+        let reason = freshness_budget_violation_reason(Some(500), false, Some(1_000), 1_800);
+        assert_eq!(reason, Some(CacheFallbackReason::StaleFreshnessBudget));
+    }
+
+    #[test]
+    fn freshness_budget_requires_projection_timestamp_when_enabled() {
+        let reason = freshness_budget_violation_reason(Some(500), false, None, 1_800);
+        assert_eq!(reason, Some(CacheFallbackReason::StaleFreshnessBudget));
+    }
 }

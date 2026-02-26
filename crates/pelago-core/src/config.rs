@@ -112,6 +112,16 @@ pub struct ServerConfig {
     )]
     pub cache_projector_batch_size: usize,
 
+    /// Maximum allowed cache staleness for eventual reads in milliseconds.
+    /// When exceeded, eventual reads bypass cache and fall back to FDB.
+    #[arg(long, env = "PELAGO_CACHE_EVENTUAL_MAX_LAG_MS")]
+    pub cache_eventual_max_lag_ms: Option<u64>,
+
+    /// Maximum allowed cache staleness for session reads in milliseconds.
+    /// Session reads still enforce read-version checks before this budget.
+    #[arg(long, env = "PELAGO_CACHE_SESSION_MAX_LAG_MS")]
+    pub cache_session_max_lag_ms: Option<u64>,
+
     /// Require auth on all gRPC requests
     #[arg(
         long,
@@ -352,6 +362,8 @@ impl Default for ServerConfig {
             cache_prefix_extractor_bytes: 8,
             cache_use_column_families: true,
             cache_projector_batch_size: 1000,
+            cache_eventual_max_lag_ms: None,
+            cache_session_max_lag_ms: None,
             auth_required: false,
             api_keys: None,
             mtls_enabled: false,

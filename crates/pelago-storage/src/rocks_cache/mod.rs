@@ -5,5 +5,7 @@ pub mod store;
 
 pub use config::RocksCacheConfig;
 pub use projector::CdcProjector;
-pub use read_path::{CacheFallbackReason, CacheLookup, CachedReadPath, ReadConsistency};
+pub use read_path::{
+    CacheFallbackReason, CacheFreshnessBudgets, CacheLookup, CachedReadPath, ReadConsistency,
+};
 pub use store::RocksCacheStore;

@@ -59,6 +59,6 @@ pub use watch_state::{
 
 #[cfg(feature = "cache")]
 pub use rocks_cache::{
-    CacheFallbackReason, CacheLookup, CachedReadPath, CdcProjector, ReadConsistency,
-    RocksCacheConfig, RocksCacheStore,
+    CacheFallbackReason, CacheFreshnessBudgets, CacheLookup, CachedReadPath, CdcProjector,
+    ReadConsistency, RocksCacheConfig, RocksCacheStore,
 };

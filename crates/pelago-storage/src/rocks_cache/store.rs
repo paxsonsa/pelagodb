@@ -10,6 +10,8 @@ const CF_DEFAULT: &str = "default";
 const CF_NODE: &str = "node";
 const CF_EDGE: &str = "edge";
 const CF_META: &str = "meta";
+const META_HWM_KEY: &[u8] = b"_hwm";
+const META_HWM_UPDATED_AT_KEY: &[u8] = b"_hwm_updated_at_ms";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EdgeMutationKey {
@@ -372,16 +374,42 @@ impl RocksCacheStore {
     }
 
     pub fn get_hwm(&self) -> Result<Versionstamp, PelagoError> {
-        match self.get_cf(CF_META, b"_hwm")? {
+        match self.get_cf(CF_META, META_HWM_KEY)? {
             Some(bytes) => Versionstamp::from_bytes(&bytes)
                 .ok_or_else(|| PelagoError::Internal("Invalid HWM".into())),
             None => Ok(Versionstamp::zero()),
         }
     }
 
+    pub fn get_hwm_updated_at_ms(&self) -> Result<Option<u64>, PelagoError> {
+        match self.get_cf(CF_META, META_HWM_UPDATED_AT_KEY)? {
+            Some(bytes) => {
+                if bytes.len() != 8 {
+                    return Err(PelagoError::Internal(
+                        "Invalid cache HWM updated-at timestamp".to_string(),
+                    ));
+                }
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes);
+                Ok(Some(u64::from_be_bytes(arr)))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub fn set_hwm(&self, vs: &Versionstamp) -> Result<(), PelagoError> {
         let hwm_bytes = vs.to_bytes();
-        self.put_cf(CF_META, b"_hwm", hwm_bytes)
+        let mut batch = rocksdb::WriteBatch::default();
+        self.batch_put_cf(&mut batch, CF_META, META_HWM_KEY, hwm_bytes)?;
+        self.batch_put_cf(
+            &mut batch,
+            CF_META,
+            META_HWM_UPDATED_AT_KEY,
+            &now_unix_ms().to_be_bytes(),
+        )?;
+        self.db
+            .write(batch)
+            .map_err(|e| PelagoError::Internal(format!("RocksDB set hwm: {}", e)))
     }
 
     /// Apply a batch of CDC operations atomically with HWM advancement.
@@ -533,7 +561,13 @@ impl RocksCacheStore {
         }
 
         let hwm_bytes = hwm.to_bytes();
-        self.batch_put_cf(&mut batch, CF_META, b"_hwm", hwm_bytes)?;
+        self.batch_put_cf(&mut batch, CF_META, META_HWM_KEY, hwm_bytes)?;
+        self.batch_put_cf(
+            &mut batch,
+            CF_META,
+            META_HWM_UPDATED_AT_KEY,
+            &now_unix_ms().to_be_bytes(),
+        )?;
         self.db
             .write(batch)
             .map_err(|e| PelagoError::Internal(format!("RocksDB batch write: {}", e)))
@@ -563,6 +597,13 @@ impl RocksCacheStore {
         }
         Ok(())
     }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
