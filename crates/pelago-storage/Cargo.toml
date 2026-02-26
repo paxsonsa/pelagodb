@@ -17,6 +17,7 @@ ciborium.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
 tracing.workspace = true
+metrics.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 rocksdb = { workspace = true, optional = true }
