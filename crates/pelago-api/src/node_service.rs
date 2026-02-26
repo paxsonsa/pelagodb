@@ -18,8 +18,8 @@ use pelago_proto::{
     UpdateNodeResponse,
 };
 use pelago_storage::{
-    CacheFallbackReason, CachedReadPath, IdAllocator, JobStore, JobType, NodeStore, PelagoDb,
-    ReadConsistency as CacheReadConsistency, SchemaRegistry,
+    resolve_site_identifier, CacheFallbackReason, CachedReadPath, IdAllocator, JobStore, JobType,
+    NodeStore, PelagoDb, ReadConsistency as CacheReadConsistency, SchemaRegistry,
 };
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -356,10 +356,12 @@ impl NodeService for NodeServiceImpl {
             &req.entity_type,
         )
         .await?;
-        let target_site_id = req
-            .target_site_id
+        let target_site_id_resolved = resolve_site_identifier(&self.db, &req.target_site_id)
+            .await
+            .map_err(|e| e.into_status())?;
+        let target_site_id = target_site_id_resolved
             .parse::<u8>()
-            .map_err(|_| Status::invalid_argument("target_site_id must be a u8 string"))?;
+            .map_err(|_| Status::invalid_argument("resolved site ID must be a u8 string"))?;
 
         let (transferred, previous_site_id, current_site_id) = self
             .node_store

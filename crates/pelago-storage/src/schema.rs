@@ -15,6 +15,7 @@ use crate::cache::SchemaCache;
 use crate::cdc::{CdcAccumulator, CdcOperation};
 use crate::db::PelagoDb;
 use crate::jobs::{JobStore, JobType};
+use crate::namespace::enforce_namespace_schema_owner;
 use crate::Subspace;
 use bytes::Bytes;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
@@ -144,6 +145,7 @@ impl SchemaRegistry {
     ) -> Result<u32, PelagoError> {
         // Validate schema first
         Self::validate_schema(&schema)?;
+        enforce_namespace_schema_owner(&self.db, database, namespace, &self.site_id).await?;
 
         let subspace = Subspace::namespace(database, namespace).schema();
         let latest_key = Self::latest_version_key(&subspace, &schema.name);
@@ -234,8 +236,10 @@ impl SchemaRegistry {
         namespace: &str,
         mut schema: EntitySchema,
         expected_version: u32,
+        origin_site_id: &str,
     ) -> Result<bool, PelagoError> {
         Self::validate_schema(&schema)?;
+        enforce_namespace_schema_owner(&self.db, database, namespace, origin_site_id).await?;
 
         let subspace = Subspace::namespace(database, namespace).schema();
         let latest_key = Self::latest_version_key(&subspace, &schema.name);

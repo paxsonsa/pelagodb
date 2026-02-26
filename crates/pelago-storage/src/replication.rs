@@ -72,6 +72,60 @@ pub async fn list_sites(db: &PelagoDb) -> Result<Vec<SiteClaim>, PelagoError> {
     Ok(out)
 }
 
+/// Resolve a site identifier to canonical site_id.
+///
+/// `identifier` may be:
+/// - exact `site_id`
+/// - exact `site_name` alias (must resolve to exactly one site)
+pub async fn resolve_site_identifier(
+    db: &PelagoDb,
+    identifier: &str,
+) -> Result<String, PelagoError> {
+    let sites = list_sites(db).await?;
+    resolve_site_identifier_from_claims(&sites, identifier)
+}
+
+fn resolve_site_identifier_from_claims(
+    sites: &[SiteClaim],
+    identifier: &str,
+) -> Result<String, PelagoError> {
+    let identifier = identifier.trim();
+    if identifier.is_empty() {
+        return Err(PelagoError::InvalidValue {
+            field: "site_id".to_string(),
+            reason: "site identifier cannot be empty".to_string(),
+        });
+    }
+
+    if let Some(site) = sites.iter().find(|s| s.site_id == identifier) {
+        return Ok(site.site_id.clone());
+    }
+
+    let alias_matches: Vec<&SiteClaim> =
+        sites.iter().filter(|s| s.site_name == identifier).collect();
+    match alias_matches.as_slice() {
+        [single] => Ok(single.site_id.clone()),
+        [] => Err(PelagoError::InvalidValue {
+            field: "site_id".to_string(),
+            reason: format!("unknown site identifier '{}'", identifier),
+        }),
+        many => {
+            let ids = many
+                .iter()
+                .map(|s| s.site_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            Err(PelagoError::InvalidValue {
+                field: "site_id".to_string(),
+                reason: format!(
+                    "ambiguous site alias '{}'; matches site IDs [{}]; use site ID",
+                    identifier, ids
+                ),
+            })
+        }
+    }
+}
+
 pub async fn update_replication_position(
     db: &PelagoDb,
     remote_site_id: &str,
@@ -276,4 +330,61 @@ fn now_micros() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_prefers_exact_id_match() {
+        let sites = vec![
+            SiteClaim {
+                site_id: "1".to_string(),
+                site_name: "alpha".to_string(),
+                claimed_at: 0,
+            },
+            SiteClaim {
+                site_id: "2".to_string(),
+                site_name: "1".to_string(),
+                claimed_at: 0,
+            },
+        ];
+        assert_eq!(
+            resolve_site_identifier_from_claims(&sites, "1").expect("id should resolve"),
+            "1".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_by_alias() {
+        let sites = vec![SiteClaim {
+            site_id: "7".to_string(),
+            site_name: "eu-west".to_string(),
+            claimed_at: 0,
+        }];
+        assert_eq!(
+            resolve_site_identifier_from_claims(&sites, "eu-west").expect("alias should resolve"),
+            "7".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_ambiguous_alias() {
+        let sites = vec![
+            SiteClaim {
+                site_id: "1".to_string(),
+                site_name: "prod".to_string(),
+                claimed_at: 0,
+            },
+            SiteClaim {
+                site_id: "2".to_string(),
+                site_name: "prod".to_string(),
+                claimed_at: 0,
+            },
+        ];
+        let err = resolve_site_identifier_from_claims(&sites, "prod")
+            .expect_err("ambiguous alias should fail");
+        assert!(matches!(err, PelagoError::InvalidValue { .. }));
+    }
 }

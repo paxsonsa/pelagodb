@@ -595,7 +595,13 @@ async fn apply_replication_op(
             }
 
             let applied = schema_registry
-                .apply_replica_schema_register(database, namespace, schema.clone(), op.version)
+                .apply_replica_schema_register(
+                    database,
+                    namespace,
+                    schema.clone(),
+                    op.version,
+                    remote_site_id,
+                )
                 .await?;
             if applied {
                 Ok(Some(CdcOperation::SchemaRegister {

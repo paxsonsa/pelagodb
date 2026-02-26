@@ -18,6 +18,7 @@ pub mod job_executor;
 pub mod job_worker;
 pub mod jobs;
 mod mutation;
+pub mod namespace;
 pub mod node;
 pub mod replication;
 #[cfg(feature = "cache")]
@@ -39,10 +40,14 @@ pub use edge::{EdgeStore, NodeRef, StoredEdge};
 pub use ids::IdAllocator;
 pub use job_worker::JobWorker;
 pub use jobs::{JobState, JobStatus, JobStore, JobType};
+pub use namespace::{
+    enforce_namespace_schema_owner, get_namespace_settings, set_namespace_schema_owner,
+    transfer_namespace_schema_owner, NamespaceSettings,
+};
 pub use node::{NodeStore, StoredNode};
 pub use replication::{
     claim_site, get_replication_positions, get_replication_positions_scoped, get_replicator_lease,
-    list_sites, try_acquire_replicator_lease, update_replication_position,
+    list_sites, resolve_site_identifier, try_acquire_replicator_lease, update_replication_position,
     update_replication_position_scoped, ReplicationLease, ReplicationPosition, SiteClaim,
 };
 pub use schema::SchemaRegistry;

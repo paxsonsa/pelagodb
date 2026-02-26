@@ -101,6 +101,16 @@ pub enum PelagoError {
     #[error("Schema version mismatch: expected {expected}, got {actual}")]
     SchemaMismatch { expected: u32, actual: u32 },
 
+    #[error(
+        "Namespace schema ownership conflict for {database}/{namespace}: owner_site_id={owner_site_id}, actor_site_id={actor_site_id}"
+    )]
+    NamespaceSchemaOwnershipConflict {
+        database: String,
+        namespace: String,
+        owner_site_id: String,
+        actor_site_id: String,
+    },
+
     // Timeout errors
     #[error("Query timeout: {elapsed_ms}ms exceeded {timeout_ms}ms")]
     QueryTimeout { timeout_ms: u64, elapsed_ms: u64 },
@@ -183,6 +193,9 @@ impl PelagoError {
             PelagoError::UniqueConstraintViolation { .. } => "ERR_CONSISTENCY_UNIQUE_VIOLATION",
             PelagoError::VersionConflict { .. } => "ERR_CONSISTENCY_VERSION_CONFLICT",
             PelagoError::SchemaMismatch { .. } => "ERR_CONSISTENCY_SCHEMA_MISMATCH",
+            PelagoError::NamespaceSchemaOwnershipConflict { .. } => {
+                "ERR_CONSISTENCY_NAMESPACE_SCHEMA_OWNERSHIP_CONFLICT"
+            }
             PelagoError::QueryTimeout { .. } => "ERR_TIMEOUT_QUERY",
             PelagoError::TraversalTimeout { .. } => "ERR_TIMEOUT_TRAVERSAL",
             PelagoError::TransactionTimeout => "ERR_TIMEOUT_TRANSACTION",
@@ -224,6 +237,7 @@ impl PelagoError {
             PelagoError::UniqueConstraintViolation { .. }
             | PelagoError::VersionConflict { .. }
             | PelagoError::SchemaMismatch { .. }
+            | PelagoError::NamespaceSchemaOwnershipConflict { .. }
             | PelagoError::TxConflictRetryExhausted { .. }
             | PelagoError::SnapshotBudgetExceeded { .. }
             | PelagoError::SnapshotExpired { .. } => "CONSISTENCY",
@@ -368,6 +382,17 @@ impl PelagoError {
             }
             PelagoError::SnapshotExpired { operation } => {
                 m.insert("operation".into(), operation.clone());
+            }
+            PelagoError::NamespaceSchemaOwnershipConflict {
+                database,
+                namespace,
+                owner_site_id,
+                actor_site_id,
+            } => {
+                m.insert("database".into(), database.clone());
+                m.insert("namespace".into(), namespace.clone());
+                m.insert("owner_site_id".into(), owner_site_id.clone());
+                m.insert("actor_site_id".into(), actor_site_id.clone());
             }
             _ => {}
         }

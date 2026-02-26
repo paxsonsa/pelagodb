@@ -1,8 +1,10 @@
 use crate::connection::GrpcConnection;
 use crate::output::OutputFormat;
 use pelago_proto::{
-    DropEntityTypeRequest, DropNamespaceRequest, GetJobStatusRequest, GetReplicationStatusRequest,
-    Job, JobStatus, ListJobsRequest, ListSitesRequest, QueryAuditLogRequest, RequestContext,
+    DropEntityTypeRequest, DropNamespaceRequest, GetJobStatusRequest, GetNamespaceSettingsRequest,
+    GetReplicationStatusRequest, Job, JobStatus, ListJobsRequest, ListSitesRequest,
+    QueryAuditLogRequest, RequestContext, SetNamespaceSchemaOwnerRequest,
+    TransferNamespaceSchemaOwnerRequest,
 };
 
 #[derive(clap::Args)]
@@ -27,6 +29,22 @@ pub enum AdminCommand {
         action: String,
         #[arg(long, default_value_t = 100)]
         limit: u32,
+    },
+    /// Show namespace settings (including schema owner policy)
+    NamespaceSettings,
+    /// Set namespace schema owner site
+    SetNamespaceOwner {
+        /// Claimed site ID or site alias that owns schema changes for this namespace
+        site_id: String,
+    },
+    /// Clear namespace schema owner policy (unrestricted schema updates)
+    ClearNamespaceOwner,
+    /// Transfer namespace schema owner from expected to target site
+    TransferNamespaceOwner {
+        /// Current owner site ID or alias expected by caller
+        expected_site_id: String,
+        /// New owner site ID or alias
+        target_site_id: String,
     },
     /// Drop all data for an entity type
     DropType {
@@ -252,6 +270,176 @@ pub async fn run(
                         OutputFormat::Csv => crate::output::print_csv(&headers, &rows),
                         _ => unreachable!(),
                     }
+                }
+            }
+        }
+        AdminCommand::NamespaceSettings => {
+            let mut client = conn.admin_client();
+            let resp = client
+                .get_namespace_settings(GetNamespaceSettingsRequest {
+                    context: Some(context),
+                })
+                .await?
+                .into_inner();
+
+            let settings = resp.settings.as_ref();
+            let owner = settings
+                .map(|s| {
+                    if s.schema_owner_site_id.is_empty() {
+                        "<unrestricted>".to_string()
+                    } else {
+                        s.schema_owner_site_id.clone()
+                    }
+                })
+                .unwrap_or_else(|| "<unrestricted>".to_string());
+            let epoch = settings.map(|s| s.epoch).unwrap_or_default();
+            let updated_at = settings.map(|s| s.updated_at).unwrap_or_default();
+
+            match format {
+                OutputFormat::Json => {
+                    crate::output::print_json(&serde_json::json!({
+                        "database": database,
+                        "namespace": namespace,
+                        "configured": resp.found,
+                        "schema_owner_site_id": if owner == "<unrestricted>" { serde_json::Value::Null } else { serde_json::Value::String(owner.clone()) },
+                        "epoch": epoch,
+                        "updated_at": updated_at,
+                    }));
+                }
+                OutputFormat::Table | OutputFormat::Csv => {
+                    let headers = vec![
+                        "Database",
+                        "Namespace",
+                        "Configured",
+                        "Schema Owner",
+                        "Epoch",
+                        "Updated At",
+                    ];
+                    let rows = vec![vec![
+                        database.to_string(),
+                        namespace.to_string(),
+                        resp.found.to_string(),
+                        owner,
+                        epoch.to_string(),
+                        updated_at.to_string(),
+                    ]];
+                    match format {
+                        OutputFormat::Table => crate::output::print_table(&headers, &rows),
+                        OutputFormat::Csv => crate::output::print_csv(&headers, &rows),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        AdminCommand::SetNamespaceOwner { site_id } => {
+            let mut client = conn.admin_client();
+            let resp = client
+                .set_namespace_schema_owner(SetNamespaceSchemaOwnerRequest {
+                    context: Some(context),
+                    site_id: site_id.clone(),
+                })
+                .await?
+                .into_inner();
+            let settings = resp.settings.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing settings in set-namespace-owner response",
+                )
+            })?;
+
+            match format {
+                OutputFormat::Json => {
+                    crate::output::print_json(&serde_json::json!({
+                        "database": settings.database,
+                        "namespace": settings.namespace,
+                        "schema_owner_site_id": settings.schema_owner_site_id,
+                        "epoch": settings.epoch,
+                        "updated_at": settings.updated_at,
+                    }));
+                }
+                _ => {
+                    println!(
+                        "Namespace owner set: {}/{} -> {} (epoch {})",
+                        settings.database,
+                        settings.namespace,
+                        settings.schema_owner_site_id,
+                        settings.epoch
+                    );
+                }
+            }
+        }
+        AdminCommand::ClearNamespaceOwner => {
+            let mut client = conn.admin_client();
+            let resp = client
+                .set_namespace_schema_owner(SetNamespaceSchemaOwnerRequest {
+                    context: Some(context),
+                    site_id: String::new(),
+                })
+                .await?
+                .into_inner();
+            let settings = resp.settings.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing settings in clear-namespace-owner response",
+                )
+            })?;
+
+            match format {
+                OutputFormat::Json => {
+                    crate::output::print_json(&serde_json::json!({
+                        "database": settings.database,
+                        "namespace": settings.namespace,
+                        "schema_owner_site_id": serde_json::Value::Null,
+                        "epoch": settings.epoch,
+                        "updated_at": settings.updated_at,
+                    }));
+                }
+                _ => {
+                    println!(
+                        "Namespace owner cleared: {}/{} (epoch {})",
+                        settings.database, settings.namespace, settings.epoch
+                    );
+                }
+            }
+        }
+        AdminCommand::TransferNamespaceOwner {
+            expected_site_id,
+            target_site_id,
+        } => {
+            let mut client = conn.admin_client();
+            let resp = client
+                .transfer_namespace_schema_owner(TransferNamespaceSchemaOwnerRequest {
+                    context: Some(context),
+                    expected_site_id,
+                    target_site_id,
+                })
+                .await?
+                .into_inner();
+            let settings = resp.settings.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing settings in transfer-namespace-owner response",
+                )
+            })?;
+
+            match format {
+                OutputFormat::Json => {
+                    crate::output::print_json(&serde_json::json!({
+                        "database": settings.database,
+                        "namespace": settings.namespace,
+                        "schema_owner_site_id": settings.schema_owner_site_id,
+                        "epoch": settings.epoch,
+                        "updated_at": settings.updated_at,
+                    }));
+                }
+                _ => {
+                    println!(
+                        "Namespace owner transferred: {}/{} -> {} (epoch {})",
+                        settings.database,
+                        settings.namespace,
+                        settings.schema_owner_site_id,
+                        settings.epoch
+                    );
                 }
             }
         }

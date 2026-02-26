@@ -245,7 +245,7 @@ message TransferOwnershipRequest {
   RequestContext context = 1;
   string entity_type = 2;
   string node_id = 3;
-  string target_site_id = 4;
+  string target_site_id = 4;  // accepts site_id or site_name alias
 }
 
 message TransferOwnershipResponse {
@@ -454,6 +454,9 @@ service AdminService {
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
   rpc DropEntityType(DropEntityTypeRequest) returns (DropEntityTypeResponse);
   rpc DropNamespace(DropNamespaceRequest) returns (DropNamespaceResponse);
+  rpc GetNamespaceSettings(GetNamespaceSettingsRequest) returns (GetNamespaceSettingsResponse);
+  rpc SetNamespaceSchemaOwner(SetNamespaceSchemaOwnerRequest) returns (SetNamespaceSchemaOwnerResponse);
+  rpc TransferNamespaceSchemaOwner(TransferNamespaceSchemaOwnerRequest) returns (TransferNamespaceSchemaOwnerResponse);
   rpc ListSites(ListSitesRequest) returns (ListSitesResponse);
   rpc GetReplicationStatus(GetReplicationStatusRequest) returns (GetReplicationStatusResponse);
   rpc QueryAuditLog(QueryAuditLogRequest) returns (QueryAuditLogResponse);
@@ -530,6 +533,42 @@ message DropNamespaceRequest {
 
 message DropNamespaceResponse {
   bool dropped = 1;
+}
+
+message NamespaceSettingsInfo {
+  string database = 1;
+  string namespace = 2;
+  string schema_owner_site_id = 3;  // empty = unrestricted
+  uint64 epoch = 4;
+  int64 updated_at = 5;
+}
+
+message GetNamespaceSettingsRequest {
+  RequestContext context = 1;
+}
+
+message GetNamespaceSettingsResponse {
+  bool found = 1;
+  NamespaceSettingsInfo settings = 2;
+}
+
+message SetNamespaceSchemaOwnerRequest {
+  RequestContext context = 1;
+  string site_id = 2;  // site_id or site_name alias; empty = clear owner
+}
+
+message SetNamespaceSchemaOwnerResponse {
+  NamespaceSettingsInfo settings = 1;
+}
+
+message TransferNamespaceSchemaOwnerRequest {
+  RequestContext context = 1;
+  string expected_site_id = 2;  // site_id or site_name alias
+  string target_site_id = 3;    // site_id or site_name alias
+}
+
+message TransferNamespaceSchemaOwnerResponse {
+  NamespaceSettingsInfo settings = 1;
 }
 
 message ListSitesRequest {

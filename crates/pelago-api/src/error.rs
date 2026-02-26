@@ -31,6 +31,7 @@ pub fn to_status(err: PelagoError) -> Status {
         PelagoError::UniqueConstraintViolation { .. } => Code::AlreadyExists,
         PelagoError::VersionConflict { .. }
         | PelagoError::SchemaMismatch { .. }
+        | PelagoError::NamespaceSchemaOwnershipConflict { .. }
         | PelagoError::TxConflictRetryExhausted { .. }
         | PelagoError::SnapshotExpired { .. } => Code::Aborted,
         PelagoError::SnapshotBudgetExceeded { .. } => Code::FailedPrecondition,

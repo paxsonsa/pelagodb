@@ -14,15 +14,18 @@ use pelago_core::PelagoError;
 use pelago_proto::{
     admin_service_server::AdminService, DropEntityTypeRequest, DropEntityTypeResponse,
     DropIndexRequest, DropIndexResponse, DropNamespaceRequest, DropNamespaceResponse,
-    GetJobStatusRequest, GetJobStatusResponse, GetReplicationStatusRequest,
-    GetReplicationStatusResponse, Job, JobStatus, ListJobsRequest, ListJobsResponse,
-    ListSitesRequest, ListSitesResponse, MutationExecutionMode, QueryAuditLogRequest,
-    QueryAuditLogResponse, ReplicationPeerStatus, SiteInfo, StripPropertyRequest,
-    StripPropertyResponse,
+    GetJobStatusRequest, GetJobStatusResponse, GetNamespaceSettingsRequest,
+    GetNamespaceSettingsResponse, GetReplicationStatusRequest, GetReplicationStatusResponse, Job,
+    JobStatus, ListJobsRequest, ListJobsResponse, ListSitesRequest, ListSitesResponse,
+    MutationExecutionMode, NamespaceSettingsInfo, QueryAuditLogRequest, QueryAuditLogResponse,
+    ReplicationPeerStatus, SetNamespaceSchemaOwnerRequest, SetNamespaceSchemaOwnerResponse,
+    SiteInfo, StripPropertyRequest, StripPropertyResponse, TransferNamespaceSchemaOwnerRequest,
+    TransferNamespaceSchemaOwnerResponse,
 };
 use pelago_storage::{
-    get_replication_positions_scoped, list_sites, query_audit_records,
-    JobStatus as StorageJobStatus, JobStore, JobType, PelagoDb, Subspace,
+    get_namespace_settings, get_replication_positions_scoped, list_sites, query_audit_records,
+    resolve_site_identifier, set_namespace_schema_owner, transfer_namespace_schema_owner,
+    JobStatus as StorageJobStatus, JobStore, JobType, NamespaceSettings, PelagoDb, Subspace,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -413,6 +416,135 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(DropNamespaceResponse { dropped: existed }))
     }
 
+    async fn get_namespace_settings(
+        &self,
+        request: Request<GetNamespaceSettingsRequest>,
+    ) -> Result<Response<GetNamespaceSettingsResponse>, Status> {
+        let principal = principal_from_request(&request);
+        let req = request.into_inner();
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.read",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
+
+        let settings = get_namespace_settings(self.db.as_ref(), &ctx.database, &ctx.namespace)
+            .await
+            .map_err(|e| Status::internal(format!("get_namespace_settings failed: {}", e)))?;
+
+        Ok(Response::new(GetNamespaceSettingsResponse {
+            found: settings.is_some(),
+            settings: settings.as_ref().map(namespace_settings_to_proto),
+        }))
+    }
+
+    async fn set_namespace_schema_owner(
+        &self,
+        request: Request<SetNamespaceSchemaOwnerRequest>,
+    ) -> Result<Response<SetNamespaceSchemaOwnerResponse>, Status> {
+        let principal = principal_from_request(&request);
+        let req = request.into_inner();
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.write",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
+
+        let owner_site_id = if req.site_id.trim().is_empty() {
+            None
+        } else {
+            Some(req.site_id.trim().to_string())
+        };
+
+        let owner_site_id_resolved = match owner_site_id.as_deref() {
+            Some(identifier) => Some(
+                resolve_site_identifier(self.db.as_ref(), identifier)
+                    .await
+                    .map_err(|e| e.into_status())?,
+            ),
+            None => None,
+        };
+
+        let updated = set_namespace_schema_owner(
+            self.db.as_ref(),
+            &ctx.database,
+            &ctx.namespace,
+            owner_site_id_resolved.as_deref(),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("set_namespace_schema_owner failed: {}", e)))?;
+
+        Ok(Response::new(SetNamespaceSchemaOwnerResponse {
+            settings: Some(namespace_settings_to_proto(&updated)),
+        }))
+    }
+
+    async fn transfer_namespace_schema_owner(
+        &self,
+        request: Request<TransferNamespaceSchemaOwnerRequest>,
+    ) -> Result<Response<TransferNamespaceSchemaOwnerResponse>, Status> {
+        let principal = principal_from_request(&request);
+        let req = request.into_inner();
+        let ctx = req
+            .context
+            .ok_or_else(|| Status::invalid_argument("missing context"))?;
+        authorize(
+            self.db.as_ref(),
+            principal.as_ref(),
+            "admin.write",
+            &ctx.database,
+            &ctx.namespace,
+            "*",
+        )
+        .await?;
+
+        let expected_site_id = req.expected_site_id.trim();
+        if expected_site_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "expected_site_id must not be empty",
+            ));
+        }
+        let target_site_id = req.target_site_id.trim();
+        if target_site_id.is_empty() {
+            return Err(Status::invalid_argument("target_site_id must not be empty"));
+        }
+
+        let expected_site_id_resolved = resolve_site_identifier(self.db.as_ref(), expected_site_id)
+            .await
+            .map_err(|e| e.into_status())?;
+        let target_site_id_resolved = resolve_site_identifier(self.db.as_ref(), target_site_id)
+            .await
+            .map_err(|e| e.into_status())?;
+
+        let updated = transfer_namespace_schema_owner(
+            self.db.as_ref(),
+            &ctx.database,
+            &ctx.namespace,
+            &expected_site_id_resolved,
+            &target_site_id_resolved,
+        )
+        .await
+        .map_err(|e| e.into_status())?;
+
+        Ok(Response::new(TransferNamespaceSchemaOwnerResponse {
+            settings: Some(namespace_settings_to_proto(&updated)),
+        }))
+    }
+
     async fn list_sites(
         &self,
         request: Request<ListSitesRequest>,
@@ -584,6 +716,16 @@ fn storage_job_to_proto_job(job: pelago_storage::JobState) -> Job {
         updated_at: job.updated_at,
         progress: job.progress_pct,
         error: job.error.unwrap_or_default(),
+    }
+}
+
+fn namespace_settings_to_proto(settings: &NamespaceSettings) -> NamespaceSettingsInfo {
+    NamespaceSettingsInfo {
+        database: settings.database.clone(),
+        namespace: settings.namespace.clone(),
+        schema_owner_site_id: settings.schema_owner_site_id.clone().unwrap_or_default(),
+        epoch: settings.epoch,
+        updated_at: settings.updated_at,
     }
 }
 
