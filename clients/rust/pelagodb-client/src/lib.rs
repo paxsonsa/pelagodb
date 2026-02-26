@@ -8,7 +8,7 @@ pub mod pelago {
 
 use pelago::{
     node_service_client::NodeServiceClient, query_service_client::QueryServiceClient, CreateNodeRequest,
-    FindNodesRequest, GetNodeRequest, Node, ReadConsistency, RequestContext, Value,
+    FindNodesRequest, GetNodeRequest, Node, ReadConsistency, RequestContext, SnapshotMode, Value,
 };
 
 pub struct PelagoClient {
@@ -112,6 +112,8 @@ impl PelagoClient {
             fields: Vec::new(),
             limit,
             cursor: Vec::new(),
+            snapshot_mode: SnapshotMode::BestEffort as i32,
+            allow_degrade_to_best_effort: true,
         });
         self.apply_auth_metadata(&mut req);
         let mut stream = self.query.find_nodes(req).await?.into_inner();

@@ -1,0 +1,81 @@
+name: CI Gates
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_provisioned:
+        description: "Run provisioned lane (ignored suites + S1-S6 gates)"
+        required: false
+        default: false
+        type: boolean
+      observability_json:
+        description: "Workspace path to observability JSON (cache_hit_ratio, projector_lag_events, fallback_rate)"
+        required: false
+        default: ""
+        type: string
+      perf_profile:
+        description: "Performance profile for perf harness"
+        required: false
+        default: "default"
+        type: choice
+        options:
+          - default
+          - context
+      perf_runs:
+        description: "Perf samples per scenario run"
+        required: false
+        default: "30"
+        type: string
+      perf_warmup:
+        description: "Perf warmup samples"
+        required: false
+        default: "5"
+        type: string
+
+jobs:
+  quick-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run quick CI gate
+        run: scripts/ci-gate.sh
+
+  provisioned-s1-s6:
+    if: ${{ inputs.run_provisioned }}
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [S1, S2, S3, S4, S5, S6]
+    env:
+      PELAGO_PROVISIONED_LANE: "1"
+      PELAGO_RUN_IGNORED_TESTS: "1"
+      PELAGO_ENFORCE_PERF_GATES: "1"
+      PELAGO_PERF_SCENARIO: ${{ matrix.scenario }}
+      PELAGO_PERF_PROFILE: ${{ inputs.perf_profile }}
+      PELAGO_PERF_RUNS: ${{ inputs.perf_runs }}
+      PELAGO_PERF_WARMUP: ${{ inputs.perf_warmup }}
+      PELAGO_PERF_OBSERVABILITY_JSON: ${{ inputs.observability_json }}
+      PELAGO_PERF_OUTPUT_JSON: ".tmp/perf/${{ matrix.scenario }}.json"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate observability input
+        run: |
+          if [[ -z "${PELAGO_PERF_OBSERVABILITY_JSON}" ]]; then
+            echo "observability_json input is required for provisioned S1-S6 gates."
+            exit 2
+          fi
+
+      - name: Run provisioned CI/perf gates
+        run: scripts/ci-gate.sh
+
