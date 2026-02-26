@@ -276,6 +276,17 @@ impl EdgeService for EdgeServiceImpl {
             ReadConsistency::Session => CacheReadConsistency::Session,
             ReadConsistency::Eventual => CacheReadConsistency::Eventual,
         };
+        let session_read_version =
+            if consistency == CacheReadConsistency::Session && self.cached_read_path.is_some() {
+                Some(
+                    self.db
+                        .get_read_version()
+                        .await
+                        .map_err(|e| e.into_status())?,
+                )
+            } else {
+                None
+            };
         let direction = EdgeDirection::try_from(req.direction).unwrap_or(EdgeDirection::Outgoing);
         let needs_outgoing = matches!(
             direction,
@@ -296,6 +307,7 @@ impl EdgeService for EdgeServiceImpl {
                         &node_id,
                         label_filter,
                         consistency,
+                        session_read_version,
                     )
                     .await
                     .map_err(|e| e.into_status())?;
@@ -339,19 +351,47 @@ impl EdgeService for EdgeServiceImpl {
         }
 
         let mut incoming = Vec::new();
+        let mut incoming_fallback_reason: Option<CacheFallbackReason> = None;
         if needs_incoming {
-            incoming = self
-                .edge_store
-                .list_incoming_edges(
-                    &ctx.database,
-                    &ctx.namespace,
-                    &entity_type,
-                    &node_id,
-                    label_filter,
-                    fetch_limit,
-                )
-                .await
-                .map_err(|e| e.into_status())?;
+            if let Some(cache) = &self.cached_read_path {
+                let cache_lookup = cache
+                    .list_incoming_edges_cached(
+                        &ctx.database,
+                        &ctx.namespace,
+                        &entity_type,
+                        &node_id,
+                        label_filter,
+                        consistency,
+                        session_read_version,
+                    )
+                    .await
+                    .map_err(|e| e.into_status())?;
+                incoming_fallback_reason = cache_lookup.fallback_reason();
+                incoming = cache_lookup.value().unwrap_or_default();
+            }
+
+            if incoming.is_empty() {
+                if let Some(reason) = incoming_fallback_reason {
+                    counter!(
+                        "pelago.cache.fallback_to_fdb_total",
+                        "operation" => "list_edges_incoming",
+                        "reason" => reason.as_str()
+                    )
+                    .increment(1);
+                }
+                incoming = self
+                    .edge_store
+                    .list_incoming_edges(
+                        &ctx.database,
+                        &ctx.namespace,
+                        &entity_type,
+                        &node_id,
+                        label_filter,
+                        fetch_limit,
+                    )
+                    .await
+                    .map_err(|e| e.into_status())?;
+            }
         }
 
         let mut edges = if needs_outgoing && needs_incoming {

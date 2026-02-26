@@ -120,6 +120,7 @@ impl CachedReadPath {
         entity_type: &str,
         node_id: &str,
         consistency: ReadConsistency,
+        required_read_version: Option<i64>,
     ) -> Result<CacheLookup<StoredNode>, PelagoError> {
         let started = Instant::now();
         let lookup = match consistency {
@@ -130,7 +131,9 @@ impl CachedReadPath {
             ReadConsistency::Session => {
                 // Session consistency requires the cache to be at least as fresh as the
                 // current FDB read version.
-                let state = self.session_cache_state_for_current_read().await?;
+                let state = self
+                    .session_cache_state_for_read_version(required_read_version)
+                    .await?;
                 if state != SessionCacheState::Fresh {
                     return Ok(self.observe_lookup(
                         "get_node",
@@ -199,11 +202,28 @@ impl CachedReadPath {
     }
 
     pub async fn session_cache_fresh_for_current_read(&self) -> Result<bool, PelagoError> {
-        Ok(self.session_cache_state_for_current_read().await? == SessionCacheState::Fresh)
+        Ok(self.session_cache_state_for_read_version(None).await? == SessionCacheState::Fresh)
     }
 
-    async fn session_cache_state_for_current_read(&self) -> Result<SessionCacheState, PelagoError> {
-        let read_version = self.fdb.get_read_version().await?;
+    pub async fn session_cache_fresh_for_read_version(
+        &self,
+        required_read_version: Option<i64>,
+    ) -> Result<bool, PelagoError> {
+        Ok(self
+            .session_cache_state_for_read_version(required_read_version)
+            .await?
+            == SessionCacheState::Fresh)
+    }
+
+    async fn session_cache_state_for_read_version(
+        &self,
+        required_read_version: Option<i64>,
+    ) -> Result<SessionCacheState, PelagoError> {
+        let read_version = if let Some(v) = required_read_version {
+            v
+        } else {
+            self.fdb.get_read_version().await?
+        };
         let cache_hwm = self.cache.get_hwm()?;
         if cache_hwm.is_zero() {
             return Ok(SessionCacheState::Cold);
@@ -233,12 +253,15 @@ impl CachedReadPath {
         node_id: &str,
         label: Option<&str>,
         consistency: ReadConsistency,
+        required_read_version: Option<i64>,
     ) -> Result<CacheLookup<Vec<StoredEdge>>, PelagoError> {
         let started = Instant::now();
         let lookup = match consistency {
             ReadConsistency::Strong => CacheLookup::miss(CacheFallbackReason::StrongForcedFdb),
             ReadConsistency::Session => {
-                let state = self.session_cache_state_for_current_read().await?;
+                let state = self
+                    .session_cache_state_for_read_version(required_read_version)
+                    .await?;
                 if state != SessionCacheState::Fresh {
                     return Ok(self.observe_lookup(
                         "list_edges_outgoing",
@@ -291,6 +314,77 @@ impl CachedReadPath {
         };
 
         Ok(self.observe_lookup("list_edges_outgoing", consistency, lookup, started))
+    }
+
+    pub async fn list_incoming_edges_cached(
+        &self,
+        db: &str,
+        ns: &str,
+        entity_type: &str,
+        node_id: &str,
+        label: Option<&str>,
+        consistency: ReadConsistency,
+        required_read_version: Option<i64>,
+    ) -> Result<CacheLookup<Vec<StoredEdge>>, PelagoError> {
+        let started = Instant::now();
+        let lookup = match consistency {
+            ReadConsistency::Strong => CacheLookup::miss(CacheFallbackReason::StrongForcedFdb),
+            ReadConsistency::Session => {
+                let state = self
+                    .session_cache_state_for_read_version(required_read_version)
+                    .await?;
+                if state != SessionCacheState::Fresh {
+                    return Ok(self.observe_lookup(
+                        "list_edges_incoming",
+                        consistency,
+                        CacheLookup::miss(state.fallback_reason()),
+                        started,
+                    ));
+                }
+                match self
+                    .cache
+                    .list_incoming_edges_cached(db, ns, entity_type, node_id, label)
+                {
+                    Ok(edges) if !edges.is_empty() => CacheLookup::hit(edges),
+                    Ok(_) => CacheLookup::miss(CacheFallbackReason::KeyAbsent),
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            db,
+                            ns,
+                            entity_type,
+                            node_id,
+                            label = label.unwrap_or(""),
+                            "cache decode/read failed in list_incoming_edges_cached; falling back to fdb"
+                        );
+                        CacheLookup::miss(CacheFallbackReason::DecodeError)
+                    }
+                }
+            }
+            ReadConsistency::Eventual => {
+                match self
+                    .cache
+                    .list_incoming_edges_cached(db, ns, entity_type, node_id, label)
+                {
+                    Ok(edges) if !edges.is_empty() => CacheLookup::hit(edges),
+                    Ok(_) => CacheLookup::miss(CacheFallbackReason::KeyAbsent),
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            db,
+                            ns,
+                            entity_type,
+                            node_id,
+                            label = label.unwrap_or(""),
+                            "cache decode/read failed in list_incoming_edges_cached; falling back to fdb"
+                        );
+                        CacheLookup::miss(CacheFallbackReason::DecodeError)
+                    }
+                }
+            }
+        };
+
+        Ok(self.observe_lookup("list_edges_incoming", consistency, lookup, started))
     }
 
     pub fn cache(&self) -> &RocksCacheStore {
