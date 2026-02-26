@@ -10,7 +10,7 @@
 use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::{PelagoError, Value};
 use pelago_storage::{
-    EdgeStore, IdAllocator, NodeRef, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode,
+    EdgeStore, IdAllocator, NodeStore, PelagoDb, SchemaRegistry, StoredEdge, StoredNode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
@@ -105,20 +105,14 @@ struct ContinuationState {
 /// A single frontier entry in a continuation token
 #[derive(Serialize, Deserialize)]
 struct FrontierEntry {
-    /// The node key at the end of the path (entity_type:node_id)
-    node_key: String,
-    /// Entity type of this node
-    entity_type: String,
-    /// Node ID
-    node_id: String,
     /// Which hop index to resume at
     hop_idx: usize,
-    /// Path so far as (entity_type, node_id) pairs from start to this node
-    path_keys: Vec<(String, String)>,
+    /// Full traversal path at this frontier point.
+    path: TraversalPath,
 }
 
 /// A path through the graph
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraversalPath {
     /// Starting node
     pub start: StoredNode,
@@ -150,7 +144,7 @@ impl TraversalPath {
 }
 
 /// A single hop in a path
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PathHop {
     /// The edge traversed
     pub edge: StoredEdge,
@@ -288,77 +282,7 @@ impl TraversalEngine {
                 visited.insert(key);
             }
             for entry in state.frontier {
-                // Rebuild the path by fetching each node along the recorded path
-                let first_et = &entry
-                    .path_keys
-                    .first()
-                    .map(|(et, _)| et.as_str())
-                    .unwrap_or(start_entity_type);
-                let first_id = &entry
-                    .path_keys
-                    .first()
-                    .map(|(_, id)| id.as_str())
-                    .unwrap_or(start_node_id);
-                let path_start = node_store
-                    .get_node_at_read_version(
-                        database,
-                        namespace,
-                        first_et,
-                        first_id,
-                        read_options.read_version,
-                    )
-                    .await?
-                    .ok_or_else(|| PelagoError::NodeNotFound {
-                        entity_type: first_et.to_string(),
-                        node_id: first_id.to_string(),
-                    })?;
-                // We only need the end node for BFS expansion; the path is a stub
-                // containing the start. For full path reconstruction we'd need edges,
-                // but the frontier entry's node is what matters for continuing BFS.
-                if entry.entity_type == *first_et && entry.node_id == *first_id {
-                    // The frontier node is the start node itself
-                    let path = TraversalPath::new(path_start);
-                    queue.push_back((path, entry.hop_idx));
-                } else {
-                    // Fetch the frontier node and build a minimal path to it
-                    let frontier_node = match node_store
-                        .get_node_at_read_version(
-                            database,
-                            namespace,
-                            &entry.entity_type,
-                            &entry.node_id,
-                            read_options.read_version,
-                        )
-                        .await?
-                    {
-                        Some(n) => n,
-                        None => continue, // Node no longer exists
-                    };
-                    let mut path = TraversalPath::new(path_start);
-                    // Create a stub path — the edge is unavailable from the token
-                    // but the frontier node is what BFS needs to expand from.
-                    // We construct a minimal StoredEdge for path continuity.
-                    let stub_edge = StoredEdge {
-                        edge_id: String::new(),
-                        source: NodeRef {
-                            database: database.to_string(),
-                            namespace: namespace.to_string(),
-                            entity_type: start_entity_type.to_string(),
-                            node_id: start_node_id.to_string(),
-                        },
-                        target: NodeRef {
-                            database: database.to_string(),
-                            namespace: namespace.to_string(),
-                            entity_type: entry.entity_type.clone(),
-                            node_id: entry.node_id.clone(),
-                        },
-                        label: String::new(),
-                        properties: std::collections::HashMap::new(),
-                        created_at: 0,
-                    };
-                    path.push(stub_edge, frontier_node);
-                    queue.push_back((path, entry.hop_idx));
-                }
+                queue.push_back((entry.path, entry.hop_idx));
             }
         } else {
             // Fresh traversal
@@ -527,28 +451,18 @@ impl TraversalEngine {
         let (continuation_token, frontier) = if truncated && !queue.is_empty() {
             let frontier_entries: Vec<FrontierEntry> = queue
                 .iter()
-                .map(|(path, hop_idx)| {
-                    let end = path.end_node();
-                    let node_key = format!("{}:{}", end.entity_type, end.id);
-                    // Build path keys from the traversal path
-                    let mut path_keys =
-                        vec![(path.start.entity_type.clone(), path.start.id.clone())];
-                    for h in &path.hops {
-                        path_keys.push((h.node.entity_type.clone(), h.node.id.clone()));
-                    }
-                    FrontierEntry {
-                        node_key,
-                        entity_type: end.entity_type.clone(),
-                        node_id: end.id.clone(),
-                        hop_idx: *hop_idx,
-                        path_keys,
-                    }
+                .map(|(path, hop_idx)| FrontierEntry {
+                    hop_idx: *hop_idx,
+                    path: path.clone(),
                 })
                 .collect();
 
             let frontier_pairs: Vec<(String, String)> = frontier_entries
                 .iter()
-                .map(|e| (e.entity_type.clone(), e.node_id.clone()))
+                .map(|e| {
+                    let end = e.path.end_node();
+                    (end.entity_type.clone(), end.id.clone())
+                })
                 .collect();
 
             let state = ContinuationState {
@@ -895,5 +809,50 @@ mod tests {
         assert_eq!(config.max_depth, 10);
         assert_eq!(config.max_results, 1000);
         assert_eq!(config.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn continuation_state_roundtrip_preserves_full_path() {
+        let start = StoredNode {
+            id: "1_1".to_string(),
+            entity_type: "Person".to_string(),
+            properties: HashMap::new(),
+            locality: 1,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let end = StoredNode {
+            id: "1_2".to_string(),
+            entity_type: "Person".to_string(),
+            properties: HashMap::new(),
+            locality: 1,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let edge = StoredEdge::new(
+            "e1".to_string(),
+            pelago_storage::NodeRef::new("db", "ns", "Person", "1_1"),
+            pelago_storage::NodeRef::new("db", "ns", "Person", "1_2"),
+            "KNOWS".to_string(),
+            HashMap::new(),
+        );
+        let mut path = TraversalPath::new(start.clone());
+        path.push(edge, end.clone());
+        let state = ContinuationState {
+            visited: vec!["Person:1_1".to_string(), "Person:1_2".to_string()],
+            frontier: vec![FrontierEntry {
+                hop_idx: 1,
+                path: path.clone(),
+            }],
+        };
+
+        let token = encode_cbor(&state).expect("encode token");
+        let decoded: ContinuationState = decode_cbor(&token).expect("decode token");
+        assert_eq!(decoded.frontier.len(), 1);
+        assert_eq!(decoded.frontier[0].hop_idx, 1);
+        assert_eq!(decoded.frontier[0].path.start.id, start.id);
+        assert_eq!(decoded.frontier[0].path.hops.len(), 1);
+        assert_eq!(decoded.frontier[0].path.hops[0].edge.label, "KNOWS");
+        assert_eq!(decoded.frontier[0].path.end_node().id, end.id);
     }
 }
