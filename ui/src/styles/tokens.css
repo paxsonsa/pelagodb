@@ -1,0 +1,25 @@
+:root {
+  --background: #f4f6fa;
+  --foreground: #1f2937;
+  --panel: #ffffff;
+  --panel-foreground: #1f2937;
+  --muted: #6b7280;
+  --border: #d9deea;
+  --accent: #0f62fe;
+  --accent-foreground: #ffffff;
+  --danger: #d94848;
+  --danger-foreground: #ffffff;
+  --warning: #b7791f;
+  --warning-foreground: #ffffff;
+  --ok: #15803d;
+  --ok-foreground: #ffffff;
+  --ring: rgba(15, 98, 254, 0.35);
+
+  --chart-1: #0f62fe;
+  --chart-2: #16a34a;
+  --chart-3: #d97706;
+  --chart-4: #7c3aed;
+  --chart-5: #0891b2;
+
+  --radius: 0.55rem;
+}
