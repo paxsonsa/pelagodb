@@ -191,20 +191,24 @@ cargo run -p pelago-server --bin pelago-server
 Open `http://127.0.0.1:4080/ui/`
 
 ## Quick Links
-- Documentation index: `docs/README.md`
-- Getting started: `docs/01-getting-started.md`
-- Architecture and design: `docs/15-architecture-and-design.md`
-- When to use PelagoDB: `docs/16-when-to-use-pelagodb.md`
-- Watch and streaming guide: `docs/17-watch-and-streaming.md`
-- Data modeling and scaling: `docs/14-data-modeling-and-scaling.md`
-- PQL and schema reference: `docs/20-pql-and-schema-reference.md`
-- Replication runtime architecture: `docs/13-centralized-replication-and-scaling.md`
-- Operations playbook: `docs/09-operations-playbook.md`
-- Hosted docs setup: `docs/12-server-docs-site.md`
-- Embedded UI console: `docs/19-ui-console.md`
+- Documentation hub: `docs/README.md`
+- Getting started: `docs/getting-started/quickstart.md`
+- Architecture: `docs/concepts/architecture.md`
+- When to use PelagoDB: `docs/concepts/positioning.md`
+- Data model: `docs/concepts/data-model.md`
+- PQL reference: `docs/reference/pql.md`
+- Schema specification: `docs/reference/schema-spec.md`
+- CEL filters: `docs/reference/cel-filters.md`
+- CLI reference: `docs/reference/cli.md`
+- gRPC API: `docs/reference/grpc-api.md`
+- Watch API: `docs/reference/watch-api.md`
+- Replication: `docs/concepts/replication.md`
+- Operations: `docs/operations/deployment.md`
+- Configuration: `docs/reference/configuration.md`
+- Tutorials: `docs/tutorials/build-a-social-graph.md`
 - API protocol: `proto/pelago.proto`
-- CLI: `crates/pelago-cli`
-- Server: `crates/pelago-server`
+- CLI crate: `crates/pelago-cli`
+- Server crate: `crates/pelago-server`
 - Client SDKs: `clients/README.md`
 - Example datasets: `datasets/README.md`
 
