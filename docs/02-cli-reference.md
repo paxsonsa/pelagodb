@@ -8,19 +8,19 @@ This matrix is intentionally explicit so users can pick the right surface withou
 
 | Capability | gRPC | CLI (`pelago`) | REPL | SDKs |
 |---|---|---|---|---|
-| Schema register/get/list | Yes | Yes | No | Partial |
-| Node create/get/update/delete/list | Yes | Yes | No | Partial |
+| Schema register/get/list | Yes | Yes | Yes | Partial |
+| Node create/get/update/delete/list | Yes | Yes | Partial | Partial |
 | Node transfer ownership | Yes | No | No | Partial |
-| Edge create/delete/list | Yes | Yes | No | Partial |
-| Query find (CEL) | Yes | Yes | No | Partial |
-| Query traverse | Yes | Yes (single-step CLI shape) | No | Partial |
+| Edge create/delete/list | Yes | Yes | Partial | Partial |
+| Query find (CEL) | Yes | Yes | Yes | Partial |
+| Query traverse | Yes | Yes (single-step CLI shape) | Partial | Partial |
 | Query explain (CEL) | Yes | No | No | Partial |
 | Execute PQL | Yes | Yes | Yes | Partial |
 | PQL explain | Yes | Yes (`query pql --explain`) | Yes (`:explain`) | Partial |
 | Admin drop index | Yes | No | No | Partial |
 | Admin strip property | Yes | No | No | Partial |
-| Admin jobs/sites/replication/audit | Yes | Yes | No | Partial |
-| Admin drop type/namespace | Yes | Yes | No | Partial |
+| Admin jobs/sites/replication/audit | Yes | Yes | Partial | Partial |
+| Admin drop type/namespace | Yes | Yes | Partial | Partial |
 | Watch point/query/namespace | Yes | No | No | Partial |
 | Watch list/cancel | Yes | No | No | Partial |
 | Auth authenticate/token/policy APIs | Yes | No | No | Partial |
@@ -73,12 +73,19 @@ format = "table"
 Register from file:
 ```bash
 pelago schema register ./schema.json
+pelago schema register ./schema.sql --input-format sql
 ```
 
 Register inline:
 ```bash
 pelago schema register --inline '{"name":"Person","properties":{"name":{"type":"string","required":true}}}'
+pelago schema register --inline 'CREATE TYPE Person (name STRING REQUIRED, age INT INDEX RANGE);' --input-format sql
 ```
+
+`pelago schema register` accepts:
+- compact JSON shape
+- protobuf-shaped JSON (enum-style values and full edge/default metadata)
+- SQL-like DDL (`CREATE TYPE ...` / `CREATE SCHEMA ...`)
 
 Get and list:
 ```bash
@@ -161,7 +168,44 @@ pelago admin drop-namespace default
 pelago repl
 ```
 
-Use REPL for iterative PQL during demos.
+Interactive UX in REPL includes:
+- syntax highlighting for meta commands, SQL keywords, params, and PQL directives
+- tab completion for meta commands, SQL/PQL phrases, schema entity types, schema fields/edges, and `$params`
+- history hints (`Ctrl-R` for reverse search) and smart multiline entry for open braces/quotes
+- default fuzzy-ranked completion with runtime controls:
+  - `:set`
+  - `:set completion fuzzy|prefix`
+  - `:set color on|off`
+
+Use REPL for PQL plus SQL-like operational commands:
+
+```sql
+USE DATABASE default;
+USE namespace default;
+
+CREATE TYPE Person (
+  email STRING REQUIRED INDEX UNIQUE,
+  age INT INDEX RANGE
+) WITH (allow_undeclared_edges = false, extras_policy = reject);
+
+INSERT INTO Person VALUES {"email":"alice@example.com","age":31};
+SELECT * FROM Person WHERE age >= 30 LIMIT 50;
+UPDATE Person:1_42 SET {"age":32};
+DELETE FROM Person:1_42;
+CREATE EDGE Person:1_42 WORKS_AT Company:1_7 VALUES {"since":2020};
+SHOW EDGES Person:1_42 DIRECTION out LABEL WORKS_AT LIMIT 20;
+TRAVERSE FROM Person:1_42 VIA WORKS_AT DEPTH 2 MAX_RESULTS 50;
+DELETE EDGE Person:1_42 WORKS_AT Company:1_7;
+
+SHOW SCHEMAS;
+DESCRIBE Person;
+SHOW JOBS;
+SHOW SITES;
+SHOW REPLICATION STATUS;
+SHOW NAMESPACE SETTINGS;
+SET NAMESPACE OWNER site-west;
+CLEAR NAMESPACE OWNER;
+```
 
 ## Missing CLI Operations (Current Workarounds)
 
