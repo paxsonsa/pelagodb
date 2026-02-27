@@ -5,6 +5,7 @@
 ### Application Developer Path
 - `docs/01-getting-started.md`
 - `docs/14-data-modeling-and-scaling.md`
+- `docs/20-pql-and-schema-reference.md`
 - `docs/16-when-to-use-pelagodb.md`
 - `docs/02-cli-reference.md`
 - `docs/03-api-grpc.md`
@@ -32,6 +33,7 @@
 ## Start Here
 - `docs/01-getting-started.md`
 - `docs/14-data-modeling-and-scaling.md`
+- `docs/20-pql-and-schema-reference.md`
 - `docs/16-when-to-use-pelagodb.md`
 - `docs/02-cli-reference.md`
 

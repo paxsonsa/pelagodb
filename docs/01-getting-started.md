@@ -83,9 +83,11 @@ Use environment variables for a predictable local demo setup:
 export PELAGO_FDB_CLUSTER=/usr/local/etc/foundationdb/fdb.cluster
 # Apple Silicon default is often:
 # export PELAGO_FDB_CLUSTER=/opt/homebrew/etc/foundationdb/fdb.cluster
+# Docker container
+# export PELAGO_FDB_CLUSTER=`pwd`/fdb.cluster
 
 export PELAGO_SITE_ID=1
-export PELAGO_SITE_NAME=sf
+export PELAGO_SITE_NAME=dc1
 export PELAGO_LISTEN_ADDR=127.0.0.1:27615
 
 # Optional runtime toggles

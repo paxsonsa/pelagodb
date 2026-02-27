@@ -24,6 +24,13 @@ echo "[4/5] audit query"
 run_cli admin audit --limit 5 --format table >/dev/null
 
 echo "[5/5] query smoke (${SMOKE_ENTITY_TYPE})"
-run_cli query find "$SMOKE_ENTITY_TYPE" --filter "$SMOKE_FILTER" --limit 1 --format table >/dev/null || true
+query_json="$(run_cli query find "$SMOKE_ENTITY_TYPE" --filter "$SMOKE_FILTER" --limit 1 --format json)"
+query_count="$(
+  printf '%s' "$query_json" | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))'
+)"
+if [[ "$query_count" -ne 1 ]]; then
+  echo "Smoke query expected exactly 1 row with --limit 1, got $query_count" >&2
+  exit 1
+fi
 
 echo "Smoke checks completed against $SERVER_URL"

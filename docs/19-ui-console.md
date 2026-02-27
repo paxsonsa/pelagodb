@@ -3,6 +3,13 @@
 PelagoDB can serve an embedded web console for graph exploration, query workflows,
 operational state, and guided admin actions.
 
+The V2 console uses a command-center layout with guided workflows for:
+- Explorer: schema-backed entity selection, graph canvas, and node/edge inspectors
+- Query: CEL/PQL studio with explain plans and degradation visibility
+- Ops: KPI cards, typed state tables, filterable audit stream, and metrics fallback
+- Admin: risk-tiered mutation cards with confirmation dialogs
+- Watch: mode-driven stream setup, connection state badges, and filtered event feed
+
 ## Enable
 
 Build UI assets:
@@ -10,6 +17,8 @@ Build UI assets:
 ```bash
 cd ui
 npm install
+npm run typecheck
+npm run test
 npm run build
 cd ..
 ```
@@ -48,6 +57,17 @@ When `PELAGO_AUTH_REQUIRED=true`, provide either:
 Context headers:
 - `x-pelago-database` (default `default`)
 - `x-pelago-namespace` (default `default`)
+
+The UI persists auth and scope state in browser `sessionStorage` for the active tab/session.
+Closing the tab clears persisted credentials.
+
+## Frontend Stack
+
+- React 19 + React Router
+- Tailwind CSS v4
+- Radix primitives + shadcn-style component layer
+- Sonner toast notifications
+- Vitest + Testing Library for frontend tests
 
 ## Notes
 

@@ -1,4 +1,4 @@
-# Presentation Runbook (Next Week)
+# Presentation Runbook
 
 ## Goal
 Have a reproducible demo that shows:
