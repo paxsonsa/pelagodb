@@ -117,6 +117,28 @@ pub struct CdcEntry {
     pub operations: Vec<CdcOperation>,
 }
 
+impl CdcEntry {
+    fn normalize_legacy_schema_registers(&mut self) {
+        for op in &mut self.operations {
+            if let CdcOperation::SchemaRegister {
+                entity_type,
+                version,
+                schema,
+            } = op
+            {
+                // Legacy CDC schema-register entries may omit the embedded schema payload.
+                // Normalize to a minimally coherent payload so consumers can continue.
+                if schema.name.is_empty() {
+                    schema.name = entity_type.clone();
+                }
+                if schema.version == 0 {
+                    schema.version = *version;
+                }
+            }
+        }
+    }
+}
+
 /// Individual CDC operation within an entry.
 ///
 /// Each variant captures the data needed to replicate or react to a mutation.
@@ -157,6 +179,7 @@ pub enum CdcOperation {
     SchemaRegister {
         entity_type: String,
         version: u32,
+        #[serde(default = "legacy_missing_schema_payload")]
         schema: EntitySchema,
     },
     OwnershipTransfer {
@@ -165,6 +188,12 @@ pub enum CdcOperation {
         previous_site_id: String,
         current_site_id: String,
     },
+}
+
+fn legacy_missing_schema_payload() -> EntitySchema {
+    let mut schema = EntitySchema::new("");
+    schema.version = 0;
+    schema
 }
 
 // ─── CDC Accumulator ─────────────────────────────────────────────────────
@@ -309,7 +338,8 @@ pub async fn read_cdc_entries(
     for (key, value) in results {
         let vs_bytes = &key[prefix_len..];
         if let Some(vs) = Versionstamp::from_bytes(vs_bytes) {
-            let entry: CdcEntry = decode_cbor(&value)?;
+            let mut entry: CdcEntry = decode_cbor(&value)?;
+            entry.normalize_legacy_schema_registers();
             entries.push((vs, entry));
         }
     }
@@ -510,6 +540,50 @@ mod tests {
             let bytes = encode_cbor(&entry).unwrap();
             let decoded: CdcEntry = decode_cbor(&bytes).unwrap();
             assert_eq!(decoded.operations.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_legacy_schema_register_without_schema_payload_normalizes() {
+        #[derive(serde::Serialize)]
+        enum LegacyCdcOperation {
+            SchemaRegister { entity_type: String, version: u32 },
+        }
+
+        #[derive(serde::Serialize)]
+        struct LegacyCdcEntry {
+            site: String,
+            timestamp: i64,
+            batch_id: Option<String>,
+            operations: Vec<LegacyCdcOperation>,
+        }
+
+        let legacy = LegacyCdcEntry {
+            site: "1".to_string(),
+            timestamp: 1,
+            batch_id: None,
+            operations: vec![LegacyCdcOperation::SchemaRegister {
+                entity_type: "Task".to_string(),
+                version: 3,
+            }],
+        };
+
+        let bytes = encode_cbor(&legacy).expect("legacy encode");
+        let mut decoded: CdcEntry = decode_cbor(&bytes).expect("compat decode");
+        decoded.normalize_legacy_schema_registers();
+
+        match &decoded.operations[0] {
+            CdcOperation::SchemaRegister {
+                entity_type,
+                version,
+                schema,
+            } => {
+                assert_eq!(entity_type, "Task");
+                assert_eq!(*version, 3);
+                assert_eq!(schema.name, "Task");
+                assert_eq!(schema.version, 3);
+            }
+            other => panic!("expected schema register op, got {:?}", other),
         }
     }
 

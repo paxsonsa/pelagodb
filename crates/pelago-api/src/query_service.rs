@@ -220,8 +220,9 @@ impl QueryService for QueryServiceImpl {
             }
             // Default path: keyset cursor by node id bytes.
             FindNodesCursor::Keyset(cursor_node_id) => {
-                let fetch_limit = page_size.saturating_add(1).min(u32::MAX as usize) as u32;
-                let limit = Some(fetch_limit);
+                // QueryExecutor already over-fetches by one to determine has_more/cursor.
+                // Passing the client page size here preserves exact limit semantics.
+                let limit = Some(page_size.min(u32::MAX as usize) as u32);
 
                 let maybe_term_results = self
                     .query_executor

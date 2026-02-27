@@ -175,6 +175,20 @@ fn test_cli_schema_node_edge_query_workflow() {
     assert!(json_array_has_id(&found_people, &alice_id));
     assert!(json_array_has_id(&found_people, &bob_id));
 
+    let limited_people = fixture.run_json(&[
+        "query",
+        "find",
+        &person_type,
+        "--filter",
+        "age >= 30",
+        "--limit",
+        "1",
+    ]);
+    let limited_people = limited_people
+        .as_array()
+        .expect("limited query should return array");
+    assert_eq!(limited_people.len(), 1, "query limit=1 should return 1 row");
+
     let traversed = fixture.run_json(&[
         "query",
         "traverse",
