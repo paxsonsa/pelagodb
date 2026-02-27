@@ -20,6 +20,14 @@ This creates:
 - `pelagodb/generated/pelago_pb2.py`
 - `pelagodb/generated/pelago_pb2_grpc.py`
 
+## Schema Registration Defaults
+- `register_schema_dict` now sets `index_default_mode=INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1`.
+- If a property omits `index`, the server infers:
+  - `int`, `float`, `timestamp` -> `range`
+  - `bool` -> `equality`
+  - `string`, `bytes` -> `none`
+- Set `"index": "none"` to explicitly disable inferred indexing for a property.
+
 ## Quick Example
 ```python
 from pelagodb import PelagoClient

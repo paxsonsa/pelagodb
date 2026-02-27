@@ -46,7 +46,11 @@ defmodule PelagoDB.Client do
 
   def register_schema_dict(client, schema_map) when is_map(schema_map) do
     schema = schema_dict_to_proto(schema_map)
-    req = %RegisterSchemaRequest{context: context(client), schema: schema}
+    req = %RegisterSchemaRequest{
+      context: context(client),
+      schema: schema,
+      index_default_mode: :INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1
+    }
 
     with_channel(client, fn ch ->
       SchemaService.Stub.register_schema(ch, req, headers: headers(client))
@@ -236,12 +240,18 @@ defmodule PelagoDB.Client do
       schema
       |> Map.get("properties", %{})
       |> Enum.into(%{}, fn {name, p} ->
-        {name,
-         %PropertyDef{
-           type: property_type(p["type"] || "string"),
-           required: p["required"] || false,
-           index: index_type(p["index"] || "none")
-         }}
+        base = %PropertyDef{
+          type: property_type(p["type"] || "string"),
+          required: p["required"] || false
+        }
+
+        prop =
+          case Map.fetch(p, "index") do
+            {:ok, index} -> %PropertyDef{base | index: index_type(index)}
+            :error -> base
+          end
+
+        {name, prop}
       end)
 
     edges =

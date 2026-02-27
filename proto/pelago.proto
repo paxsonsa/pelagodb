@@ -86,6 +86,7 @@ service SchemaService {
 message RegisterSchemaRequest {
   RequestContext context = 1;
   EntitySchema schema = 2;
+  IndexDefaultMode index_default_mode = 3;
 }
 
 message RegisterSchemaResponse {
@@ -124,7 +125,7 @@ message EntitySchema {
 message PropertyDef {
   PropertyType type = 1;
   bool required = 2;
-  IndexType index = 3;
+  optional IndexType index = 3;
   Value default_value = 4;
 }
 
@@ -143,6 +144,11 @@ enum IndexType {
   INDEX_TYPE_UNIQUE = 1;
   INDEX_TYPE_EQUALITY = 2;
   INDEX_TYPE_RANGE = 3;
+}
+
+enum IndexDefaultMode {
+  INDEX_DEFAULT_MODE_UNSPECIFIED = 0;
+  INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1 = 1;
 }
 
 message EdgeDef {

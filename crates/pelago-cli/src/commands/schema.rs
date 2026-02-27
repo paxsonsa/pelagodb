@@ -1,8 +1,9 @@
 use crate::connection::GrpcConnection;
 use crate::output::OutputFormat;
+use crate::schema_input::{parse_schema_input, SchemaInputFormat};
 use pelago_proto::{
-    EntitySchema, ExtrasPolicy, GetSchemaRequest, IndexType, ListSchemasRequest, PropertyDef,
-    PropertyType, RegisterSchemaRequest, RequestContext, SchemaMeta,
+    EntitySchema, GetSchemaRequest, IndexDefaultMode, IndexType, ListSchemasRequest, PropertyType,
+    RegisterSchemaRequest, RequestContext,
 };
 
 #[derive(clap::Args)]
@@ -13,13 +14,16 @@ pub struct SchemaArgs {
 
 #[derive(clap::Subcommand)]
 pub enum SchemaCommand {
-    /// Register a schema from a JSON file
+    /// Register a schema from file/inline input (JSON, protobuf-style JSON, or SQL-like DDL)
     Register {
-        /// Path to schema JSON file
+        /// Path to schema definition file
         file: Option<String>,
-        /// Inline JSON schema
+        /// Inline schema definition
         #[arg(long)]
         inline: Option<String>,
+        /// Input format (`auto` detects JSON vs SQL)
+        #[arg(long, value_enum, default_value_t = SchemaInputFormat::Auto)]
+        input_format: SchemaInputFormat,
     },
     /// Get a schema by entity type
     Get {
@@ -58,23 +62,28 @@ pub async fn run(
     };
 
     match args.command {
-        SchemaCommand::Register { file, inline } => {
-            let json_str = if let Some(path) = file {
+        SchemaCommand::Register {
+            file,
+            inline,
+            input_format,
+        } => {
+            let schema_text = if let Some(path) = file {
                 std::fs::read_to_string(&path)?
-            } else if let Some(json) = inline {
-                json
+            } else if let Some(schema) = inline {
+                schema
             } else {
-                return Err("Either a file path or --inline JSON is required".into());
+                return Err("Either a file path or --inline schema is required".into());
             };
 
-            let json_val: serde_json::Value = serde_json::from_str(&json_str)?;
-            let schema = json_to_proto_schema(&json_val)?;
+            let schema = parse_schema_input(&schema_text, input_format)
+                .map_err(|e| format!("Failed to parse schema input: {}", e))?;
 
             let mut client = conn.schema_client();
             let resp = client
                 .register_schema(RegisterSchemaRequest {
                     context: Some(context),
                     schema: Some(schema),
+                    index_default_mode: IndexDefaultMode::AutoByTypeV1 as i32,
                 })
                 .await?
                 .into_inner();
@@ -161,96 +170,6 @@ pub async fn run(
     Ok(())
 }
 
-fn json_to_proto_schema(
-    json: &serde_json::Value,
-) -> Result<EntitySchema, Box<dyn std::error::Error>> {
-    let name = json
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'name' field")?;
-
-    let mut properties = std::collections::HashMap::new();
-    if let Some(props) = json.get("properties").and_then(|v| v.as_object()) {
-        for (key, val) in props {
-            let type_str = val.get("type").and_then(|v| v.as_str()).unwrap_or("string");
-            let required = val
-                .get("required")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let index_str = val.get("index").and_then(|v| v.as_str()).unwrap_or("none");
-
-            properties.insert(
-                key.clone(),
-                PropertyDef {
-                    r#type: property_type_from_str(type_str) as i32,
-                    required,
-                    index: index_type_from_str(index_str) as i32,
-                    default_value: None,
-                },
-            );
-        }
-    }
-
-    let meta = json
-        .get("meta")
-        .and_then(|value| value.as_object())
-        .map(|obj| {
-            let allow_undeclared_edges = obj
-                .get("allow_undeclared_edges")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let extras_policy = obj
-                .get("extras_policy")
-                .and_then(|v| v.as_str())
-                .map(extras_policy_from_str)
-                .unwrap_or(ExtrasPolicy::Unspecified) as i32;
-            SchemaMeta {
-                allow_undeclared_edges,
-                extras_policy,
-            }
-        });
-
-    Ok(EntitySchema {
-        name: name.to_string(),
-        version: 0,
-        properties,
-        edges: std::collections::HashMap::new(),
-        meta,
-        created_at: 0,
-        created_by: String::new(),
-    })
-}
-
-fn property_type_from_str(s: &str) -> PropertyType {
-    match s.to_lowercase().as_str() {
-        "string" | "str" => PropertyType::String,
-        "int" | "integer" | "i64" => PropertyType::Int,
-        "float" | "double" | "f64" => PropertyType::Float,
-        "bool" | "boolean" => PropertyType::Bool,
-        "timestamp" | "time" => PropertyType::Timestamp,
-        "bytes" | "binary" => PropertyType::Bytes,
-        _ => PropertyType::Unspecified,
-    }
-}
-
-fn index_type_from_str(s: &str) -> IndexType {
-    match s.to_lowercase().as_str() {
-        "unique" => IndexType::Unique,
-        "equality" | "eq" => IndexType::Equality,
-        "range" => IndexType::Range,
-        _ => IndexType::None,
-    }
-}
-
-fn extras_policy_from_str(s: &str) -> ExtrasPolicy {
-    match s.to_lowercase().as_str() {
-        "reject" => ExtrasPolicy::Reject,
-        "allow" => ExtrasPolicy::Allow,
-        "warn" => ExtrasPolicy::Warn,
-        _ => ExtrasPolicy::Unspecified,
-    }
-}
-
 fn property_type_name(val: i32) -> &'static str {
     match PropertyType::try_from(val) {
         Ok(PropertyType::String) => "string",
@@ -273,6 +192,10 @@ fn index_type_name(val: i32) -> &'static str {
     }
 }
 
+fn index_type_name_opt(val: Option<i32>) -> &'static str {
+    index_type_name(val.unwrap_or(IndexType::None as i32))
+}
+
 fn schema_to_json(schema: &EntitySchema) -> serde_json::Value {
     let mut props = serde_json::Map::new();
     for (k, v) in &schema.properties {
@@ -281,7 +204,7 @@ fn schema_to_json(schema: &EntitySchema) -> serde_json::Value {
             serde_json::json!({
                 "type": property_type_name(v.r#type),
                 "required": v.required,
-                "index": index_type_name(v.index),
+                "index": index_type_name_opt(v.index),
             }),
         );
     }
@@ -311,7 +234,7 @@ fn format_schema(schema: &EntitySchema, format: &OutputFormat) {
                         name.clone(),
                         property_type_name(prop.r#type).to_string(),
                         prop.required.to_string(),
-                        index_type_name(prop.index).to_string(),
+                        index_type_name_opt(prop.index).to_string(),
                     ]);
                 }
                 crate::output::print_table(&headers, &rows);
@@ -325,7 +248,7 @@ fn format_schema(schema: &EntitySchema, format: &OutputFormat) {
                     name.clone(),
                     property_type_name(prop.r#type).to_string(),
                     prop.required.to_string(),
-                    index_type_name(prop.index).to_string(),
+                    index_type_name_opt(prop.index).to_string(),
                 ]);
             }
             crate::output::print_csv(&headers, &rows);
@@ -378,7 +301,7 @@ fn format_schema_diff(
                     "type={}, required={}, index={}",
                     property_type_name(old_prop.r#type),
                     old_prop.required,
-                    index_type_name(old_prop.index)
+                    index_type_name_opt(old_prop.index)
                 ),
                 String::new(),
             )),
@@ -394,13 +317,13 @@ fn format_schema_diff(
                             "type={}, required={}, index={}",
                             property_type_name(old_prop.r#type),
                             old_prop.required,
-                            index_type_name(old_prop.index)
+                            index_type_name_opt(old_prop.index)
                         ),
                         format!(
                             "type={}, required={}, index={}",
                             property_type_name(new_prop.r#type),
                             new_prop.required,
-                            index_type_name(new_prop.index)
+                            index_type_name_opt(new_prop.index)
                         ),
                     ));
                 }
@@ -418,7 +341,7 @@ fn format_schema_diff(
                     "type={}, required={}, index={}",
                     property_type_name(new_prop.r#type),
                     new_prop.required,
-                    index_type_name(new_prop.index)
+                    index_type_name_opt(new_prop.index)
                 ),
             ));
         }
@@ -465,5 +388,46 @@ fn format_schema_diff(
                 .collect();
             crate::output::print_csv(&headers, &rows);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omits_index_field_when_not_provided() {
+        let schema_json = serde_json::json!({
+            "name": "Person",
+            "properties": {
+                "age": { "type": "int" }
+            }
+        });
+
+        let schema = parse_schema_input(&schema_json.to_string(), SchemaInputFormat::Json)
+            .expect("schema should parse");
+        let age = schema
+            .properties
+            .get("age")
+            .expect("expected age property in parsed schema");
+        assert_eq!(age.index, None);
+    }
+
+    #[test]
+    fn keeps_explicit_none_index_when_provided() {
+        let schema_json = serde_json::json!({
+            "name": "Person",
+            "properties": {
+                "age": { "type": "int", "index": "none" }
+            }
+        });
+
+        let schema = parse_schema_input(&schema_json.to_string(), SchemaInputFormat::Json)
+            .expect("schema should parse");
+        let age = schema
+            .properties
+            .get("age")
+            .expect("expected age property in parsed schema");
+        assert_eq!(age.index, Some(IndexType::None as i32));
     }
 }

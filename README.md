@@ -39,6 +39,16 @@ So the name reflects the core idea: connected, clustered systems with explicit l
 - CLI for admin + query workflows
 - Client SDKs/scaffolds for Python, Elixir, Rust, and Swift
 
+## Schema Registration Breaking Change
+- `SchemaService.RegisterSchema` now requires:
+  - `index_default_mode = INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1`
+- Legacy schema writers that omit this mode are rejected with `INVALID_ARGUMENT`.
+- When property `index` is omitted, the server infers defaults by type:
+  - `int`, `float`, `timestamp` -> `range`
+  - `bool` -> `equality`
+  - `string`, `bytes` -> `none`
+- Explicit `index: none` always overrides and disables inferred indexing for that property.
+
 ## Who Should Use PelagoDB
 - Teams building globally distributed applications with cross-DC writes.
 - Teams that need strict schema governance and explicit ownership controls.
@@ -130,6 +140,11 @@ cargo run -p pelago-cli -- --server http://127.0.0.1:27615 schema register --inl
 }'
 ```
 
+SQL-like schema definition is also supported:
+```bash
+cargo run -p pelago-cli -- --server http://127.0.0.1:27615 schema register --input-format sql --inline 'CREATE TYPE Person (name STRING REQUIRED, age INT INDEX RANGE);'
+```
+
 Create nodes:
 ```bash
 cargo run -p pelago-cli -- --server http://127.0.0.1:27615 node create Person name=Alice age=31
@@ -182,6 +197,7 @@ Open `http://127.0.0.1:4080/ui/`
 - When to use PelagoDB: `docs/16-when-to-use-pelagodb.md`
 - Watch and streaming guide: `docs/17-watch-and-streaming.md`
 - Data modeling and scaling: `docs/14-data-modeling-and-scaling.md`
+- PQL and schema reference: `docs/20-pql-and-schema-reference.md`
 - Replication runtime architecture: `docs/13-centralized-replication-and-scaling.md`
 - Operations playbook: `docs/09-operations-playbook.md`
 - Hosted docs setup: `docs/12-server-docs-site.md`

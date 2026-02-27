@@ -16,9 +16,9 @@ use pelago_core::schema::{
 use pelago_core::{PropertyType as CorePropertyType, Value as CoreValue};
 use pelago_proto::{
     schema_service_server::SchemaService, EdgeDef, EdgeDirectionDef, EdgeTarget, EntitySchema,
-    ExtrasPolicy, GetSchemaRequest, GetSchemaResponse, IndexType, ListSchemasRequest,
-    ListSchemasResponse, OwnershipMode, PropertyDef, PropertyType, RegisterSchemaRequest,
-    RegisterSchemaResponse, SchemaMeta, Value,
+    ExtrasPolicy, GetSchemaRequest, GetSchemaResponse, IndexDefaultMode, IndexType,
+    ListSchemasRequest, ListSchemasResponse, OwnershipMode, PropertyDef, PropertyType,
+    RegisterSchemaRequest, RegisterSchemaResponse, SchemaMeta, Value,
 };
 use pelago_storage::{PelagoDb, SchemaRegistry};
 use std::collections::HashMap;
@@ -54,6 +54,13 @@ impl SchemaService for SchemaServiceImpl {
         let proto_schema = req
             .schema
             .ok_or_else(|| Status::invalid_argument("missing schema"))?;
+        let index_default_mode = IndexDefaultMode::try_from(req.index_default_mode)
+            .unwrap_or(IndexDefaultMode::Unspecified);
+        if index_default_mode != IndexDefaultMode::AutoByTypeV1 {
+            return Err(Status::invalid_argument(
+                "index_default_mode must be INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1",
+            ));
+        }
         authorize(
             &self.db,
             principal.as_ref(),
@@ -65,7 +72,7 @@ impl SchemaService for SchemaServiceImpl {
         .await?;
 
         // Convert proto schema to core schema
-        let core_schema = proto_to_core_schema(&proto_schema)?;
+        let core_schema = proto_to_core_schema(&proto_schema, index_default_mode)?;
 
         // Register schema in FDB
         let version = self
@@ -191,16 +198,19 @@ impl SchemaService for SchemaServiceImpl {
 }
 
 /// Convert proto EntitySchema to core EntitySchema
-pub fn proto_to_core_schema(proto: &EntitySchema) -> Result<CoreSchema, Status> {
+pub fn proto_to_core_schema(
+    proto: &EntitySchema,
+    index_default_mode: IndexDefaultMode,
+) -> Result<CoreSchema, Status> {
     let mut schema = CoreSchema::new(&proto.name);
 
     for (name, prop_def) in &proto.properties {
-        let core_prop = proto_to_core_property_def(prop_def)?;
+        let core_prop = proto_to_core_property_def(prop_def, index_default_mode)?;
         schema = schema.with_property(name, core_prop);
     }
 
     for (name, edge_def) in &proto.edges {
-        let core_edge = proto_to_core_edge_def(edge_def)?;
+        let core_edge = proto_to_core_edge_def(edge_def, index_default_mode)?;
         schema = schema.with_edge(name, core_edge);
     }
 
@@ -239,7 +249,10 @@ pub fn core_to_proto_schema(core: &CoreSchema) -> EntitySchema {
     }
 }
 
-fn proto_to_core_edge_def(proto: &EdgeDef) -> Result<CoreEdgeDef, Status> {
+fn proto_to_core_edge_def(
+    proto: &EdgeDef,
+    index_default_mode: IndexDefaultMode,
+) -> Result<CoreEdgeDef, Status> {
     let target_proto = proto
         .target
         .as_ref()
@@ -263,7 +276,7 @@ fn proto_to_core_edge_def(proto: &EdgeDef) -> Result<CoreEdgeDef, Status> {
     }
 
     for (name, prop_def) in &proto.properties {
-        let core_prop = proto_to_core_property_def(prop_def)?;
+        let core_prop = proto_to_core_property_def(prop_def, index_default_mode)?;
         edge.properties.insert(name.clone(), core_prop);
     }
 
@@ -334,7 +347,10 @@ fn core_to_proto_schema_meta(core: &CoreSchemaMeta) -> SchemaMeta {
 }
 
 /// Convert proto PropertyDef to core PropertyDef
-fn proto_to_core_property_def(proto: &PropertyDef) -> Result<CorePropertyDef, Status> {
+fn proto_to_core_property_def(
+    proto: &PropertyDef,
+    index_default_mode: IndexDefaultMode,
+) -> Result<CorePropertyDef, Status> {
     let prop_type = match PropertyType::try_from(proto.r#type) {
         Ok(PropertyType::String) => CorePropertyType::String,
         Ok(PropertyType::Int) => CorePropertyType::Int,
@@ -351,11 +367,15 @@ fn proto_to_core_property_def(proto: &PropertyDef) -> Result<CorePropertyDef, St
         def = def.required();
     }
 
-    let index_type = match IndexType::try_from(proto.index) {
-        Ok(IndexType::Unique) => CoreIndexType::Unique,
-        Ok(IndexType::Equality) => CoreIndexType::Equality,
-        Ok(IndexType::Range) => CoreIndexType::Range,
-        _ => CoreIndexType::None,
+    let index_type = match proto.index {
+        Some(raw_index) => match IndexType::try_from(raw_index) {
+            Ok(IndexType::None) => CoreIndexType::None,
+            Ok(IndexType::Unique) => CoreIndexType::Unique,
+            Ok(IndexType::Equality) => CoreIndexType::Equality,
+            Ok(IndexType::Range) => CoreIndexType::Range,
+            _ => return Err(Status::invalid_argument("invalid index type")),
+        },
+        None => infer_index_type(prop_type, index_default_mode)?,
     };
     def = def.with_index(index_type);
 
@@ -366,6 +386,24 @@ fn proto_to_core_property_def(proto: &PropertyDef) -> Result<CorePropertyDef, St
     }
 
     Ok(def)
+}
+
+fn infer_index_type(
+    prop_type: CorePropertyType,
+    index_default_mode: IndexDefaultMode,
+) -> Result<CoreIndexType, Status> {
+    match index_default_mode {
+        IndexDefaultMode::AutoByTypeV1 => Ok(match prop_type {
+            CorePropertyType::Int | CorePropertyType::Float | CorePropertyType::Timestamp => {
+                CoreIndexType::Range
+            }
+            CorePropertyType::Bool => CoreIndexType::Equality,
+            CorePropertyType::String | CorePropertyType::Bytes => CoreIndexType::None,
+        }),
+        _ => Err(Status::invalid_argument(
+            "index_default_mode must be INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1",
+        )),
+    }
 }
 
 /// Convert core PropertyDef to proto PropertyDef
@@ -389,7 +427,7 @@ fn core_to_proto_property_def(core: &CorePropertyDef) -> PropertyDef {
     PropertyDef {
         r#type: prop_type as i32,
         required: core.required,
-        index: index as i32,
+        index: Some(index as i32),
         default_value: core.default_value.as_ref().map(core_to_proto_value),
     }
 }
@@ -440,4 +478,111 @@ pub fn proto_to_core_properties(props: &HashMap<String, Value>) -> HashMap<Strin
         .iter()
         .filter_map(|(k, v)| proto_to_core_value(v).map(|cv| (k.clone(), cv)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pelago_query::plan::QueryPlan;
+    use pelago_query::planner::QueryPlanner;
+    use std::collections::HashMap;
+
+    fn prop(r#type: PropertyType, index: Option<IndexType>) -> PropertyDef {
+        PropertyDef {
+            r#type: r#type as i32,
+            required: false,
+            index: index.map(|i| i as i32),
+            default_value: None,
+        }
+    }
+
+    fn entity_with_single_prop(name: &str, prop_name: &str, prop_def: PropertyDef) -> EntitySchema {
+        let mut properties = HashMap::new();
+        properties.insert(prop_name.to_string(), prop_def);
+        EntitySchema {
+            name: name.to_string(),
+            version: 0,
+            properties,
+            edges: HashMap::new(),
+            meta: None,
+            created_at: 0,
+            created_by: String::new(),
+        }
+    }
+
+    #[test]
+    fn infers_range_for_int_when_index_omitted() {
+        let core = proto_to_core_property_def(
+            &prop(PropertyType::Int, None),
+            IndexDefaultMode::AutoByTypeV1,
+        )
+        .expect("int property should parse");
+        assert_eq!(core.index, CoreIndexType::Range);
+    }
+
+    #[test]
+    fn infers_equality_for_bool_when_index_omitted() {
+        let core = proto_to_core_property_def(
+            &prop(PropertyType::Bool, None),
+            IndexDefaultMode::AutoByTypeV1,
+        )
+        .expect("bool property should parse");
+        assert_eq!(core.index, CoreIndexType::Equality);
+    }
+
+    #[test]
+    fn infers_none_for_string_when_index_omitted() {
+        let core = proto_to_core_property_def(
+            &prop(PropertyType::String, None),
+            IndexDefaultMode::AutoByTypeV1,
+        )
+        .expect("string property should parse");
+        assert_eq!(core.index, CoreIndexType::None);
+    }
+
+    #[test]
+    fn explicit_none_overrides_type_default() {
+        let core = proto_to_core_property_def(
+            &prop(PropertyType::Int, Some(IndexType::None)),
+            IndexDefaultMode::AutoByTypeV1,
+        )
+        .expect("int property with explicit none should parse");
+        assert_eq!(core.index, CoreIndexType::None);
+    }
+
+    #[test]
+    fn reject_unspecified_index_default_mode() {
+        let err = proto_to_core_property_def(
+            &prop(PropertyType::Int, None),
+            IndexDefaultMode::Unspecified,
+        )
+        .expect_err("unspecified mode must be rejected");
+        assert!(err.message().contains("INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1"));
+    }
+
+    #[test]
+    fn inferred_range_index_drives_index_scan_planning() {
+        let schema = entity_with_single_prop("Person", "age", prop(PropertyType::Int, None));
+        let core = proto_to_core_schema(&schema, IndexDefaultMode::AutoByTypeV1)
+            .expect("schema conversion should succeed");
+        let plan = QueryPlanner::plan("Person", "age >= 30", &core, None, None)
+            .expect("planning should succeed");
+
+        assert!(matches!(plan.primary_plan, QueryPlan::IndexScan { .. }));
+    }
+
+    #[test]
+    fn explicit_none_keeps_full_scan_planning() {
+        let schema = entity_with_single_prop(
+            "Person",
+            "age",
+            prop(PropertyType::Int, Some(IndexType::None)),
+        );
+        let core = proto_to_core_schema(&schema, IndexDefaultMode::AutoByTypeV1)
+            .expect("schema conversion should succeed");
+        let plan = QueryPlanner::plan("Person", "age >= 30", &core, None, None)
+            .expect("planning should succeed");
+
+        assert!(matches!(plan.primary_plan, QueryPlan::FullScan));
+    }
 }

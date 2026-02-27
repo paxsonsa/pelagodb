@@ -3,7 +3,7 @@ use pelago_core::PelagoError;
 use pelago_core::ServerConfig;
 use pelago_proto::cdc_operation_proto::Operation;
 use pelago_proto::replication_service_client::ReplicationServiceClient;
-use pelago_proto::{PullCdcEventsRequest, RequestContext};
+use pelago_proto::{IndexDefaultMode, PullCdcEventsRequest, RequestContext};
 use pelago_storage::{
     append_audit_record, append_cdc_entry, get_replication_positions_scoped, get_replicator_lease,
     try_acquire_replicator_lease, update_replication_position_scoped, AuditRecord, CdcEntry,
@@ -581,8 +581,8 @@ async fn apply_replication_op(
             let proto_schema = op.schema.ok_or_else(|| PelagoError::SchemaValidation {
                 message: "replicated schema register missing schema payload".to_string(),
             })?;
-            let schema =
-                proto_to_core_schema(&proto_schema).map_err(|e| PelagoError::SchemaValidation {
+            let schema = proto_to_core_schema(&proto_schema, IndexDefaultMode::AutoByTypeV1)
+                .map_err(|e| PelagoError::SchemaValidation {
                     message: format!("invalid replicated schema payload: {}", e.message()),
                 })?;
             if schema.name != op.entity_type {

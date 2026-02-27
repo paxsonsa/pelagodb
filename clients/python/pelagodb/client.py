@@ -123,7 +123,11 @@ class PelagoClient:
 
     def register_schema_dict(self, schema: Dict[str, Any]) -> pelago_pb2.RegisterSchemaResponse:
         proto_schema = _schema_dict_to_proto(schema)
-        req = pelago_pb2.RegisterSchemaRequest(context=self._context(), schema=proto_schema)
+        req = pelago_pb2.RegisterSchemaRequest(
+            context=self._context(),
+            schema=proto_schema,
+            index_default_mode=pelago_pb2.INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1,
+        )
         return self.schema.RegisterSchema(req, metadata=self._metadata())
 
     def get_schema(self, entity_type: str, version: int = 0) -> pelago_pb2.GetSchemaResponse:
@@ -334,8 +338,9 @@ def _schema_dict_to_proto(schema: Dict[str, Any]) -> pelago_pb2.EntitySchema:
         p = pelago_pb2.PropertyDef(
             type=_PROPERTY_TYPE.get(str(prop.get("type", "string")).lower(), pelago_pb2.PROPERTY_TYPE_UNSPECIFIED),
             required=bool(prop.get("required", False)),
-            index=_INDEX_TYPE.get(str(prop.get("index", "none")).lower(), pelago_pb2.INDEX_TYPE_NONE),
         )
+        if "index" in prop:
+            p.index = _INDEX_TYPE.get(str(prop.get("index", "none")).lower(), pelago_pb2.INDEX_TYPE_NONE)
         if "default" in prop:
             p.default_value.CopyFrom(_py_to_value(prop["default"]))
         entity.properties[prop_name].CopyFrom(p)

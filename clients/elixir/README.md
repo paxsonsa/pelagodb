@@ -15,6 +15,14 @@ mix deps.get
 
 This generates Elixir modules under `lib/generated`.
 
+## Schema Registration Defaults
+- `Client.register_schema_dict/2` now sets `index_default_mode=:INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1`.
+- If a property omits `index`, the server infers:
+  - `int`, `float`, `timestamp` -> `range`
+  - `bool` -> `equality`
+  - `string`, `bytes` -> `none`
+- Use explicit `"index" => "none"` to disable inferred indexing for a property.
+
 ## Usage
 ```elixir
 alias PelagoDB.Client

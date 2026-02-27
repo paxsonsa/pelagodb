@@ -5,6 +5,7 @@ mod config;
 mod connection;
 mod output;
 mod repl;
+mod schema_input;
 
 #[derive(Parser)]
 #[command(name = "pelago", about = "PelagoDB CLI", version)]
