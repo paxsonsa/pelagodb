@@ -31,14 +31,16 @@ Rule of thumb: Each indexed property adds ~1 additional KV pair per node. A node
 
 Define p50/p95/p99 targets per operation type:
 
-| Operation | Suggested p99 Target |
-|---|---|
-| Node point read | 1 ms |
-| Indexed query (small result) | 10 ms |
-| Traversal (bounded) | 100 ms |
-| Write (single node) | 5 ms |
+| Transport | Node Point Read | Indexed Query (small result) | Traversal (bounded) |
+|---|---:|---:|---:|
+| `grpc` (service latency gate) | 6 ms | 12 ms | 100 ms |
+| `cli` (end-to-end regression gate) | 40 ms | 35 ms | 100 ms |
 
-Validate with `scripts/perf-benchmark.py --enforce-targets`.
+Write target (single node): 5 ms p99.
+
+Validate with:
+- `scripts/perf-benchmark.py --transport grpc --enforce-targets`
+- `scripts/perf-benchmark.py --transport cli --enforce-targets --target-get-ms 40 --target-find-ms 35 --target-traverse-ms 100`
 
 ## Namespace Partitioning Strategy
 

@@ -1,4 +1,5 @@
 # PelagoDB
+[![CI Gates](https://github.com/paxsonsa/pelagodb/actions/workflows/ci-gates.yml/badge.svg)](https://github.com/paxsonsa/pelagodb/actions/workflows/ci-gates.yml)
 
 PelagoDB is a schema-first graph database built on FoundationDB for teams that need:
 - strict data shape guarantees
@@ -204,6 +205,7 @@ Open `http://127.0.0.1:4080/ui/`
 - Watch API: `docs/reference/watch-api.md`
 - Replication: `docs/concepts/replication.md`
 - Operations: `docs/operations/deployment.md`
+- Simulation/Fuzzing runbook: `docs/operations/simulation-fuzzing.md`
 - Configuration: `docs/reference/configuration.md`
 - Tutorials: `docs/tutorials/build-a-social-graph.md`
 - API protocol: `proto/pelago.proto`
@@ -217,6 +219,22 @@ Open `http://127.0.0.1:4080/ui/`
 - Benchmark harness: `scripts/perf-benchmark.py`
 - DR rehearsal: `scripts/dr-rehearsal.sh`
 - Production env baseline: `scripts/production-env.example`
+
+## Perf Gate Profiles (February 28, 2026)
+The perf gate is split by transport to separate service-path latency from CLI process overhead:
+
+- `grpc` transport (persistent channel, service latency gate): p99 targets
+  - `node_get`: 6 ms
+  - `query_find`: 12 ms
+  - `query_traverse`: 100 ms
+- `cli` transport (end-to-end regression gate): p99 targets
+  - `node_get`: 40 ms
+  - `query_find`: 35 ms
+  - `query_traverse`: 100 ms
+
+Provisioned S1-S6 CI runs both gates and emits:
+- `.tmp/perf/<SCENARIO>-grpc.json`
+- `.tmp/perf/<SCENARIO>-cli.json`
 
 ## Stop Local Test FDB (if started via Docker)
 ```bash

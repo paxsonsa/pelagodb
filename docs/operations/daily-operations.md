@@ -40,6 +40,7 @@ python datasets/load_dataset.py vfx_pipeline_50k/show_001 \
 
 ```bash
 scripts/perf-benchmark.py \
+  --transport grpc \
   --server http://127.0.0.1:27615 \
   --database default \
   --namespace benchmark.vfx \
@@ -50,6 +51,20 @@ scripts/perf-benchmark.py \
   --output-json .tmp/bench/latest.json
 ```
 
+CLI regression profile (includes per-request CLI startup cost):
+```bash
+scripts/perf-benchmark.py \
+  --transport cli \
+  --server http://127.0.0.1:27615 \
+  --database default \
+  --namespace benchmark.vfx \
+  --entity-type Task \
+  --seed-node-id 1_0 \
+  --runs 50 \
+  --warmup 10 \
+  --output-json .tmp/bench/latest-cli.json
+```
+
 Skip traversal benchmarks if edge data is not loaded:
 ```bash
 scripts/perf-benchmark.py --namespace benchmark.vfx --skip-traverse
@@ -58,13 +73,14 @@ scripts/perf-benchmark.py --namespace benchmark.vfx --skip-traverse
 ### 4) Enforce Phase Targets (Optional)
 
 ```bash
-scripts/perf-benchmark.py --namespace benchmark.vfx --enforce-targets
+scripts/perf-benchmark.py --transport grpc --namespace benchmark.vfx --enforce-targets
+scripts/perf-benchmark.py --transport cli --namespace benchmark.vfx --enforce-targets \
+  --target-get-ms 40 --target-find-ms 35 --target-traverse-ms 100
 ```
 
 Default p99 targets:
-- `node_get`: 1 ms
-- `query_find`: 10 ms
-- `query_traverse`: 100 ms
+- gRPC transport (service latency): `node_get` 6 ms, `query_find` 12 ms, `query_traverse` 100 ms
+- CLI transport (end-to-end regression): `node_get` 40 ms, `query_find` 35 ms, `query_traverse` 100 ms
 
 ## Disaster Recovery Rehearsal
 
@@ -96,6 +112,12 @@ Include ignored integration tests (requires healthy local FDB):
 PELAGO_RUN_IGNORED_TESTS=1 scripts/ci-gate.sh
 ```
 
+Deterministic simulation smoke:
+
+```bash
+scripts/simulation-smoke.sh
+```
+
 ## Presentation Week Rhythm
 
 | Day | Activity |
@@ -111,3 +133,4 @@ PELAGO_RUN_IGNORED_TESTS=1 scripts/ci-gate.sh
 - [Production Checklist](production-checklist.md) — pre-production readiness
 - [Monitoring](monitoring.md) — metrics and health checks
 - [Backup and Recovery](backup-and-recovery.md) — DR procedures
+- [Simulation and Fuzzing](simulation-fuzzing.md) — seed, replay, fuzz triage

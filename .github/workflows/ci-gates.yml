@@ -1,6 +1,14 @@
 name: CI Gates
 
 on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+  schedule:
+    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       run_provisioned:
@@ -34,6 +42,7 @@ on:
 
 jobs:
   quick-ci:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -45,8 +54,37 @@ jobs:
       - name: Run quick CI gate
         run: scripts/ci-gate.sh
 
+  pr-fuzz-smoke:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run short fuzz smoke
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run pql_parser -- -max_total_time=60 -dict=dictionaries/pql.dict
+          cargo +nightly fuzz run cdc_decode -- -max_total_time=60
+          cargo +nightly fuzz run mutation_payload -- -max_total_time=60
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
   provisioned-s1-s6:
-    if: ${{ inputs.run_provisioned }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_provisioned }}
     runs-on: self-hosted
     strategy:
       fail-fast: false
@@ -62,12 +100,18 @@ jobs:
       PELAGO_PERF_WARMUP: ${{ inputs.perf_warmup }}
       PELAGO_PERF_OBSERVABILITY_JSON: ${{ inputs.observability_json }}
       PELAGO_PERF_OUTPUT_JSON: ".tmp/perf/${{ matrix.scenario }}.json"
+      PELAGO_RUN_SIMULATION_TESTS: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python deps for perf harness
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install grpcio protobuf
 
       - name: Validate observability input
         run: |
@@ -79,3 +123,49 @@ jobs:
       - name: Run provisioned CI/perf gates
         run: scripts/ci-gate.sh
 
+      - name: Upload perf artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provisioned-${{ matrix.scenario }}-perf
+          path: |
+            .tmp/perf/${{ matrix.scenario }}-grpc.json
+            .tmp/perf/${{ matrix.scenario }}-cli.json
+          if-no-files-found: ignore
+
+      - name: Upload simulation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provisioned-${{ matrix.scenario }}-simulation
+          path: .tmp/simulation
+          if-no-files-found: ignore
+
+  nightly-fuzz-deep:
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run deep fuzz jobs
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run pql_parser -- -max_total_time=3600 -dict=dictionaries/pql.dict
+          cargo +nightly fuzz run cdc_decode -- -max_total_time=3600
+          cargo +nightly fuzz run mutation_payload -- -max_total_time=3600
+
+      - name: Upload nightly fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

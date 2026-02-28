@@ -101,21 +101,31 @@ Use the benchmark harness for ongoing performance tracking:
 
 ```bash
 scripts/perf-benchmark.py \
+  --transport grpc \
   --namespace benchmark.vfx \
   --entity-type Task \
   --seed-node-id 1_0 \
   --output-json .tmp/bench/latest.json
+
+scripts/perf-benchmark.py \
+  --transport cli \
+  --namespace benchmark.vfx \
+  --entity-type Task \
+  --seed-node-id 1_0 \
+  --target-get-ms 40 \
+  --target-find-ms 35 \
+  --target-traverse-ms 100 \
+  --output-json .tmp/bench/latest-cli.json
 ```
 
 Track trends in `.tmp/bench/*.json` artifacts.
 
 ### Latency Targets
 
-| Operation | p99 Target |
-|---|---|
-| Node point read | 1 ms |
-| Indexed query | 10 ms |
-| Traversal (bounded) | 100 ms |
+| Transport | Node Point Read | Indexed Query | Traversal (bounded) |
+|---|---:|---:|---:|
+| `grpc` (service latency gate) | 6 ms | 12 ms | 100 ms |
+| `cli` (end-to-end regression gate) | 40 ms | 35 ms | 100 ms |
 
 ## Admin Commands Summary
 

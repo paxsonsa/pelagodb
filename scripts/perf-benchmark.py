@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Lightweight CLI-driven latency benchmark harness for PelagoDB.
+"""Lightweight latency benchmark harness for PelagoDB.
 
 This script is meant for repeatable, presentation-grade performance checks.
-It executes representative read/query flows via the `pelago` CLI and reports
-p50/p95/p99 latencies.
+It executes representative read/query flows and reports p50/p95/p99 latencies.
 """
 
 from __future__ import annotations
@@ -15,10 +14,13 @@ import os
 import shutil
 import statistics
 import subprocess
+import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -124,9 +126,16 @@ def percentile(values: List[float], p: float) -> float:
     return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
 
 
-def run_timed(cmd: List[str]) -> float:
+def run_timed_command(cmd: List[str]) -> float:
     start_ns = time.perf_counter_ns()
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    elapsed_ns = time.perf_counter_ns() - start_ns
+    return elapsed_ns / 1_000_000.0
+
+
+def run_timed_callable(fn: Callable[[], None]) -> float:
+    start_ns = time.perf_counter_ns()
+    fn()
     elapsed_ns = time.perf_counter_ns() - start_ns
     return elapsed_ns / 1_000_000.0
 
@@ -138,13 +147,25 @@ def run_capture(cmd: List[str]) -> str:
     return completed.stdout
 
 
-def run_case(name: str, cmd: List[str], warmup: int, runs: int) -> BenchResult:
+def run_case_command(name: str, cmd: List[str], warmup: int, runs: int) -> BenchResult:
     for _ in range(warmup):
-        run_timed(cmd)
+        run_timed_command(cmd)
 
     samples: List[float] = []
     for _ in range(runs):
-        samples.append(run_timed(cmd))
+        samples.append(run_timed_command(cmd))
+    return BenchResult(name=name, samples_ms=samples)
+
+
+def run_case_callable(
+    name: str, fn: Callable[[], None], warmup: int, runs: int
+) -> BenchResult:
+    for _ in range(warmup):
+        run_timed_callable(fn)
+
+    samples: List[float] = []
+    for _ in range(runs):
+        samples.append(run_timed_callable(fn))
     return BenchResult(name=name, samples_ms=samples)
 
 
@@ -305,10 +326,16 @@ def print_scenario_gate_summary(summary: Dict[str, float], passed: bool) -> None
     )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run PelagoDB CLI latency benchmark checks")
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run PelagoDB latency benchmark checks")
     parser.add_argument("--pelago-bin", default="target/release/pelago")
     parser.add_argument("--build-cli", action="store_true", help="Build pelago CLI if binary is missing")
+    parser.add_argument(
+        "--transport",
+        choices=["cli", "grpc"],
+        default="cli",
+        help="Benchmark transport: CLI subprocesses or persistent gRPC channel",
+    )
 
     parser.add_argument("--server", default=os.getenv("PELAGO_SERVER", "http://127.0.0.1:27615"))
     parser.add_argument("--database", default=os.getenv("PELAGO_DATABASE", "default"))
@@ -419,7 +446,7 @@ def parse_args() -> argparse.Namespace:
         help="Exit non-zero if selected S1-S6 scenario gate thresholds are missed",
     )
     parser.add_argument("--output-json", default="", help="Optional file path to write JSON summary")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def context_filter_show_shot(args: argparse.Namespace) -> str:
@@ -497,11 +524,159 @@ def compute_deep_cursor_hex(
     return cursor_hex
 
 
-def main() -> int:
-    args = parse_args()
-    maybe_build_cli(args.pelago_bin, args.build_cli)
+def grpc_endpoint_from_server(server: str) -> str:
+    if "://" not in server:
+        return server
 
-    base = base_cmd(args)
+    parsed = urlparse(server)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported server scheme '{parsed.scheme}'")
+    if parsed.scheme == "https":
+        raise ValueError("grpc transport currently supports only insecure http endpoints")
+    if not parsed.hostname:
+        raise ValueError(f"invalid server address '{server}'")
+    return f"{parsed.hostname}:{parsed.port or 80}"
+
+
+def load_grpc_dependencies() -> tuple[Any, Any, Any]:
+    repo_root = Path(__file__).resolve().parents[1]
+    clients_python = repo_root / "clients" / "python"
+    sys_path = str(clients_python)
+    if sys_path not in sys.path:
+        sys.path.insert(0, sys_path)
+
+    try:
+        import grpc  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(
+            "grpc transport requires python package 'grpcio'. "
+            "Install project dependencies first (see clients/python/pyproject.toml)."
+        ) from exc
+
+    try:
+        from pelagodb.generated import pelago_pb2  # type: ignore[import-not-found]
+        from pelagodb.generated import pelago_pb2_grpc  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(
+            "failed to import pelagodb generated Python stubs from clients/python."
+        ) from exc
+
+    return grpc, pelago_pb2, pelago_pb2_grpc
+
+
+class GrpcBenchmarkClient:
+    def __init__(self, args: argparse.Namespace):
+        grpc, pelago_pb2, pelago_pb2_grpc = load_grpc_dependencies()
+        endpoint = grpc_endpoint_from_server(args.server)
+        self._args = args
+        self._pb2 = pelago_pb2
+        self._channel = grpc.insecure_channel(endpoint)
+        self._node_client = pelago_pb2_grpc.NodeServiceStub(self._channel)
+        self._query_client = pelago_pb2_grpc.QueryServiceStub(self._channel)
+
+    def close(self) -> None:
+        self._channel.close()
+
+    def _context(self) -> Any:
+        return self._pb2.RequestContext(
+            database=self._args.database,
+            namespace=self._args.namespace,
+            site_id="",
+            request_id=str(uuid.uuid4()),
+        )
+
+    def node_get(self, entity_type: str, node_id: str) -> None:
+        req = self._pb2.GetNodeRequest(
+            context=self._context(),
+            entity_type=entity_type,
+            node_id=node_id,
+            consistency=self._pb2.READ_CONSISTENCY_STRONG,
+            fields=[],
+        )
+        self._node_client.GetNode(req)
+
+    def find_nodes(
+        self,
+        entity_type: str,
+        cel_filter: str,
+        limit: int,
+        cursor: bytes = b"",
+    ) -> bytes:
+        req = self._pb2.FindNodesRequest(
+            context=self._context(),
+            entity_type=entity_type,
+            cel_expression=cel_filter,
+            consistency=self._pb2.READ_CONSISTENCY_STRONG,
+            fields=[],
+            limit=limit,
+            cursor=cursor,
+            snapshot_mode=self._pb2.SNAPSHOT_MODE_STRICT,
+            allow_degrade_to_best_effort=False,
+        )
+        next_cursor = b""
+        stream = self._query_client.FindNodes(req)
+        for item in stream:
+            if item.next_cursor:
+                next_cursor = item.next_cursor
+        return next_cursor
+
+    def traverse(self, entity_type: str, node_id: str, edge_label: str, limit: int) -> None:
+        step = self._pb2.TraversalStep(
+            edge_type=edge_label,
+            direction=self._pb2.EDGE_DIRECTION_OUTGOING,
+            edge_filter="",
+            node_filter="",
+            fields=[],
+            per_node_limit=0,
+            edge_fields=[],
+        )
+        req = self._pb2.TraverseRequest(
+            context=self._context(),
+            start=self._pb2.NodeRef(
+                entity_type=entity_type,
+                node_id=node_id,
+                database="",
+                namespace="",
+            ),
+            steps=[step],
+            max_depth=2,
+            timeout_ms=5000,
+            max_results=limit,
+            consistency=self._pb2.READ_CONSISTENCY_STRONG,
+            cascade=False,
+            cursor=b"",
+            snapshot_mode=self._pb2.SNAPSHOT_MODE_BEST_EFFORT,
+            allow_degrade_to_best_effort=True,
+        )
+        stream = self._query_client.Traverse(req)
+        for _ in stream:
+            pass
+
+
+def compute_deep_cursor_bytes(
+    client: GrpcBenchmarkClient,
+    entity_type: str,
+    cel_filter: str,
+    page_size: int,
+    pages: int,
+) -> bytes:
+    cursor = b""
+    seen: set[str] = set()
+    for _ in range(max(pages, 0)):
+        next_cursor = client.find_nodes(entity_type, cel_filter, page_size, cursor)
+        if not next_cursor:
+            return b""
+        next_hex = next_cursor.hex()
+        if next_hex in seen:
+            return b""
+        seen.add(next_hex)
+        cursor = next_cursor
+    return cursor
+
+
+def build_cli_cases(
+    args: argparse.Namespace, base: List[str]
+) -> tuple[List[tuple[str, List[str]]], Dict[str, float]]:
     cases: List[tuple[str, List[str]]] = []
     targets: Dict[str, float] = {}
 
@@ -664,14 +839,205 @@ def main() -> int:
                     "(insufficient result depth or unstable keyset cursor progression)"
                 )
                 if args.require_deep_page:
-                    print(f"context_deep_page gate failed: {msg}")
-                    return 2
+                    raise RuntimeError(f"context_deep_page gate failed: {msg}")
                 print(f"Skipping context_deep_page: {msg}.")
 
-    results: List[BenchResult] = []
-    for name, cmd in cases:
-        print(f"Running {name} ({args.runs} samples, warmup {args.warmup})...")
-        results.append(run_case(name, cmd, args.warmup, args.runs))
+    return cases, targets
+
+
+def build_grpc_cases(
+    args: argparse.Namespace, client: GrpcBenchmarkClient
+) -> tuple[List[tuple[str, Callable[[], None]]], Dict[str, float]]:
+    cases: List[tuple[str, Callable[[], None]]] = []
+    targets: Dict[str, float] = {}
+
+    if args.profile == "default":
+        cases = [
+            (
+                "node_get",
+                lambda entity_type=args.entity_type, node_id=args.seed_node_id: client.node_get(
+                    entity_type, node_id
+                ),
+            ),
+            (
+                "query_find",
+                lambda entity_type=args.entity_type, cel_filter=args.filter, limit=args.limit: client.find_nodes(
+                    entity_type, cel_filter, limit
+                ),
+            ),
+        ]
+        targets = {
+            "node_get": args.target_get_ms,
+            "query_find": args.target_find_ms,
+        }
+
+        if not args.skip_traverse:
+            cases.append(
+                (
+                    "query_traverse",
+                    lambda entity_type=args.entity_type, node_id=args.seed_node_id, edge_label=args.edge_label, limit=args.limit: client.traverse(
+                        entity_type, node_id, edge_label, limit
+                    ),
+                )
+            )
+            targets["query_traverse"] = args.target_traverse_ms
+    else:
+        show_shot_filter = context_filter_show_shot(args)
+        template_filter = context_filter_template(args)
+        or_filter = context_filter_or_shots(args)
+        show_scheme_filter = context_filter_show_scheme(args)
+        page_size = max(args.context_page_size, 1)
+
+        cases = [
+            (
+                "context_point_lookup",
+                lambda entity_type=args.entity_type, node_id=args.seed_node_id: client.node_get(
+                    entity_type, node_id
+                ),
+            ),
+            (
+                "context_show_shot",
+                lambda entity_type=args.entity_type, cel_filter=show_shot_filter, limit=page_size: client.find_nodes(
+                    entity_type, cel_filter, limit
+                ),
+            ),
+            (
+                "context_show_shot_task_label",
+                lambda entity_type=args.entity_type, cel_filter=template_filter, limit=page_size: client.find_nodes(
+                    entity_type, cel_filter, limit
+                ),
+            ),
+            (
+                "context_or_shots",
+                lambda entity_type=args.entity_type, cel_filter=or_filter, limit=page_size: client.find_nodes(
+                    entity_type, cel_filter, limit
+                ),
+            ),
+        ]
+        targets = {
+            "context_point_lookup": args.target_get_ms,
+            "context_show_shot": args.target_context_show_shot_ms,
+            "context_show_shot_task_label": args.target_context_template_ms,
+            "context_or_shots": args.target_context_or_ms,
+        }
+
+        if args.context_deep_pages > 0:
+            deep_cursor = compute_deep_cursor_bytes(
+                client,
+                args.entity_type,
+                show_scheme_filter,
+                page_size,
+                args.context_deep_pages,
+            )
+            if deep_cursor:
+                cases.append(
+                    (
+                        "context_deep_page",
+                        lambda entity_type=args.entity_type, cel_filter=show_scheme_filter, limit=page_size, cursor=deep_cursor: client.find_nodes(
+                            entity_type,
+                            cel_filter,
+                            limit,
+                            cursor,
+                        ),
+                    )
+                )
+                targets["context_deep_page"] = args.target_context_deep_page_ms
+            else:
+                msg = (
+                    "unable to walk requested deep pages "
+                    "(insufficient result depth or unstable keyset cursor progression)"
+                )
+                if args.require_deep_page:
+                    raise RuntimeError(f"context_deep_page gate failed: {msg}")
+                print(f"Skipping context_deep_page: {msg}.")
+
+    return cases, targets
+
+
+def build_output_payload(
+    args: argparse.Namespace,
+    results: List[BenchResult],
+    targets: Dict[str, float],
+    observability: Dict[str, float],
+    scenario_gate_passed: Optional[bool],
+    scenario_gate_summary: Optional[Dict[str, float]],
+    scenario_gate_failures: List[str],
+    exit_code: int,
+) -> Dict[str, Any]:
+    return {
+        "server": args.server,
+        "database": args.database,
+        "namespace": args.namespace,
+        "profile": args.profile,
+        "transport": args.transport,
+        "runs": args.runs,
+        "warmup": args.warmup,
+        "results": [
+            {
+                "name": r.name,
+                "count": r.count,
+                "mean_ms": r.mean_ms,
+                "p50_ms": r.p50_ms,
+                "p95_ms": r.p95_ms,
+                "p99_ms": r.p99_ms,
+            }
+            for r in results
+        ],
+        "targets_ms": targets,
+        "enforced": args.enforce_targets,
+        "scenario": args.scenario,
+        "enforce_scenario_gates": args.enforce_scenario_gates,
+        "observability": observability,
+        "scenario_gate": (
+            {
+                "passed": scenario_gate_passed,
+                "summary": scenario_gate_summary,
+                "failures": scenario_gate_failures,
+            }
+            if args.scenario
+            else None
+        ),
+        "exit_code": exit_code,
+    }
+
+
+def run_benchmarks(args: argparse.Namespace) -> tuple[List[BenchResult], Dict[str, float]]:
+    if args.transport == "cli":
+        maybe_build_cli(args.pelago_bin, args.build_cli)
+        base = base_cmd(args)
+        cli_cases, targets = build_cli_cases(args, base)
+        results: List[BenchResult] = []
+        for name, cmd in cli_cases:
+            print(f"Running {name} ({args.runs} samples, warmup {args.warmup})...")
+            results.append(run_case_command(name, cmd, args.warmup, args.runs))
+        return results, targets
+
+    grpc_client = GrpcBenchmarkClient(args)
+    try:
+        grpc_cases, targets = build_grpc_cases(args, grpc_client)
+        results: List[BenchResult] = []
+        for name, case_fn in grpc_cases:
+            print(f"Running {name} ({args.runs} samples, warmup {args.warmup})...")
+            results.append(run_case_callable(name, case_fn, args.warmup, args.runs))
+        return results, targets
+    finally:
+        grpc_client.close()
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
+    if args.enforce_scenario_gates and not args.scenario:
+        print("scenario gate enforcement requested but no --scenario was provided")
+        return 2
+
+    try:
+        results, targets = run_benchmarks(args)
+    except RuntimeError as exc:
+        print(str(exc))
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"benchmark execution failed: {exc}")
+        return 2
 
     exit_code = print_summary(results, targets, args.enforce_targets)
     observability: Dict[str, float] = {}
@@ -695,45 +1061,18 @@ def main() -> int:
 
         if args.enforce_scenario_gates and not scenario_gate_passed:
             exit_code = 2
-    elif args.enforce_scenario_gates:
-        print("scenario gate enforcement requested but no --scenario was provided")
-        return 2
 
     if args.output_json:
-        payload = {
-            "server": args.server,
-            "database": args.database,
-            "namespace": args.namespace,
-            "profile": args.profile,
-            "runs": args.runs,
-            "warmup": args.warmup,
-            "results": [
-                {
-                    "name": r.name,
-                    "count": r.count,
-                    "mean_ms": r.mean_ms,
-                    "p50_ms": r.p50_ms,
-                    "p95_ms": r.p95_ms,
-                    "p99_ms": r.p99_ms,
-                }
-                for r in results
-            ],
-            "targets_ms": targets,
-            "enforced": args.enforce_targets,
-            "scenario": args.scenario,
-            "enforce_scenario_gates": args.enforce_scenario_gates,
-            "observability": observability,
-            "scenario_gate": (
-                {
-                    "passed": scenario_gate_passed,
-                    "summary": scenario_gate_summary,
-                    "failures": scenario_gate_failures,
-                }
-                if args.scenario
-                else None
-            ),
-            "exit_code": exit_code,
-        }
+        payload = build_output_payload(
+            args=args,
+            results=results,
+            targets=targets,
+            observability=observability,
+            scenario_gate_passed=scenario_gate_passed,
+            scenario_gate_summary=scenario_gate_summary,
+            scenario_gate_failures=scenario_gate_failures,
+            exit_code=exit_code,
+        )
         out = Path(args.output_json)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
