@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 const mockContext = {
   session: {
@@ -47,6 +48,10 @@ function makeResponse(data: unknown, contentType = "application/json") {
   });
 }
 
+function Wrapper({ children }: { children: React.ReactNode }) {
+  return <MemoryRouter>{children}</MemoryRouter>;
+}
+
 describe("route smoke", () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -86,27 +91,27 @@ describe("route smoke", () => {
   });
 
   it("renders explorer route", () => {
-    render(<ExplorerView />);
+    render(<ExplorerView />, { wrapper: Wrapper });
     expect(screen.getByText("Node Exploration Flow")).toBeInTheDocument();
   });
 
   it("renders query route", () => {
-    render(<QueryView />);
+    render(<QueryView />, { wrapper: Wrapper });
     expect(screen.getByText("Query Studio")).toBeInTheDocument();
   });
 
   it("renders ops route", () => {
-    render(<OpsView />);
+    render(<OpsView />, { wrapper: Wrapper });
     expect(screen.getByText("Cluster Operations")).toBeInTheDocument();
   });
 
   it("renders admin route", () => {
-    render(<AdminView />);
+    render(<AdminView />, { wrapper: Wrapper });
     expect(screen.getByText("Safe Admin Mutations")).toBeInTheDocument();
   });
 
   it("renders watch route", () => {
-    render(<WatchView />);
+    render(<WatchView />, { wrapper: Wrapper });
     expect(screen.getByText("Stream Setup")).toBeInTheDocument();
   });
 });
