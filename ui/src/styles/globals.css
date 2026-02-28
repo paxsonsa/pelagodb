@@ -20,6 +20,8 @@
   --color-warning-foreground: var(--warning-foreground);
   --color-ok: var(--ok);
   --color-ok-foreground: var(--ok-foreground);
+  --color-surface-subtle: var(--surface-subtle);
+  --color-code-surface: var(--code-surface);
 
   --radius-sm: calc(var(--radius) - 0.2rem);
   --radius-md: calc(var(--radius) - 0.1rem);
@@ -50,6 +52,14 @@
     @apply rounded-lg border border-border bg-panel p-4 shadow-[0_1px_2px_rgba(17,24,39,0.04)];
   }
 
+  .surface-subtle {
+    @apply bg-surface-subtle;
+  }
+
+  .code-surface {
+    @apply bg-code-surface;
+  }
+
   .metric-card {
     @apply rounded-md border border-border bg-panel p-3;
   }
@@ -64,7 +74,8 @@
   }
 
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background: rgba(148, 163, 184, 0.75);
+    background: var(--muted);
+    opacity: 0.5;
     border-radius: 999px;
   }
 }

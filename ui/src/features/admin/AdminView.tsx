@@ -238,9 +238,9 @@ export default function AdminView() {
                         This action is irreversible from the UI path. Ensure runbook approval and correct namespace selection.
                       </p>
                     </div>
-                    <div className="rounded-md border border-border bg-slate-50 p-3 text-xs">
+                    <div className="rounded-md border border-border bg-surface-subtle p-3 text-xs">
                       <p className="mb-2 font-semibold uppercase tracking-wide text-muted">Payload Preview</p>
-                      <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-slate-700">
+                      <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-foreground/80">
                         {JSON.stringify(
                           {
                             ...Object.fromEntries(

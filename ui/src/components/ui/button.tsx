@@ -11,10 +11,10 @@ const buttonVariants = cva(
       variant: {
         default:
           "border border-accent bg-accent text-accent-foreground hover:brightness-95",
-        secondary: "border border-border bg-panel text-foreground hover:bg-slate-50",
-        ghost: "text-foreground hover:bg-slate-100",
+        secondary: "border border-border bg-panel text-foreground hover:bg-foreground/5",
+        ghost: "text-foreground hover:bg-foreground/5",
         danger: "bg-danger text-danger-foreground hover:bg-danger/90",
-        outline: "border border-border bg-transparent hover:bg-slate-100",
+        outline: "border border-border bg-transparent hover:bg-foreground/5",
       },
       size: {
         default: "h-9 px-4 py-2",

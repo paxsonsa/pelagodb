@@ -15,10 +15,10 @@ export function InlineNotice({
 }) {
   const palette =
     kind === "error"
-      ? "border-red-200 bg-red-50 text-red-800"
+      ? "border-danger/30 bg-danger/10 text-danger"
       : kind === "ok"
-        ? "border-green-200 bg-green-50 text-green-800"
-        : "border-blue-200 bg-blue-50 text-blue-800";
+        ? "border-ok/30 bg-ok/10 text-ok"
+        : "border-accent/30 bg-accent/10 text-accent";
 
   const Icon = kind === "error" ? AlertCircle : kind === "ok" ? CheckCircle2 : Info;
 

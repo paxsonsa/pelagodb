@@ -44,14 +44,14 @@ export function JsonInspector({
         </div>
         <TabsContent value="pretty">
           <div className="w-full overflow-auto scrollbar-thin" style={{ maxHeight }}>
-            <pre className={cn("overflow-x-auto p-3 font-mono leading-5 text-slate-700", fontSizeClass)}>
+            <pre className={cn("overflow-x-auto p-3 font-mono leading-5 text-foreground/80", fontSizeClass)}>
               {pretty}
             </pre>
           </div>
         </TabsContent>
         <TabsContent value="compact">
           <div className="w-full overflow-auto scrollbar-thin" style={{ maxHeight }}>
-            <pre className={cn("overflow-x-auto p-3 font-mono leading-5 text-slate-700", fontSizeClass)}>
+            <pre className={cn("overflow-x-auto p-3 font-mono leading-5 text-foreground/80", fontSizeClass)}>
               {compact}
             </pre>
           </div>

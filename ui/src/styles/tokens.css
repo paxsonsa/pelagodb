@@ -22,4 +22,34 @@
   --chart-5: #0891b2;
 
   --radius: 0.55rem;
+
+  --surface-subtle: #eef1f6;
+  --code-surface: #f1f5f9;
+}
+
+:root.dark {
+  --background: #0c0f14;
+  --foreground: #e2e8f0;
+  --panel: #161b22;
+  --panel-foreground: #e2e8f0;
+  --muted: #8b95a5;
+  --border: #2d333b;
+  --accent: #58a6ff;
+  --accent-foreground: #0c0f14;
+  --danger: #f87171;
+  --danger-foreground: #1c1012;
+  --warning: #f59e0b;
+  --warning-foreground: #1c1508;
+  --ok: #34d399;
+  --ok-foreground: #0c1a14;
+  --ring: rgba(88, 166, 255, 0.35);
+
+  --chart-1: #58a6ff;
+  --chart-2: #34d399;
+  --chart-3: #fbbf24;
+  --chart-4: #a78bfa;
+  --chart-5: #22d3ee;
+
+  --surface-subtle: #1c2128;
+  --code-surface: #1c2128;
 }

@@ -389,7 +389,7 @@ export default function WatchView() {
             </div>
 
             {filteredEvents.length > 0 ? (
-              <ScrollArea className="h-[520px] rounded-md border border-border bg-slate-50 p-3">
+              <ScrollArea className="h-[520px] rounded-md border border-border bg-surface-subtle p-3">
                 <div className="space-y-2">
                   {filteredEvents.map((eventItem, index) => (
                     <article
@@ -406,7 +406,7 @@ export default function WatchView() {
                         </div>
                         <time className="font-mono text-xs text-muted">{eventItem.timestamp}</time>
                       </header>
-                      <pre className="overflow-x-auto font-mono text-xs whitespace-pre-wrap text-slate-700">
+                      <pre className="overflow-x-auto font-mono text-xs whitespace-pre-wrap text-foreground/80">
                         {JSON.stringify(eventItem.payload as StreamEventPayload, null, 2)}
                       </pre>
                     </article>
@@ -432,15 +432,15 @@ export default function WatchView() {
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-3">
-          <div className="rounded-md border border-border bg-slate-50 p-3 text-sm text-muted">
+          <div className="rounded-md border border-border bg-surface-subtle p-3 text-sm text-muted">
             <p className="mb-1 font-semibold text-foreground">Query Mode</p>
             Use CEL expression and entity type. Best for SLA watches and threshold alerts.
           </div>
-          <div className="rounded-md border border-border bg-slate-50 p-3 text-sm text-muted">
+          <div className="rounded-md border border-border bg-surface-subtle p-3 text-sm text-muted">
             <p className="mb-1 font-semibold text-foreground">Point Mode</p>
             Tracks one known node id. Best for lifecycle and ownership transfer tracking.
           </div>
-          <div className="rounded-md border border-border bg-slate-50 p-3 text-sm text-muted">
+          <div className="rounded-md border border-border bg-surface-subtle p-3 text-sm text-muted">
             <p className="mb-1 font-semibold text-foreground">Namespace Mode</p>
             High-volume audit-like stream. Use filters in feed to stay focused.
           </div>
