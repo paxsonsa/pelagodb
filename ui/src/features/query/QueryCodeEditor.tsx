@@ -3,82 +3,55 @@ import CodeMirror from "@uiw/react-codemirror";
 import { javascript } from "@codemirror/lang-javascript";
 import { sql } from "@codemirror/lang-sql";
 import { autocompletion, type CompletionContext } from "@codemirror/autocomplete";
-import { EditorView } from "@codemirror/view";
+import { EditorView, keymap } from "@codemirror/view";
+import { oneDark } from "@codemirror/theme-one-dark";
+
+import { useTheme } from "@/lib/use-theme";
 
 type EditorMode = "cel" | "pql";
 
 const CEL_KEYWORDS = [
-  "true",
-  "false",
-  "null",
-  "in",
-  "contains",
-  "startsWith",
-  "endsWith",
-  "matches",
-  "size",
-  "has",
-  "all",
-  "exists",
-  "exists_one",
-  "filter",
-  "map",
+  "true", "false", "null", "in", "contains", "startsWith", "endsWith",
+  "matches", "size", "has", "all", "exists", "exists_one", "filter", "map",
 ];
 
 const PQL_KEYWORDS = [
-  "filter",
-  "sort",
-  "limit",
-  "offset",
-  "uid",
-  "name",
-  "age",
-  "status",
-  "priority",
-  "stage",
-  "where",
-  "and",
-  "or",
-  "not",
+  "filter", "sort", "limit", "offset", "uid", "name", "age", "status",
+  "priority", "stage", "where", "and", "or", "not",
 ];
 
 function completionFor(mode: EditorMode, context: CompletionContext) {
   const word = context.matchBefore(/[@A-Za-z_][\w-]*/);
-  if (!word) {
-    return null;
-  }
-
-  if (word.from === word.to && !context.explicit) {
-    return null;
-  }
+  if (!word) return null;
+  if (word.from === word.to && !context.explicit) return null;
 
   const options = (mode === "cel" ? CEL_KEYWORDS : PQL_KEYWORDS).map((label) => ({
     label,
     type: "keyword",
   }));
-
-  return {
-    from: word.from,
-    options,
-  };
+  return { from: word.from, options };
 }
 
 export function QueryCodeEditor({
   mode,
   value,
   onChange,
+  onExecute,
   minHeight,
   placeholder,
 }: {
   mode: EditorMode;
   value: string;
   onChange: (value: string) => void;
+  onExecute?: () => void;
   minHeight: number;
   placeholder?: string;
 }) {
+  const { effective } = useTheme();
+
   const extensions = useMemo(() => {
     const language = mode === "pql" ? sql() : javascript({ typescript: false });
-    return [
+    const ext = [
       language,
       autocompletion({ override: [(context) => completionFor(mode, context)] }),
       EditorView.lineWrapping,
@@ -104,7 +77,25 @@ export function QueryCodeEditor({
         },
       }),
     ];
-  }, [minHeight, mode]);
+
+    // Cmd+Enter to execute
+    if (onExecute) {
+      ext.push(keymap.of([{
+        key: "Mod-Enter",
+        run: () => {
+          onExecute();
+          return true;
+        },
+      }]));
+    }
+
+    // Dark theme
+    if (effective === "dark") {
+      ext.push(oneDark);
+    }
+
+    return ext;
+  }, [minHeight, mode, onExecute, effective]);
 
   return (
     <CodeMirror
@@ -112,7 +103,8 @@ export function QueryCodeEditor({
       basicSetup={{
         autocompletion: true,
         bracketMatching: true,
-        foldGutter: false,
+        foldGutter: mode === "pql",
+        lineNumbers: true,
       }}
       extensions={extensions}
       onChange={onChange}
