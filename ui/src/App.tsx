@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Outlet, useLocation, useOutletContext } from "react-router-dom";
+import { Outlet, useLocation, useNavigate, useOutletContext } from "react-router-dom";
 import { toast, Toaster } from "sonner";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthSheet } from "@/components/layout/AuthSheet";
+import { Breadcrumbs } from "@/components/layout/Breadcrumbs";
+import { CommandPalette } from "@/components/layout/CommandPalette";
 import { ScopeSwitcher } from "@/components/layout/ScopeSwitcher";
+import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { StatusBadge } from "@/components/shared/StatusBadge";
+import { useHotkey } from "@/hooks/use-hotkeys";
+import { useSidebar } from "@/lib/use-sidebar";
+import { useTheme } from "@/lib/use-theme";
 import { apiRequest, normalizeApiError } from "@/lib/api";
 import {
   appendStoredScopeHistory,
@@ -24,6 +30,7 @@ const routeTitles: Record<string, string> = {
   "/ops": "Operations Surface",
   "/admin": "Administrative Actions",
   "/watch": "Watch Streaming",
+  "/schema": "Schema Browser",
 };
 
 function parseScopedRole(role: string): ScopeContext | null {
@@ -69,6 +76,18 @@ export default function App() {
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaError, setSchemaError] = useState<string | null>(null);
   const location = useLocation();
+  const navigate = useNavigate();
+  const { toggle: toggleSidebar } = useSidebar();
+  const { effective: themeEffective } = useTheme();
+
+  // Global keyboard shortcuts: [ to toggle sidebar, 1-5 for nav
+  useHotkey("[", toggleSidebar);
+  useHotkey("1", useCallback(() => navigate("/explorer"), [navigate]));
+  useHotkey("2", useCallback(() => navigate("/query"), [navigate]));
+  useHotkey("3", useCallback(() => navigate("/ops"), [navigate]));
+  useHotkey("4", useCallback(() => navigate("/admin"), [navigate]));
+  useHotkey("5", useCallback(() => navigate("/watch"), [navigate]));
+  useHotkey("6", useCallback(() => navigate("/schema"), [navigate]));
 
   const notify = useCallback((message: string, kind: "ok" | "error" = "ok") => {
     if (kind === "error") {
@@ -195,6 +214,8 @@ export default function App() {
       <AppShell
         routeTitle={routeTitle}
         authStatus={authStatus}
+        headerCenter={<CommandPalette onRefreshSchema={refreshSchemaCatalog} />}
+        headerRight={<ThemeToggle />}
         scopeControls={
           <ScopeSwitcher
             scope={scope}
@@ -230,11 +251,12 @@ export default function App() {
         position="bottom-right"
         closeButton
         richColors
+        theme={themeEffective}
         toastOptions={{
           style: {
-            background: "#ffffff",
-            color: "#1f2937",
-            border: "1px solid #d9deea",
+            background: "var(--panel)",
+            color: "var(--foreground)",
+            border: "1px solid var(--border)",
           },
         }}
       />

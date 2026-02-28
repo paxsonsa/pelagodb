@@ -11,6 +11,7 @@ const QueryPage = lazy(() => import("@/pages/QueryPage"));
 const OpsPage = lazy(() => import("@/pages/OpsPage"));
 const AdminPage = lazy(() => import("@/pages/AdminPage"));
 const WatchPage = lazy(() => import("@/pages/WatchPage"));
+const SchemaPage = lazy(() => import("@/pages/SchemaPage"));
 
 function RouteFallback() {
   return (
@@ -35,6 +36,7 @@ createRoot(document.getElementById("root")!).render(
           <Route path="ops" element={lazyRoute(<OpsPage />)} />
           <Route path="admin" element={lazyRoute(<AdminPage />)} />
           <Route path="watch" element={lazyRoute(<WatchPage />)} />
+          <Route path="schema" element={lazyRoute(<SchemaPage />)} />
         </Route>
       </Routes>
     </BrowserRouter>
