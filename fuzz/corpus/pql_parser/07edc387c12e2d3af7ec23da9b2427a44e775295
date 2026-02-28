@@ -1,0 +1,3 @@
+query fir{
+  seed(func: uid(Pson:2_0)) {
+    na  -[KNO->WS] @fr(

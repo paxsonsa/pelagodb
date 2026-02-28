@@ -1,0 +1,6 @@
+query ds_of_friends {
+  d(func: uid(Person:1_0)) {
+   
+nma e    -[KNOOS]-> -[KNOWY]-> @filter(age >= :1) @limit(first:   }
+  }
+@filter(age >= 

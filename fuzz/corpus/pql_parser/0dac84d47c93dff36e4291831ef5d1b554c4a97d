@@ -1,0 +1,8 @@
+query fris {
+  seed(func: uid(Persoo:2_0)) {
+   name
+    -[KNOWC]-> @filter(age >= 21) @limit(first: 26) {
+      name	      age
+  nfqueRy frie frdsien_3ry frienf_fquerquery frif_fqueryf_fquery friff_fquery frif_fqueryf_fquery frif_fquery friey friff_fquery frif_fqueryf_fquery frif_fquery frief  }
+  }
+}

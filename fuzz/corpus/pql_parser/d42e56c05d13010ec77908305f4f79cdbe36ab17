@@ -1,0 +1,4 @@
+query frids_of_frie{
+  seed(func: uid(Person:2_0)) {
+     -[KNOWSsrecme
+   r

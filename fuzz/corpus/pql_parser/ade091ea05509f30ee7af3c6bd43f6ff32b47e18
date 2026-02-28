@@ -1,0 +1,5 @@
+query friends_fofriends {
+  seed(func: uid(Perso0)) {
+    name
+    -[KNOn  nam
+  

@@ -1,0 +1,10 @@
+queryry {
+    name
+    -[KNOWNOWS]->    -[KNS]->    -[S]-> 
+  {
+    name
+    -[KNOWNOWS]->    -[S]->ends -[S]-> 
+  {
+    name
+    -[KNOWNOWS]->    -[KNS]->    -[S]->ends {
+  seedK

@@ -1,0 +1,10 @@
+query friends_of_friends {
+  seed(func: uid(Person:1_0)) {
+    name
+    -[KOWS]->q@filter(a) {
+      n-[KNOWS]->  n-[KNOWS]->    -[KNOWKNOWS]-> 
+ame
+      age
+    }
+  }
+}

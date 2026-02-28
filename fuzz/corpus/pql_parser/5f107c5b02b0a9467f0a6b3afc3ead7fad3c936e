@@ -1,0 +1,5 @@
+query fqriends_of_f {
+  seed(func: uid(Person:2_0)) {
+   name
+    -[KndseKKKKKKKKKKnds {
+  seed(func: #uiPe

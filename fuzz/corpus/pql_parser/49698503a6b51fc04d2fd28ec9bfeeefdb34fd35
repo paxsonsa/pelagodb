@@ -1,0 +1,6 @@
+queryry {
+    name
+    -[KNOWNOWS]->    -[KNS]->    -[KNOWS]-> 
+       -[KNOWNOWS]->    -[KNS]->       name
+    -[KNOWWSON]->    -[KNS]->    -[KNOWS]-> 
+   select"="{ name age 

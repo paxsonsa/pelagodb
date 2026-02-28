@@ -1,0 +1,5 @@
+query fries_{
+  seed(func: uid(Pr)) {
+ e
+    }
+}

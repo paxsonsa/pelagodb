@@ -1,0 +1,12 @@
+query friends_of_friends {
+  seed(func: uid(Person:4_0)) {  # name
+L   -[KNOWS]-># @filter(age {
+      name
+      age
+    }
+   qeed(func: uid(Person:4_0)) {
+  
+      age
+    }
+  }
+}

@@ -1,0 +1,4 @@
+query {
+ ame
+    -[KNOWS]-> 
+    -[KNOWS]-> @s 

@@ -1,0 +1,5 @@
+query ff_friends {
+  seed(func: uid(Person:5_0)) {
+    nanm 
+ea   }
+}

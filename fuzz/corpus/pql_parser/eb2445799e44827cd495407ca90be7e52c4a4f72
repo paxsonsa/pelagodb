@@ -1,0 +1,5 @@
+queryofriends {
+  seed(func: uid(Perso0)){
+    name
+    -[KNOn  nam
+  

@@ -1,0 +1,4 @@
+euqry {    name
+    -[KNOWS]->    -[KNOWNOWS]->    -[KNOWS]-> -[KNOWS]-> @   0}
+ )}
+}

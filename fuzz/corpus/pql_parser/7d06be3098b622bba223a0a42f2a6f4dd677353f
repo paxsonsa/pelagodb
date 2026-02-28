@@ -1,0 +1,12 @@
+query friendsds {
+  seed(func: uid(Person:1_0)) {
+    name
+    -[KNOWS]-> @filter(auid"="uiqter: 25) {
+     n ame
+  e
+    e name
+  e
+    e
+    }
+  }
+}

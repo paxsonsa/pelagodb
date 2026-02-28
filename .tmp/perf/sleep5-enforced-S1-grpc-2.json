@@ -1,0 +1,66 @@
+{
+  "server": "http://127.0.0.1:27615",
+  "database": "default",
+  "namespace": "ci.perf.sleep5.1772261310.15738",
+  "profile": "default",
+  "transport": "grpc",
+  "runs": 30,
+  "warmup": 5,
+  "results": [
+    {
+      "name": "node_get",
+      "count": 30,
+      "mean_ms": 1.5629444666666668,
+      "p50_ms": 1.3979789999999999,
+      "p95_ms": 2.2823230999999997,
+      "p99_ms": 2.7967732500000007
+    },
+    {
+      "name": "query_find",
+      "count": 30,
+      "mean_ms": 3.0905653666666666,
+      "p50_ms": 2.493792,
+      "p95_ms": 5.679731399999998,
+      "p99_ms": 7.783033570000002
+    },
+    {
+      "name": "query_traverse",
+      "count": 30,
+      "mean_ms": 3.0284792,
+      "p50_ms": 2.891708,
+      "p95_ms": 4.192049999999999,
+      "p99_ms": 5.558890000000002
+    }
+  ],
+  "targets_ms": {
+    "node_get": 4.0,
+    "query_find": 10.0,
+    "query_traverse": 100.0
+  },
+  "enforced": true,
+  "scenario": "S1",
+  "enforce_scenario_gates": true,
+  "observability": {
+    "cache_hit_ratio": 0.95,
+    "projector_lag_events": 500.0,
+    "fallback_rate": 0.02
+  },
+  "scenario_gate": {
+    "passed": true,
+    "summary": {
+      "scenario": "S1",
+      "peak_p95_ms": 5.679731399999998,
+      "peak_p99_ms": 7.783033570000002,
+      "cache_hit_ratio": 0.95,
+      "projector_lag_events": 500.0,
+      "fallback_rate": 0.02,
+      "max_p95_ms": 40.0,
+      "max_p99_ms": 100.0,
+      "min_cache_hit_ratio": 0.9,
+      "max_projector_lag_events": 2000.0,
+      "max_fallback_rate": 0.1
+    },
+    "failures": []
+  },
+  "exit_code": 0
+}

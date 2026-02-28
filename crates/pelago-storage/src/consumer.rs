@@ -15,6 +15,7 @@
 
 use crate::cdc::{read_cdc_entries, CdcEntry, Versionstamp};
 use crate::db::PelagoDb;
+use crate::failpoints;
 use crate::Subspace;
 use pelago_core::PelagoError;
 use std::time::{Duration, Instant};
@@ -95,6 +96,7 @@ impl CdcConsumer {
 
     /// Save current high-water mark to FDB
     async fn save_hwm(&mut self) -> Result<(), PelagoError> {
+        failpoints::inject("consumer.checkpoint.before_write")?;
         let key = Self::checkpoint_key(&self.config);
         self.db.set(&key, self.hwm.to_bytes()).await?;
         self.last_checkpoint = Instant::now();

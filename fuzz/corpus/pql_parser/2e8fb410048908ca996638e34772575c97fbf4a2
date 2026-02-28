@@ -1,0 +1,2 @@
+query frie {
+  seed(func: uid(Person:first: "

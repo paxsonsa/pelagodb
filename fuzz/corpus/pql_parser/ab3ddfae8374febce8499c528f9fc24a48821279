@@ -1,0 +1,4 @@
+query fqrends {
+ d(func: uid(Person:1_0)) {
+    name
+    -[Kndsu:Wc: #uid(P

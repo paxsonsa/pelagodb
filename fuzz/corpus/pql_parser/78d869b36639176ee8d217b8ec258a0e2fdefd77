@@ -1,0 +1,3 @@
+query friends_of_friends {
+  seed(func: uid(Person:1_0)) {
+    nPerson @filter(age ) @:am

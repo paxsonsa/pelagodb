@@ -1,0 +1,3 @@
+query d {
+ seed(func: uid(Person:5_444444444444444 }
+}

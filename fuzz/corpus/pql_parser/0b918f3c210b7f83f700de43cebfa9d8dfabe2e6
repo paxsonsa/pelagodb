@@ -1,0 +1,2 @@
+query fof_friends {
+  seed(func: uid(Person:2_0)) {qu -q

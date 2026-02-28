@@ -1,0 +1,3 @@
+queryYf_friends {
+  seed(func: uid(Peron:2_0)) {
+  es {Pe

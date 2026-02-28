@@ -1,0 +1,8 @@
+query friends_of_friends {seed(func: uid(Person:2_0)) {
+
+    -[KNOS]-> @filter(age >25) {
+  n ae   m
+   W   age
+    }
+  }
+}

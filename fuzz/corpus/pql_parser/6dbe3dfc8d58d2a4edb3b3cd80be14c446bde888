@@ -1,0 +1,2 @@
+query fri{
+  seed(func:uid(Person:0_LLL

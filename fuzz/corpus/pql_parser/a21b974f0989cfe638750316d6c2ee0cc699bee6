@@ -1,0 +1,2 @@
+querykendds {
+  seed(func: uid(Person:2_0))@filter(1u:1)ggg

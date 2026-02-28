@@ -1,0 +1,6 @@
+query frienf {
+  seed(func: uid(Person:1_0)) {
+    name
+    -[KNOW
+    na ]
+}

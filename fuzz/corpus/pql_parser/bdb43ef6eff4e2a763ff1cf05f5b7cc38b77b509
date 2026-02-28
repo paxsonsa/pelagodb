@@ -1,0 +1,5 @@
+query friends_of_friens {
+  seed(func: uid(Person:2_0)) {
+    name
+    -[Knds_of_fri2222222222222222222222ends {
+  seed(Pef

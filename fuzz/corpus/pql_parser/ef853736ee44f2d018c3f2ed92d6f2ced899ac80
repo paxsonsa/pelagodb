@@ -1,0 +1,8 @@
+query friends_ofds {
+  seed(func: uid(Person:0_0)) {
+    name
+L   -[KNOWS]-> @filter(="queryfirst 50) {
+      nm 
+ea     age
+}
+}

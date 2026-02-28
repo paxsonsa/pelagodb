@@ -1,0 +1,8 @@
+queryriends {
+  seed(func: uid(Person:2_0)) {J    name
+    N-[KOWS]-> @filter(age e
+    : uid(Person:2_0)) {J    name
+    N-[KOWS]-> @filter(ag  25) {
+      n) {
+   (  na
+ J   }

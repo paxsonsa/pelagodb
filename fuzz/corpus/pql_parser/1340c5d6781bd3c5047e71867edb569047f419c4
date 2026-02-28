@@ -1,0 +1,7 @@
+query frkendds {
+  s(func: uid(Peron:2_0)) {
+    name
+    -[KNOWS]-> @filter(age first: 25)quey"="qu1ry
+      age   }
+  }
+}

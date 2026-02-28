@@ -10,6 +10,7 @@ Practical checklist for moving from demo to production hardening.
 - [ ] Backups and restore drills validated for FoundationDB (`scripts/dr-rehearsal.sh`)
 - [ ] Replication lag and site health monitoring in place
 - [ ] CI gates running full workspace tests (`scripts/ci-gate.sh`)
+- [ ] Deterministic simulation smoke pass recorded (`scripts/simulation-smoke.sh`)
 
 ## Security Baseline
 
@@ -59,7 +60,6 @@ Track:
 
 ## Known Gaps (Non-Blocking)
 
-- Expanded partition-recovery simulation suite
 - CI required-check policy wiring in remote VCS (script-level gates are ready)
 
 ## Recommended Ongoing Actions

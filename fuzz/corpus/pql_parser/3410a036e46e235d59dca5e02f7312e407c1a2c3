@@ -1,0 +1,4 @@
+query friends_on_driendr {
+  seed(func: uid(Person:1_0)) {ds_me
+   uery fu\ry
+}

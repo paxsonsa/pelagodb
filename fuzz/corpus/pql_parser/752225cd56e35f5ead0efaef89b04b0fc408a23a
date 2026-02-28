@@ -1,0 +1,9 @@
+query {
+    name
+  H  -[KN:WOWS]->  Poqueryn{
+    name
+    -[KN:WOWS]->  PoquePquery {
+    name
+  H  -[KN:WOW]->  Poqueryquery {
+    name
+  H  -[K]->  Poqueryn{ @f f{i 

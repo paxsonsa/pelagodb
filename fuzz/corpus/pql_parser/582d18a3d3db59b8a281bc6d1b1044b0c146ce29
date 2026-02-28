@@ -1,0 +1,8 @@
+queryiends {
+  seed(func: uid(Perso5_0)) {
+    name
+    -[KNOWS]-> @f  nae
+ &ge
+    }
+  }
+}

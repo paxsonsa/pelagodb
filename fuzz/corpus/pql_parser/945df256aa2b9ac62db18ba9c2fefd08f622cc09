@@ -1,0 +1,3 @@
+query ends_ofends{
+  seed(func: uid(P:1_0)) @limit(first: 25) { }
+}

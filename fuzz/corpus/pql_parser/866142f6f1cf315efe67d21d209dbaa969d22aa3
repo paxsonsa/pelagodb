@@ -1,0 +1,7 @@
+query friends_wf_friends {
+  seed(func: uid(Person:1_0)) {
+    name
+    -[KNOpppppppppppppppppppppMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG0GGGGGGGG
+{
+   
+  -[KNO=WS

@@ -1,0 +1,10 @@
+query @filter(age >query"="50) {
+      n
+eageme
+    -[KNOWS]-> @filter(,age >Yuery"="25) {
+      n
+eageme
+    -[KNOWS]-> @filter(a(age e >= 4`) ueryiy"="25) {
+      n
+eageme
+    -[KNOWS]-> @filter(a(age >= 42) ueryi(age >t(f

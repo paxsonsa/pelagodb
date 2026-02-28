@@ -1,0 +1,12 @@
+query friends {
+  seed(func: uid(Person:0_0)) {
+    name
+name
+    -[KNOWS]-> @filter(age e
+      agerst: 50) {
+ aguery frif_fqueryf_fquery frif_fquery friefy friff_fquery frif_fqueryf_fe
+  nyern_3f_fqe frdsie_3ry frieneo_3f_fquery frif_fqueryf_fquerquery frif_fqueryf_fquery friff_fquery frif_fqueryf_fquery frif_f_fqueryf_fquery frif_fquery fn_3ry frieuery frie frdsien_3ery frif_fquery friefy friff_fquery frif_fqueryf_fquery frif_fquery fn_3ry frieuery frie frdsien_3ry frienen_3n_3ry frieneo_3f_fqufn_3ry frieuery frie frdsien_3ry frienen_3n_3ry frieneo_3f_fquery frif_fqueryf_fquerquery frif_fqueryf_fquery friff_query friefy friff_fquery frif_fqueryqueryf_fquery frif_fquery fn_1ry frieu_fquery frif_fqueryf_fquery frif_fquery fn_3ry frieueryfquf_fquery friefy friff_fquery       name
+      age
+    }
+  }
+}

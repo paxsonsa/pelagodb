@@ -1,0 +1,5 @@
+query friends_{
+  seed(func: uid(Preson:1NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNONNN_0)) {
+ e
+    }
+}

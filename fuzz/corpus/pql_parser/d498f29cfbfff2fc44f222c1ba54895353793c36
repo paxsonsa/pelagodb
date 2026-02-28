@@ -1,0 +1,4 @@
+query fries_ofs{
+  seed(func: uid(Person:2_0)) {
+   Name
+mit(first: @

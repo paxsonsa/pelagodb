@@ -1,0 +1,8 @@
+query friends {
+ d(func: uid(Person:1_0)) {
+    name
+    -[KNOWS]-> -[KNOWS]-> @filter(abe xst: 25) {
+ ge
+    }
+  }
+}

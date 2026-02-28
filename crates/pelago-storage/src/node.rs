@@ -15,6 +15,7 @@
 use crate::cdc::CdcOperation;
 use crate::db::PelagoDb;
 use crate::edge::EdgeStore;
+use crate::failpoints;
 use crate::ids::IdAllocator;
 use crate::index::{compute_index_entries, compute_index_removals, IndexEntry, IndexEntryType};
 use crate::mutation;
@@ -520,6 +521,7 @@ impl NodeStore {
 
         // Flush CDC into same transaction
         cdc.flush(&trx, database, namespace)?;
+        failpoints::inject("node.create.after_cdc_flush")?;
 
         // Single atomic commit: mutation + CDC
         mutation::commit_or_internal(trx, "create node").await?;
@@ -792,6 +794,7 @@ impl NodeStore {
 
         // Flush CDC into same transaction
         cdc.flush(&trx, database, namespace)?;
+        failpoints::inject("node.update.after_cdc_flush")?;
 
         // Single atomic commit
         mutation::commit_or_internal(trx, "update node").await?;
@@ -885,6 +888,7 @@ impl NodeStore {
 
         // Flush CDC into same transaction
         cdc.flush(&trx, database, namespace)?;
+        failpoints::inject("node.delete.after_cdc_flush")?;
 
         // Single atomic commit
         mutation::commit_or_internal(trx, "delete node").await?;
@@ -1063,6 +1067,7 @@ impl NodeStore {
             current_site_id: target_site_id.to_string(),
         });
         cdc.flush(&trx, database, namespace)?;
+        failpoints::inject("node.transfer_ownership.after_cdc_flush")?;
         mutation::commit_or_internal(trx, "transfer ownership").await?;
 
         Ok((true, previous_site_id, target_site_id))

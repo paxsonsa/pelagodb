@@ -1,0 +1,9 @@
+query fris {
+  seed(func: uid(Persoo:2_0)) {
+   name
+    -[KNOWC]-> @filter(age >= 21) @limit(first: 26) {
+     na me	      age
+  nyern_3f_fqe frdsie_3ry frieneo_3f_fquery frif_	      age
+  nyern_3f_fqe frdsie_3ry frieneo_3f_fquery frif_fqueryf_fquerquery frif_fqueryf_fquery friff_fquery frif_fqueryf_fquery frif_fquery friefy friff_fquery frif_fqueryf_fquery frif frieneo_3f_fquery frif_fqueryf_fquerquery frif_fqueryf__fquery fn_3ry frieuery frie fqueryf_fquerquery frif_fqueryf_fquery friff_fquery frif_fqueryf_fquery frif_fquery friefy friff_fquery frif_fqueryf_fquery frif frieneo_3f_fquery frif_fqueryf_fquerquery frif_fqueryf__fquery fn_3ry frieuery frie frdsien_3ry frienen_3n_3ry frieneo_3f_fquery frif_fqueryf_fquerquery frif_fqueryf_fquery friff_fquery frif_fqueryf_fquery frif_fquery friefy friff_fquery frif_fqueryf_fquery frif_fquery frief  }
+  }
+}

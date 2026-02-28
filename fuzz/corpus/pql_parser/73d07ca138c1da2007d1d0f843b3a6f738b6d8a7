@@ -1,0 +1,2 @@
+query {
+  seed(func:lt

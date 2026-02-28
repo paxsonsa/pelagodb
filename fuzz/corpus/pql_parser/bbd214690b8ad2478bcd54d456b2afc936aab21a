@@ -1,0 +1,7 @@
+query friends_wf_friends {
+  seed(func: uid(Person:2_0)) {J    name
+    N-[KOWS]-> @filter(age e
+  ag%
+    rst: 25) {
+      na
+  N-[KOWS]-}

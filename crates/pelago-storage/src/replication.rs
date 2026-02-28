@@ -2,6 +2,7 @@
 
 use crate::cdc::Versionstamp;
 use crate::db::PelagoDb;
+use crate::failpoints;
 use crate::Subspace;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
 use pelago_core::PelagoError;
@@ -261,6 +262,7 @@ pub async fn try_acquire_replicator_lease(
     };
 
     trx.set(&key, &encode_cbor(&lease)?);
+    failpoints::inject("replication.lease.before_commit")?;
     trx.commit()
         .await
         .map_err(|e| PelagoError::Internal(format!("replication lease commit failed: {}", e)))?;

@@ -1,0 +1,3 @@
+quer{
+   -[KNOWS]-> @filter(a21)  name
+    -[KNOWS]-> @filter(1)

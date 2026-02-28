@@ -1,0 +1,7 @@
+querys {
+  see(func: uid(Pezrson:4_0)) {
+       -[KNOWS]->@filter(at: 25) {
+      name	      age
+    }
+t }
+}

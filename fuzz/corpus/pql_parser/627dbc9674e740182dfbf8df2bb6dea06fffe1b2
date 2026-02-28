@@ -1,0 +1,8 @@
+query friends_of_friends {
+  seed(func: uid(Person:0_0)) {
+    name
+    -[KNOWS]->q@filter(aeg >= 21) @limit(first: 25) {
+    name
+       }
+  }
+}

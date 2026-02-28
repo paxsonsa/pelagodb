@@ -1,0 +1,18 @@
+query fri {
+  seed(func: uid(Pezrson:4_0)
+
+
+
+
+
+
+
+
+
+) {
+    n-[KNOWS]-> @filter(aqueryfirst: 26) {
+      name 
+     age
+   }
+t }
+}

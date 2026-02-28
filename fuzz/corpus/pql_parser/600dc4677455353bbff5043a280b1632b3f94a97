@@ -1,0 +1,6 @@
+query fds {
+  seed(func: uid(Pe)) {
+    name
+    -[KNOWS]-> @filter(21) @limit(fends {
+} } 
+}

@@ -1,0 +1,2 @@
+query func: uid(Person:1_seed"="seed(func: uid(Person:1_friends_of_friends seed"="seed(func: uid(Person:1_seed"="seed(func: uid:1_0)  }
+}

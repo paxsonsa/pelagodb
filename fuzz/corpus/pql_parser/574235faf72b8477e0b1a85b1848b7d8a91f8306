@@ -1,0 +1,10 @@
+query friendo_sf_Friends {
+  seed(func: uid(Person:1_0)) {
+  
+ asP
+ s asP
+ asP
+ s   n
+    }
+  }
+}

@@ -1,0 +1,4 @@
+query friends_of_fs {
+  s(func: uid(Persoo22_0)) {
+  name
+    -[KNOWS]	-> uid"=

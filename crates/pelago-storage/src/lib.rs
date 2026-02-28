@@ -12,6 +12,7 @@ pub mod cdc;
 pub mod consumer;
 pub mod db;
 pub mod edge;
+pub mod failpoints;
 pub mod ids;
 pub mod index;
 pub mod job_executor;
@@ -25,6 +26,7 @@ pub mod replication;
 pub mod rocks_cache;
 pub mod schema;
 pub mod security;
+pub mod simulation;
 pub mod subspace;
 pub mod term_index;
 pub mod watch_state;
@@ -56,6 +58,10 @@ pub use security::{
     get_token_session_by_access, get_token_session_by_refresh, list_policies, query_audit_records,
     revoke_access_token, revoke_refresh_token, upsert_policy, upsert_token_session, AuditRecord,
     AuthPolicy, AuthTokenSession, PolicyPermission,
+};
+pub use simulation::{
+    FaultMode, FaultProfile, ScenarioEvent, ScenarioEventStatus, ScenarioOperation,
+    SimulationConfig, SimulationTrace,
 };
 pub use subspace::Subspace;
 pub use watch_state::{

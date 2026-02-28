@@ -1,0 +1,4 @@
+quer{
+   -[KNOWS]-> @filter(age >= 21)  name
+    -[KNOWS]-> @filter(1) @li      naquerme
+y 

@@ -1,0 +1,5 @@
+query frisds {
+  seed(func: uid(Pe:1_0)) {
+    name
+    -[KNOname
+qu    -[e

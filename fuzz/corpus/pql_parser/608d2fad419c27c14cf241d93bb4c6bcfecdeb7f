@@ -1,0 +1,6 @@
+query friends {
+ d(func: uid(Person:1_0)) {
+    name
+    -[KNO]-> -[KNOWS]->
+  }
+}

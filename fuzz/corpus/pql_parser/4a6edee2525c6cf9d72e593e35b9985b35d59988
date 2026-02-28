@@ -1,0 +1,6 @@
+query hnds {
+  seed(func: uid(Perso)) {  -[KNOWS]-> @filter(aweirst: 50) {
+      nge
+    }
+  }
+}

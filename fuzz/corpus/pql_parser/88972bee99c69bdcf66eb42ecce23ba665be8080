@@ -1,0 +1,6 @@
+query @filter(age >query"="50) {
+      n-[KNOWS]-> @filter(aage >query"="62) {
+      n
+eageme
+  } 
+}

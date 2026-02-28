@@ -1,0 +1,8 @@
+query friends_of_friends {
+  d(func: uid(Person:1_0)) {
+    name
+    -[KNOWS]-> @filter(age >= 21) @limit(first: 25) {
+ ge
+    }
+  }
+}

@@ -1,0 +1,12 @@
+qu@filter(age >= 23) @limit(first: 25) {
+  n ae   m
+   W   ag  -[KNOWS]-> @filter(age >= 2e >= 23) @limit(first: 25) { n ae   m
+   W   ag  -[KNOWS]-> @filter(age >= 22) @limit(first: 25) {
+  n   m
+   W   ag  -[KNOWS]-> @filter(ag2) @limit(first: 25) {
+  n   m
+   W   ag  -[KNOWS]-> @filter(age >= 22) @limit(first: 25) {
+  n ae
+    }
+  }
+}

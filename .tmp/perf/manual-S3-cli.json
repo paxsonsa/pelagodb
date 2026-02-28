@@ -1,0 +1,46 @@
+{
+  "server": "http://127.0.0.1:27615",
+  "database": "default",
+  "namespace": "ci.perf.manual.S3.1772260778.5218",
+  "profile": "default",
+  "transport": "cli",
+  "runs": 30,
+  "warmup": 5,
+  "results": [
+    {
+      "name": "node_get",
+      "count": 30,
+      "mean_ms": 13.781491666666666,
+      "p50_ms": 13.6840625,
+      "p95_ms": 14.78705245,
+      "p99_ms": 16.23975704
+    },
+    {
+      "name": "query_find",
+      "count": 30,
+      "mean_ms": 15.421905666666667,
+      "p50_ms": 15.080979,
+      "p95_ms": 17.368457999999997,
+      "p99_ms": 17.76140264
+    },
+    {
+      "name": "query_traverse",
+      "count": 30,
+      "mean_ms": 17.218155533333334,
+      "p50_ms": 16.9900835,
+      "p95_ms": 18.63968315,
+      "p99_ms": 19.05596889
+    }
+  ],
+  "targets_ms": {
+    "node_get": 40.0,
+    "query_find": 30.0,
+    "query_traverse": 100.0
+  },
+  "enforced": true,
+  "scenario": "",
+  "enforce_scenario_gates": false,
+  "observability": {},
+  "scenario_gate": null,
+  "exit_code": 0
+}

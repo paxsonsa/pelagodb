@@ -1,0 +1,5 @@
+{
+  "cache_hit_ratio": 0.95,
+  "projector_lag_events": 500,
+  "fallback_rate": 0.02
+}

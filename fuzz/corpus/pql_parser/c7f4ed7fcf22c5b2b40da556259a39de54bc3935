@@ -1,0 +1,5 @@
+queryds {ed(func: uid(Person:2_0)) {
+    name
+    -[KNOWS]-> @filter(age >= 22)ggggggggggggggg 
+  }
+}

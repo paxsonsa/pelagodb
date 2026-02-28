@@ -1,0 +1,3 @@
+query fr_of {
+  peed(func: uid(P:1_0)) {
+    min@sgea 

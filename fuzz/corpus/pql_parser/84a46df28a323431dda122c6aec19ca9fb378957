@@ -1,0 +1,3 @@
+query f_fri{
+  seed(func: uid(Person:1_0)) {  name }
+}

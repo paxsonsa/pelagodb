@@ -6,6 +6,7 @@ edition.workspace = true
 [features]
 default = ["cache"]
 cache = ["dep:rocksdb"]
+failpoints = []
 
 [dependencies]
 pelago-core.workspace = true
@@ -21,6 +22,10 @@ metrics.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 rocksdb = { workspace = true, optional = true }
+serde_json.workspace = true
 
 [dev-dependencies]
 pelago-query = { path = "../pelago-query" }
+proptest = "1"
+rand = "0.8"
+rand_chacha = "0.3"

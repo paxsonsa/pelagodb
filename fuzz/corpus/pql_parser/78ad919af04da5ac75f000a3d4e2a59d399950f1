@@ -1,0 +1,3 @@
+query {
+    name
+    -[KN:WOWS]->  Poquer   -[KN:WOWSyn @f f{i 

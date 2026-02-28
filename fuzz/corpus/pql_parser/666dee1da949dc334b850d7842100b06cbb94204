@@ -1,0 +1,5 @@
+query fernds_of_fo {
+seed(func: uid(Person:4_0)) {
+name
+    -[KNOWS]	-> uid"="uid(@   }
+ 	 

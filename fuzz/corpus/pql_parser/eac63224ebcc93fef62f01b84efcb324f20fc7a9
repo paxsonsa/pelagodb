@@ -1,0 +1,6 @@
+query friends_of_friends {
+  eed(func: uid(Person:2_0)) {
+    name
+    -[KNOWS]-> 
+   -[KNOWS]->nc: uifir{) 
+ Per    name

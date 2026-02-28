@@ -1,0 +1,1 @@
+query{ma  en  -[KNOWS]->    -[KNOWS]->    -[KNOWS]-> @y}

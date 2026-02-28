@@ -1,0 +1,8 @@
+queryry {
+    name
+    -[KNOWNOWS]->    -[KNS]->    -[KNOWS]-> 
+       -[KNOWNOWS]->    -[KNS]->    -[KNOWS]-> 
+    -[KNOWS]->  {
+   na me
+    -[KNOW}
+}

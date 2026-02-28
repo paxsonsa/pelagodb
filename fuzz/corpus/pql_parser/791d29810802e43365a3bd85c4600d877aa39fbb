@@ -1,0 +1,2 @@
+query ns {
+  seed(func: uid(rsPerPgro u

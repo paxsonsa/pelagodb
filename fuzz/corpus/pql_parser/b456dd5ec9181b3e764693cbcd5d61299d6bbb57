@@ -1,0 +1,7 @@
+query friends_of_friends {
+  sead(func: uid(Pson:2_0)) {
+   anem 
+    -[KNOWS]-> @filter(age >= 21) @limit(first: 025) {e0ise   age
+    }
+  }
+}

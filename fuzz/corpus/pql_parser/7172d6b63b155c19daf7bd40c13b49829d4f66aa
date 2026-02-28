@@ -1,0 +1,5 @@
+query friends_nds {
+  seed(func: uid(Person:1_0)) {
+    name
+     -[KNOWS]->@sort(uery
+}sort"="@sort(:

@@ -1,0 +1,2 @@
+queryriends {
+  seed(func: uid(Person:0rrrrrrrrrrrrrrrrrrrrrrr_0)) on @fim

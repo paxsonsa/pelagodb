@@ -1,0 +1,4 @@
+querynds {
+  s(func: uid(Pers:n:1_0)) {
+
+  }}

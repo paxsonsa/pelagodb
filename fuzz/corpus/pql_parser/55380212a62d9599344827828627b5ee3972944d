@@ -1,0 +1,4 @@
+query fs {
+  seed(func: uid(Person:2_0)) {
+    name
+    -[Kf_nof_sdri222222

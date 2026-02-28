@@ -1,0 +1,5 @@
+query friends_wf_ {
+seed(func: uid(filter4_0)) {
+  ame
+    N-[KOWS]->  }
+}

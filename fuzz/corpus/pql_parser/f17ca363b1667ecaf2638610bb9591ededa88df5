@@ -1,0 +1,6 @@
+query ends_offriends {
+  seed(func: uid(Person:1_0)) @filter(age >= 21) @limit(first: 25) {
+           age
+  #}
+  }
+}

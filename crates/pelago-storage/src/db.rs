@@ -4,6 +4,7 @@
 //! handling connection management, transactions, and common operations.
 
 use foundationdb::api::{FdbApiBuilder, NetworkAutoStop};
+use foundationdb::options::NetworkOption;
 use foundationdb::{
     Database, FdbBindingError, MaybeCommitted, RangeOption, RetryableTransaction, Transaction,
 };
@@ -33,6 +34,7 @@ pub async fn init_fdb_network() -> Result<(), PelagoError> {
                 .map_err(|e| {
                     PelagoError::FdbUnavailable(format!("Failed to build FDB API: {}", e))
                 })?;
+            let network_builder = apply_optional_network_chaos_options(network_builder)?;
 
             // Safety: boot() must only be called once per process, which we ensure
             // via the OnceCell. The FDB network thread will run for the lifetime
@@ -48,6 +50,79 @@ pub async fn init_fdb_network() -> Result<(), PelagoError> {
         })
         .await?;
     Ok(())
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            let normalized = v.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn env_i32(name: &str) -> Option<i32> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+}
+
+fn apply_optional_network_chaos_options(
+    mut builder: foundationdb::api::NetworkBuilder,
+) -> Result<foundationdb::api::NetworkBuilder, PelagoError> {
+    if env_truthy("CLIENT_BUGGIFY_ENABLE") {
+        builder = builder
+            .set_option(NetworkOption::ClientBuggifyEnable)
+            .map_err(|e| {
+                PelagoError::FdbUnavailable(format!("Failed to set CLIENT_BUGGIFY_ENABLE: {}", e))
+            })?;
+    }
+
+    if env_truthy("CLIENT_BUGGIFY_DISABLE") {
+        builder = builder
+            .set_option(NetworkOption::ClientBuggifyDisable)
+            .map_err(|e| {
+                PelagoError::FdbUnavailable(format!("Failed to set CLIENT_BUGGIFY_DISABLE: {}", e))
+            })?;
+    }
+
+    if let Some(prob) = env_i32("CLIENT_BUGGIFY_SECTION_ACTIVATED_PROBABILITY") {
+        builder = builder
+            .set_option(NetworkOption::ClientBuggifySectionActivatedProbability(
+                prob,
+            ))
+            .map_err(|e| {
+                PelagoError::FdbUnavailable(format!(
+                    "Failed to set CLIENT_BUGGIFY_SECTION_ACTIVATED_PROBABILITY: {}",
+                    e
+                ))
+            })?;
+    }
+
+    if let Some(prob) = env_i32("CLIENT_BUGGIFY_SECTION_FIRED_PROBABILITY") {
+        builder = builder
+            .set_option(NetworkOption::ClientBuggifySectionFiredProbability(prob))
+            .map_err(|e| {
+                PelagoError::FdbUnavailable(format!(
+                    "Failed to set CLIENT_BUGGIFY_SECTION_FIRED_PROBABILITY: {}",
+                    e
+                ))
+            })?;
+    }
+
+    if env_truthy("CLIENT_BUGGIFY_DISABLE_CLIENT_BYPASS") {
+        builder = builder
+            .set_option(NetworkOption::DisableClientBypass)
+            .map_err(|e| {
+                PelagoError::FdbUnavailable(format!(
+                    "Failed to set CLIENT_BUGGIFY_DISABLE_CLIENT_BYPASS: {}",
+                    e
+                ))
+            })?;
+    }
+
+    Ok(builder)
 }
 
 /// PelagoDB database handle wrapping FDB

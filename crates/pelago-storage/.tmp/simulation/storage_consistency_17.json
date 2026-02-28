@@ -1,0 +1,2618 @@
+{
+  "config": {
+    "seed": 17,
+    "steps": 300,
+    "workers": 4,
+    "scenario": "storage_consistency",
+    "fail_profile": {
+      "failpoints": {
+        "tx.commit.before_action.create_node": {
+          "ReturnError": {
+            "max_triggers": 1
+          }
+        }
+      }
+    }
+  },
+  "operations": [
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 83,
+        "target_slot": 93
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 46
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 69
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 100,
+        "target_slot": 92
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u4",
+        "age": 34
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 89,
+        "target_slot": 56
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 126
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u7",
+        "age": 71
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u8",
+        "age": 26
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 123,
+        "target_slot": 49
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u10",
+        "age": 62
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 80,
+        "target_slot": 29
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 127,
+        "age": 59
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u13",
+        "age": 21
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 34,
+        "age": 32
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 2,
+        "slot": 84,
+        "age": 46
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 87,
+        "target_slot": 88
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 16,
+        "age": 67
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 42,
+        "target_slot": 66
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 12,
+        "target_slot": 75
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 30,
+        "age": 75
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u21",
+        "age": 56
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 108,
+        "target_slot": 38
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 99,
+        "age": 74
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 1,
+        "age": 48
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 30,
+        "target_slot": 81
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 0
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 57,
+        "target_slot": 3
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u28",
+        "age": 61
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 103,
+        "age": 72
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 0,
+        "target_slot": 82
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 2,
+        "slot": 15,
+        "age": 65
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 6,
+        "age": 32
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 78,
+        "target_slot": 99
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 73,
+        "target_slot": 99
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u35",
+        "age": 71
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 57,
+        "age": 54
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 0,
+        "target_slot": 21
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 15,
+        "age": 65
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 83
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 125
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 59,
+        "target_slot": 19
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 34
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 126,
+        "target_slot": 99
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 84,
+        "target_slot": 19
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 96
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 2
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 64,
+        "target_slot": 106
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 99
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u49",
+        "age": 72
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 83
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 118
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 121,
+        "target_slot": 21
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 108,
+        "target_slot": 51
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 73,
+        "target_slot": 108
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 101
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 61,
+        "age": 75
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u57",
+        "age": 38
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u58",
+        "age": 31
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 34,
+        "target_slot": 46
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 42,
+        "target_slot": 8
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 69,
+        "target_slot": 119
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 81
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u63",
+        "age": 19
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 20,
+        "target_slot": 33
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 55
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u66",
+        "age": 30
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 12,
+        "age": 56
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 72,
+        "target_slot": 70
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 2,
+        "slot": 126,
+        "age": 78
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 58,
+        "target_slot": 50
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 52,
+        "target_slot": 84
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u72",
+        "age": 49
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u73",
+        "age": 22
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 54
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 2,
+        "slot": 38,
+        "age": 84
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 57,
+        "target_slot": 7
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u77",
+        "age": 46
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 12,
+        "target_slot": 126
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 117
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 73,
+        "age": 27
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 75
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 21
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 13,
+        "target_slot": 15
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 1,
+        "source_slot": 72,
+        "target_slot": 59
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 120,
+        "target_slot": 64
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 31
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 81,
+        "target_slot": 89
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 34
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 96,
+        "target_slot": 107
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u90",
+        "age": 68
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 39
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 101,
+        "target_slot": 36
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 42,
+        "target_slot": 99
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 125
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 32
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 102,
+        "target_slot": 11
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 42,
+        "target_slot": 43
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 78
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 104
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 91,
+        "target_slot": 51
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 75,
+        "age": 50
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u102",
+        "age": 19
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u103",
+        "age": 67
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 1,
+        "target_slot": 4
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 37,
+        "age": 78
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 97,
+        "target_slot": 90
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 61,
+        "age": 59
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 120,
+        "age": 86
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 72,
+        "target_slot": 76
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u110",
+        "age": 75
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 53,
+        "target_slot": 60
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 87,
+        "target_slot": 72
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 54
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 100,
+        "target_slot": 24
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u115",
+        "age": 23
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 29
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u117",
+        "age": 46
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 55,
+        "target_slot": 53
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 80,
+        "age": 24
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 64
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 125,
+        "target_slot": 95
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 19,
+        "age": 73
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u123",
+        "age": 58
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 68
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 50,
+        "age": 49
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 48,
+        "age": 75
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 35
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u128",
+        "age": 32
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 1,
+        "source_slot": 51,
+        "target_slot": 66
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u130",
+        "age": 77
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 41,
+        "target_slot": 125
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 82,
+        "target_slot": 87
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 53,
+        "age": 22
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 71,
+        "target_slot": 109
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 80
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u136",
+        "age": 66
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 98
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 44,
+        "target_slot": 42
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 5,
+        "target_slot": 11
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 19,
+        "target_slot": 99
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 99,
+        "age": 48
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 1,
+        "source_slot": 12,
+        "target_slot": 11
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 53
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 100,
+        "age": 31
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u145",
+        "age": 75
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 116,
+        "target_slot": 71
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 84,
+        "age": 41
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 28,
+        "age": 61
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 42,
+        "target_slot": 125
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 2,
+        "slot": 62,
+        "age": 56
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 15,
+        "age": 49
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u152",
+        "age": 32
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 48
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 23
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 48,
+        "target_slot": 15
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 65
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u157",
+        "age": 79
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 43
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 109
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 40,
+        "target_slot": 78
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 65
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 58
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 27,
+        "age": 29
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 39
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 100,
+        "age": 80
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u166",
+        "age": 29
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 12,
+        "target_slot": 95
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 62,
+        "age": 88
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u169",
+        "age": 20
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 78
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u171",
+        "age": 39
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 38,
+        "age": 31
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u173",
+        "age": 22
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 77,
+        "target_slot": 35
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u175",
+        "age": 53
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 104,
+        "age": 36
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 117,
+        "target_slot": 51
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 26,
+        "target_slot": 84
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 57
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 42,
+        "target_slot": 105
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 84
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 48,
+        "age": 48
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 58,
+        "age": 48
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u184",
+        "age": 22
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 122,
+        "age": 80
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 116,
+        "target_slot": 2
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u187",
+        "age": 77
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 54,
+        "age": 45
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u189",
+        "age": 74
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 105
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 126,
+        "age": 61
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u192",
+        "age": 31
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 53
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 43,
+        "target_slot": 39
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 32
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u196",
+        "age": 25
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 79
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u198",
+        "age": 75
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 22
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 47
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 91,
+        "age": 19
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 17,
+        "target_slot": 111
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 121
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 87,
+        "target_slot": 9
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 59
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 75,
+        "target_slot": 74
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 112
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 80,
+        "target_slot": 24
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u209",
+        "age": 49
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 6
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 114
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 94
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u213",
+        "age": 45
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u214",
+        "age": 68
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u215",
+        "age": 54
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 76,
+        "target_slot": 116
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u217",
+        "age": 42
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 18,
+        "age": 73
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 93,
+        "target_slot": 47
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u220",
+        "age": 60
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 33
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u222",
+        "age": 41
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u223",
+        "age": 79
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 94,
+        "target_slot": 94
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 23,
+        "target_slot": 97
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 63,
+        "target_slot": 14
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 3,
+        "target_slot": 60
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 22,
+        "age": 59
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 85
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 92,
+        "target_slot": 126
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u231",
+        "age": 51
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 30,
+        "target_slot": 76
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u233",
+        "age": 59
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u234",
+        "age": 47
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u235",
+        "age": 66
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 6,
+        "age": 21
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 111,
+        "target_slot": 7
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 86,
+        "target_slot": 55
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 59,
+        "target_slot": 13
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 0,
+        "label": "u240",
+        "age": 33
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 8
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 91,
+        "target_slot": 124
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 3,
+        "target_slot": 83
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 92
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 121,
+        "target_slot": 90
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 2,
+        "slot": 67,
+        "age": 62
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u247",
+        "age": 69
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 70
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u249",
+        "age": 33
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 68,
+        "target_slot": 91
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 115,
+        "target_slot": 108
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 35,
+        "target_slot": 126
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u253",
+        "age": 19
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 121,
+        "target_slot": 51
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 32,
+        "target_slot": 81
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 18,
+        "age": 70
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 18,
+        "age": 21
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 121
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 125,
+        "age": 80
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 127,
+        "target_slot": 78
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 81
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 94,
+        "target_slot": 85
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 51,
+        "age": 37
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u264",
+        "age": 23
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u265",
+        "age": 43
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 2,
+        "label": "u266",
+        "age": 56
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 1,
+        "source_slot": 47,
+        "target_slot": 64
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 120,
+        "target_slot": 62
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 1,
+        "label": "u269",
+        "age": 67
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 25,
+        "target_slot": 51
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 0,
+        "slot": 57,
+        "age": 80
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 27,
+        "target_slot": 51
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 2,
+        "slot": 118,
+        "age": 42
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 93
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 94,
+        "target_slot": 50
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 96
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 1,
+        "slot": 33
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 1,
+        "source_slot": 58,
+        "target_slot": 89
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 2,
+        "source_slot": 103,
+        "target_slot": 4
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 2,
+        "slot": 43
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 0,
+        "slot": 5
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 3,
+        "slot": 21,
+        "age": 58
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 34,
+        "target_slot": 51
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 2,
+        "slot": 3,
+        "age": 37
+      }
+    },
+    {
+      "DeleteNode": {
+        "worker": 3,
+        "slot": 112
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 1,
+        "source_slot": 50,
+        "target_slot": 49
+      }
+    },
+    {
+      "CreateNode": {
+        "worker": 3,
+        "label": "u287",
+        "age": 70
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 51,
+        "age": 58
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 0,
+        "source_slot": 0,
+        "target_slot": 11
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 20,
+        "target_slot": 75
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 28,
+        "target_slot": 85
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 2,
+        "source_slot": 12,
+        "target_slot": 99
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 115,
+        "target_slot": 123
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 1,
+        "source_slot": 114,
+        "target_slot": 85
+      }
+    },
+    {
+      "UpdateNode": {
+        "worker": 1,
+        "slot": 30,
+        "age": 56
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 81,
+        "target_slot": 35
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 0,
+        "source_slot": 120,
+        "target_slot": 41
+      }
+    },
+    {
+      "CreateEdge": {
+        "worker": 3,
+        "source_slot": 119,
+        "target_slot": 60
+      }
+    },
+    {
+      "DeleteEdge": {
+        "worker": 3,
+        "source_slot": 69,
+        "target_slot": 59
+      }
+    }
+  ],
+  "events": [
+    {
+      "step": 4,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Failed",
+      "detail": "Internal error: Injected failpoint triggered: tx.commit.before_action.create_node"
+    },
+    {
+      "step": 7,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_1"
+    },
+    {
+      "step": 8,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_2"
+    },
+    {
+      "step": 10,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_3"
+    },
+    {
+      "step": 13,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_4"
+    },
+    {
+      "step": 21,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_5"
+    },
+    {
+      "step": 28,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_6"
+    },
+    {
+      "step": 35,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_7"
+    },
+    {
+      "step": 49,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_8"
+    },
+    {
+      "step": 57,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_9"
+    },
+    {
+      "step": 58,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_10"
+    },
+    {
+      "step": 63,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_11"
+    },
+    {
+      "step": 66,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_12"
+    },
+    {
+      "step": 72,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_13"
+    },
+    {
+      "step": 73,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_14"
+    },
+    {
+      "step": 76,
+      "worker": 0,
+      "operation": "delete_edge",
+      "status": "Rejected",
+      "detail": "missing"
+    },
+    {
+      "step": 77,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_15"
+    },
+    {
+      "step": 80,
+      "worker": 1,
+      "operation": "update_node",
+      "status": "Applied",
+      "detail": "1_14"
+    },
+    {
+      "step": 82,
+      "worker": 3,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_5"
+    },
+    {
+      "step": 90,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_16"
+    },
+    {
+      "step": 102,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_17"
+    },
+    {
+      "step": 103,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_18"
+    },
+    {
+      "step": 110,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_19"
+    },
+    {
+      "step": 115,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_20"
+    },
+    {
+      "step": 117,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_21"
+    },
+    {
+      "step": 123,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_22"
+    },
+    {
+      "step": 127,
+      "worker": 2,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_7"
+    },
+    {
+      "step": 128,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_23"
+    },
+    {
+      "step": 130,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_24"
+    },
+    {
+      "step": 136,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_25"
+    },
+    {
+      "step": 145,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_26"
+    },
+    {
+      "step": 148,
+      "worker": 3,
+      "operation": "update_node",
+      "status": "Applied",
+      "detail": "1_6"
+    },
+    {
+      "step": 152,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_27"
+    },
+    {
+      "step": 157,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_28"
+    },
+    {
+      "step": 162,
+      "worker": 0,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_10"
+    },
+    {
+      "step": 166,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_29"
+    },
+    {
+      "step": 169,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_30"
+    },
+    {
+      "step": 171,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_31"
+    },
+    {
+      "step": 172,
+      "worker": 3,
+      "operation": "update_node",
+      "status": "Applied",
+      "detail": "1_29"
+    },
+    {
+      "step": 173,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_32"
+    },
+    {
+      "step": 175,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_33"
+    },
+    {
+      "step": 179,
+      "worker": 2,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_9"
+    },
+    {
+      "step": 184,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_34"
+    },
+    {
+      "step": 187,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_35"
+    },
+    {
+      "step": 189,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_36"
+    },
+    {
+      "step": 192,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_37"
+    },
+    {
+      "step": 196,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_38"
+    },
+    {
+      "step": 198,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_39"
+    },
+    {
+      "step": 200,
+      "worker": 1,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_33"
+    },
+    {
+      "step": 205,
+      "worker": 2,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_35"
+    },
+    {
+      "step": 209,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_40"
+    },
+    {
+      "step": 213,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_41"
+    },
+    {
+      "step": 214,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_42"
+    },
+    {
+      "step": 215,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_43"
+    },
+    {
+      "step": 217,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_44"
+    },
+    {
+      "step": 220,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_45"
+    },
+    {
+      "step": 222,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_46"
+    },
+    {
+      "step": 223,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_47"
+    },
+    {
+      "step": 229,
+      "worker": 1,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_41"
+    },
+    {
+      "step": 231,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_48"
+    },
+    {
+      "step": 233,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_49"
+    },
+    {
+      "step": 234,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_50"
+    },
+    {
+      "step": 235,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_51"
+    },
+    {
+      "step": 240,
+      "worker": 0,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_52"
+    },
+    {
+      "step": 241,
+      "worker": 3,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_25"
+    },
+    {
+      "step": 244,
+      "worker": 1,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_45"
+    },
+    {
+      "step": 247,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_53"
+    },
+    {
+      "step": 248,
+      "worker": 0,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_39"
+    },
+    {
+      "step": 249,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_54"
+    },
+    {
+      "step": 253,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_55"
+    },
+    {
+      "step": 258,
+      "worker": 2,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_54"
+    },
+    {
+      "step": 259,
+      "worker": 3,
+      "operation": "update_node",
+      "status": "Applied",
+      "detail": "1_55"
+    },
+    {
+      "step": 261,
+      "worker": 2,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_40"
+    },
+    {
+      "step": 264,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_56"
+    },
+    {
+      "step": 265,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_57"
+    },
+    {
+      "step": 266,
+      "worker": 2,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_58"
+    },
+    {
+      "step": 269,
+      "worker": 1,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_59"
+    },
+    {
+      "step": 280,
+      "worker": 2,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_31"
+    },
+    {
+      "step": 285,
+      "worker": 3,
+      "operation": "delete_node",
+      "status": "Applied",
+      "detail": "1_52"
+    },
+    {
+      "step": 287,
+      "worker": 3,
+      "operation": "create_node",
+      "status": "Applied",
+      "detail": "1_60"
+    },
+    {
+      "step": 293,
+      "worker": 1,
+      "operation": "create_edge",
+      "status": "Applied",
+      "detail": "1_20->1_22"
+    }
+  ]
+}

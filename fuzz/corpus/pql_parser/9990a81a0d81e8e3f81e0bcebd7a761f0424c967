@@ -1,0 +1,7 @@
+query friends_ofZ_frien{
+  seed(func: uid(Per)) {
+    name
+    -[KNage
+    }
+  }
+}

@@ -1,0 +1,6 @@
+query friend_of_friends {
+  seed(func: uid(Pezrson:4_0)) {
+    name
+L   -[KNOWS]-> @filter(aqueryfirst: 25) {
+      naOWS]-> @fi }
+}

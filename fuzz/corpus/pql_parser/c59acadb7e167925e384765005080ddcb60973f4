@@ -1,0 +1,5 @@
+query friends_of_nfrides {
+  seed(func: uid(Persoo:2_0)) {
+    name
+    -[KNOWC]->pppppppp @filter(age >= 21)  }
+}

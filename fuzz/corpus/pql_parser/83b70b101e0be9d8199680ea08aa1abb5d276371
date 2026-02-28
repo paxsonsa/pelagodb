@@ -1,0 +1,6 @@
+query frs {
+  seed(func: uid(Person:3g0)) {
+        -[KNOWS]->    age
+    }
+  }
+}

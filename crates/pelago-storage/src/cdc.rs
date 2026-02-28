@@ -13,6 +13,7 @@
 //! entries are written atomically with the mutation they describe.
 
 use crate::db::PelagoDb;
+use crate::failpoints;
 use crate::Subspace;
 use foundationdb::options::MutationType;
 use pelago_core::encoding::{decode_cbor, encode_cbor};
@@ -299,6 +300,7 @@ pub async fn append_cdc_entry(
 
     let trx = db.create_transaction()?;
     write_cdc_entry(&trx, database, namespace, &entry)?;
+    failpoints::inject("cdc.append.before_commit")?;
     trx.commit()
         .await
         .map_err(|e| PelagoError::Internal(format!("Failed to append CDC entry: {}", e)))?;

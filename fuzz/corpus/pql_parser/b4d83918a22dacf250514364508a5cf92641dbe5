@@ -1,0 +1,4 @@
+query f{
+  seed(func:uid(reospn:2_0)) {
+    name
+    -[on:2_0)"= }

@@ -1,0 +1,2 @@
+query friends_o{
+  seed(func: uid(Person:1_0)) {   -[KNOWS]-f@i

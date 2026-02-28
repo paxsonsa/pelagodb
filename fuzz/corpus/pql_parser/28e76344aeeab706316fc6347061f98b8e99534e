@@ -1,0 +1,14 @@
+query frienriends {
+  seed(func: uid(Pdrson:2_0)) {
+    name
+L   -[KNOWS]-># @filter(age {
+      name
+      age
+    }
+   seed(func: uid(Person:4_0)) {
+name
+      age
+    }
+   seed(func: uid(Person:4_0)) {
+      age
+    }

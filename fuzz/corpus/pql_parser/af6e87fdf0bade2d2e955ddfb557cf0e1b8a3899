@@ -1,0 +1,2 @@
+PerPerson @filter(aosn @: 05) { nam, erage }
+t:

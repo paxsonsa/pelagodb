@@ -1,0 +1,3 @@
+query friends {
+  seed(func: uid(Peon:1_0)) {
+    -[KNO]->l

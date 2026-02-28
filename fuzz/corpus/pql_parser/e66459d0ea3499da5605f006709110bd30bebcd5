@@ -1,0 +1,4 @@
+query frkendds {
+  seed(func: uid(Person:2_0)) { -[KNOWS]-> @filter(age >= 22) 
+  }
+}

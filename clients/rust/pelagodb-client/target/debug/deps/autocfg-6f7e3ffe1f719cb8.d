@@ -1,0 +1,10 @@
+/Users/apaxson/work/projects/pelagodb/clients/rust/pelagodb-client/target/debug/deps/autocfg-6f7e3ffe1f719cb8.d: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/error.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/rustc.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/version.rs
+
+/Users/apaxson/work/projects/pelagodb/clients/rust/pelagodb-client/target/debug/deps/libautocfg-6f7e3ffe1f719cb8.rlib: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/error.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/rustc.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/version.rs
+
+/Users/apaxson/work/projects/pelagodb/clients/rust/pelagodb-client/target/debug/deps/libautocfg-6f7e3ffe1f719cb8.rmeta: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/error.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/rustc.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/version.rs
+
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/lib.rs:
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/error.rs:
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/rustc.rs:
+/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/autocfg-1.5.0/src/version.rs:

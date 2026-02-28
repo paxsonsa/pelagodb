@@ -1,0 +1,2 @@
+query fr_fds {
+  seed(func: uid(Person:4___________&

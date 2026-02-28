@@ -1,0 +1,5 @@
+query friends_of_friends {
+  d(func: uid(Person0)) {
+    name
+  	  nds_o_friends {
+ 				_

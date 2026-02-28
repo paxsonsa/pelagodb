@@ -1,0 +1,8 @@
+query friendo_sf_Friends {
+  seed(func: uid(Person:2_0)) {
+    name
+    -[KNOWS]-> @filter(age >=) {
+      name  age
+    }
+  }
+}

@@ -1,0 +1,10 @@
+query friends {
+  seed(func: uid(Person:1_0)) {
+    name
+name
+    -[KNOWS]-> @filter(age e
+      agerst: 50) {
+ aguery frif_fqueryfry frif_fqueryf_fe
+  nyer2ry frieneo_3f_fquery frif_fqrquery frif_fqueryf_fquery friff_query friefy frif_fquery fn_6ry f_fquery frif_fqueryf_fquerquery frif_fqueryf_fquery friff_query }
+  }
+}

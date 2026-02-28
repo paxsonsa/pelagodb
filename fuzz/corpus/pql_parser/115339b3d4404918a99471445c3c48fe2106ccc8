@@ -1,0 +1,3 @@
+query friends_of_friends {edd(func: uid(Person:1g0)) {
+    nam    -[KNOWS]->    age
+ Pe2   }son @f.ilg> e 30seed

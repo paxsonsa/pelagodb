@@ -1,0 +1,1 @@
+Person @filter(age >= 30)  @filter(ast) { name, age }

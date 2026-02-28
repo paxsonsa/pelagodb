@@ -1,0 +1,2 @@
+query @filter(50) {    -[KNOWS]-> @filter(a(age >= 42)!ue{
+->= 42) uer

@@ -1,0 +1,10 @@
+query ends_wf_friends {
+  seed(func: uid(Person:1_0)) {
+    name
+    -[KNOWS]-> @filter(age euid(Person:1_0)) {
+    name
+    -[KNOWS]-> age
+    }
+  
+  }
+}

@@ -1,0 +1,1 @@
+query friends {edd(func: uid(Person:1g0)) {m     } e 30seed

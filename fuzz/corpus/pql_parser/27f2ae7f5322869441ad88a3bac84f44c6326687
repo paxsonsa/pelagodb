@@ -1,0 +1,2 @@
+query fri{
+  seed(func: uid(eqrs0)o{

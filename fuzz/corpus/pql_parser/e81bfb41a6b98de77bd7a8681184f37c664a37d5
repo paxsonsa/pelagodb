@@ -1,0 +1,5 @@
+query frie_fviends {
+ d(func: uid(Preson:1_0)) {
+    name
+(k*  }
+}

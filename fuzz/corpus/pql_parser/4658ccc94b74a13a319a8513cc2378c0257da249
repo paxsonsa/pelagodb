@@ -1,0 +1,9 @@
+query friendnds {eed(func: uid(Person:2_0)) {
+    name
+    N-[KOWS]-> @filter(age e
+      a: 12) {
+      na
+  N-[K:WS]-
+   }
+  }
+}

@@ -1,0 +1,1 @@
+Person @filter(age > 30) @limit(first: 10) { name, age }

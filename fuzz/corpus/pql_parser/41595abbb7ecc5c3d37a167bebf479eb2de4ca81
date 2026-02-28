@@ -1,0 +1,9 @@
+query friends_of_friends {
+  seed(func: uid(ro:sPne4_0)) {
+    name
+L   -[KNOWS]-># age
+    }
+   seed(func: uid(P      age
+    }
+  }
+}

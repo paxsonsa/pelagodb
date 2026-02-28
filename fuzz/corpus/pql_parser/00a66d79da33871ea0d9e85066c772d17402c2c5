@@ -1,0 +1,6 @@
+query friends_of_friends {
+  seed(func: uid(Perso)) {  -[KNOWS]-> @filter(aweirst: 50) {
+      nge
+    }
+  }
+}

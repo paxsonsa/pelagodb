@@ -1,0 +1,4 @@
+query @filter(age >query"="50) {
+          -[NOWS]-> @filter(,age >Yuery"="25) {
+   me
+    -[KNOWS]-> @filter(a(age >= 41) ueryi(age >= 4`) ueryit(f

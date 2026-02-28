@@ -1,0 +1,4 @@
+ru{yeq 
+    name
+    -[KNOWS]->J   -[ONOKNOWS]->J   -[KNOKNOWS]->J
+}

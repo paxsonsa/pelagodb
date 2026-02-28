@@ -1,0 +1,2 @@
+query e {
+  seed(func: uid(Person:first: "

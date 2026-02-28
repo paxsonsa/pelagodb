@@ -14,6 +14,7 @@
 
 use crate::cdc::CdcOperation;
 use crate::db::PelagoDb;
+use crate::failpoints;
 use crate::ids::IdAllocator;
 use crate::mutation;
 use crate::node::NodeStore;
@@ -303,6 +304,7 @@ impl EdgeStore {
 
             if emit_cdc {
                 cdc.flush(&trx, database, namespace)?;
+                failpoints::inject("edge.cascade_delete.after_cdc_flush")?;
             }
 
             mutation::commit_or_internal(trx, "cascade-delete edges for node").await?;
@@ -656,6 +658,7 @@ impl EdgeStore {
 
         // Flush CDC into same transaction
         cdc.flush(&trx, database, namespace)?;
+        failpoints::inject("edge.create.after_cdc_flush")?;
 
         // Single atomic commit
         mutation::commit_or_internal(trx, "create edge").await?;
@@ -811,6 +814,7 @@ impl EdgeStore {
 
         // Flush CDC into same transaction
         cdc.flush(&trx, database, namespace)?;
+        failpoints::inject("edge.delete.after_cdc_flush")?;
 
         // Single atomic commit
         mutation::commit_or_internal(trx, "delete edge").await?;

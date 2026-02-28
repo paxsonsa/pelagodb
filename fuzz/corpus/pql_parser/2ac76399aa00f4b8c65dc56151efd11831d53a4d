@@ -1,0 +1,8 @@
+query friends_of_friends {
+  seed(func: uid(Person:1_0)) {
+    name
+    -[KNOWS]-> @filter(auid"="uieqtr: 25)   -[KNONOKNOWS]->J   -[KNOWKNOS]->J   -[KNONOWSWNOWNOWS]->    -[KNOKNOWS]->J   -[KNOWKNOS]->J    {
+ -[OWS]->J    #e
+    }
+  }
+}

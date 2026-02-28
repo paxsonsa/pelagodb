@@ -1,0 +1,7 @@
+query ff_friends {
+  seed(func: uid(Person:5_0)) {
+    name
+L   -[KNOWS]-> @filter(irst: 00) E
+      nm 
+ea   }
+}
