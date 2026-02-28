@@ -1,16 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, GaugeCircle, Server, ShieldCheck } from "lucide-react";
 
 import { useConsoleContext } from "@/App";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { JsonInspector } from "@/components/shared/JsonInspector";
+import { PaginationControls } from "@/components/shared/PaginationControls";
 import { SectionHeader } from "@/components/shared/SectionHeader";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { apiRequest, metricsRaw, normalizeApiError } from "@/lib/api";
+import { useInterval } from "@/hooks/use-interval";
 import type {
   AuditResponse,
   HealthResponse,
@@ -20,6 +23,8 @@ import type {
   SitesResponse,
   WatchSubscriptionsResponse,
 } from "@/lib/types";
+import { MetricCard } from "./MetricCard";
+import { parsePrometheusMetrics, type ParsedMetric } from "./MetricsParser";
 
 const initialSnapshot: OpsSnapshotResponse = {
   health: null,
@@ -31,6 +36,17 @@ const initialSnapshot: OpsSnapshotResponse = {
   metrics: "",
 };
 
+type RefreshInterval = null | 10000 | 30000 | 60000;
+
+function formatRelativeTime(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ago`;
+}
+
+const AUDIT_PAGE_SIZE = 20;
+
 export default function OpsView() {
   const { session, scope, notify } = useConsoleContext();
   const [snapshot, setSnapshot] = useState<OpsSnapshotResponse>(initialSnapshot);
@@ -38,8 +54,13 @@ export default function OpsView() {
   const [auditPrincipal, setAuditPrincipal] = useState("");
   const [auditAction, setAuditAction] = useState("");
   const [showRaw, setShowRaw] = useState(false);
+  const [showRawMetrics, setShowRawMetrics] = useState(false);
+  const [refreshInterval, setRefreshInterval] = useState<RefreshInterval>(null);
+  const [lastRefreshed, setLastRefreshed] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [auditPage, setAuditPage] = useState(1);
 
-  async function loadSnapshot() {
+  const loadSnapshot = useCallback(async () => {
     setLoading(true);
 
     try {
@@ -65,36 +86,57 @@ export default function OpsView() {
       }
 
       setSnapshot({ health, sites, replication, jobs, audit, subscriptions, metrics });
+      setLastRefreshed(Date.now());
+      setAuditPage(1);
       notify("Operations snapshot refreshed");
     } catch (error) {
       notify(normalizeApiError(error), "error");
     } finally {
       setLoading(false);
     }
-  }
+  }, [scope, session, notify, auditPrincipal, auditAction]);
 
   useEffect(() => {
     void loadSnapshot();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope.database, scope.namespace]);
+  }, [scope.database, scope.namespace]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const metrics = useMemo(
+  // Auto-refresh
+  useInterval(() => {
+    void loadSnapshot();
+  }, refreshInterval);
+
+  // Elapsed timer
+  useInterval(() => {
+    if (lastRefreshed) setElapsed(Date.now() - lastRefreshed);
+  }, 1000);
+
+  const kpiCards = useMemo(
     () => [
       { label: "Sites", value: snapshot.sites?.sites.length ?? 0, icon: <Server className="h-4 w-4" /> },
-      {
-        label: "Replication Peers",
-        value: snapshot.replication?.peers.length ?? 0,
-        icon: <GaugeCircle className="h-4 w-4" />,
-      },
+      { label: "Replication Peers", value: snapshot.replication?.peers.length ?? 0, icon: <GaugeCircle className="h-4 w-4" /> },
       { label: "Jobs", value: snapshot.jobs?.jobs.length ?? 0, icon: <Activity className="h-4 w-4" /> },
-      {
-        label: "Subscriptions",
-        value: snapshot.subscriptions?.subscriptions.length ?? 0,
-        icon: <ShieldCheck className="h-4 w-4" />,
-      },
+      { label: "Subscriptions", value: snapshot.subscriptions?.subscriptions.length ?? 0, icon: <ShieldCheck className="h-4 w-4" /> },
     ],
     [snapshot.jobs?.jobs.length, snapshot.replication?.peers.length, snapshot.sites?.sites.length, snapshot.subscriptions?.subscriptions.length],
   );
+
+  const parsedMetrics = useMemo<ParsedMetric[]>(
+    () => (snapshot.metrics ? parsePrometheusMetrics(snapshot.metrics) : []),
+    [snapshot.metrics],
+  );
+
+  const auditEvents = snapshot.audit?.events ?? [];
+  const auditPageCount = Math.max(1, Math.ceil(auditEvents.length / AUDIT_PAGE_SIZE));
+  const auditStart = (Math.min(auditPage, auditPageCount) - 1) * AUDIT_PAGE_SIZE;
+  const pagedAudit = auditEvents.slice(auditStart, auditStart + AUDIT_PAGE_SIZE);
+
+  function formatTimestamp(ts: number): string {
+    if (!ts) return "-";
+    const d = new Date(ts);
+    const diffMs = Date.now() - d.getTime();
+    const relative = formatRelativeTime(diffMs);
+    return `${d.toLocaleTimeString()} (${relative})`;
+  }
 
   return (
     <section className="space-y-4">
@@ -102,13 +144,36 @@ export default function OpsView() {
         <CardHeader>
           <SectionHeader
             title="Cluster Operations"
-            description="KPI cards, state tables, and filtered audit logs with resilient metrics fallback."
+            description="KPI cards, state tables, and filtered audit logs."
             actions={
               <div className="flex items-center gap-2">
                 <StatusBadge state={snapshot.health?.status === "SERVING" ? "ok" : "warning"}>
                   Health {snapshot.health?.status ?? "unknown"}
                 </StatusBadge>
-                <Button type="button" variant="secondary" onClick={loadSnapshot} disabled={loading}>
+
+                {/* Refresh interval selector */}
+                <Select
+                  value={refreshInterval?.toString() ?? "off"}
+                  onValueChange={(v) => setRefreshInterval(v === "off" ? null : parseInt(v, 10) as RefreshInterval)}
+                >
+                  <SelectTrigger className="h-8 w-[100px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="off">Off</SelectItem>
+                    <SelectItem value="10000">10s</SelectItem>
+                    <SelectItem value="30000">30s</SelectItem>
+                    <SelectItem value="60000">60s</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                {lastRefreshed && (
+                  <span className="text-[10px] text-muted">
+                    Last: {formatRelativeTime(elapsed)}
+                  </span>
+                )}
+
+                <Button type="button" variant="secondary" onClick={() => void loadSnapshot()} disabled={loading}>
                   {loading ? "Refreshing..." : "Refresh"}
                 </Button>
               </div>
@@ -117,7 +182,7 @@ export default function OpsView() {
         </CardHeader>
         <CardContent>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {metrics.map((metric) => (
+            {kpiCards.map((metric) => (
               <div key={metric.label} className="metric-card">
                 <div className="flex items-center justify-between text-muted">
                   <span className="text-xs uppercase tracking-wide">{metric.label}</span>
@@ -180,10 +245,7 @@ export default function OpsView() {
                 </TableBody>
               </Table>
             ) : (
-              <EmptyState
-                title="No Replication Peers"
-                description="Replication state is unavailable for this namespace."
-              />
+              <EmptyState title="No Replication Peers" description="Replication state is unavailable for this namespace." />
             )}
           </CardContent>
         </Card>
@@ -229,20 +291,17 @@ export default function OpsView() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {snapshot.subscriptions.subscriptions.slice(0, 10).map((subscription) => (
-                    <TableRow key={subscription.subscription_id}>
-                      <TableCell className="font-mono text-xs">{subscription.subscription_id}</TableCell>
-                      <TableCell>{subscription.subscription_type}</TableCell>
-                      <TableCell className="font-mono text-xs text-muted">{subscription.expires_at}</TableCell>
+                  {snapshot.subscriptions.subscriptions.slice(0, 10).map((sub) => (
+                    <TableRow key={sub.subscription_id}>
+                      <TableCell className="font-mono text-xs">{sub.subscription_id}</TableCell>
+                      <TableCell>{sub.subscription_type}</TableCell>
+                      <TableCell className="font-mono text-xs text-muted">{sub.expires_at}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
             ) : (
-              <EmptyState
-                title="No Watch Subscriptions"
-                description="No active watch subscriptions found in current scope."
-              />
+              <EmptyState title="No Watch Subscriptions" description="No active watch subscriptions found in current scope." />
             )}
           </CardContent>
         </Card>
@@ -251,54 +310,50 @@ export default function OpsView() {
       <div className="grid gap-4 xl:grid-cols-2">
         <Card>
           <CardHeader>
-            <SectionHeader
-              title="Audit Stream"
-              description="Filter by principal and action for fast incident triage."
-            />
+            <SectionHeader title="Audit Stream" description="Filter by principal and action for fast incident triage." />
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
-              <Input
-                value={auditPrincipal}
-                onChange={(event) => setAuditPrincipal(event.target.value)}
-                placeholder="principal_id"
-              />
-              <Input
-                value={auditAction}
-                onChange={(event) => setAuditAction(event.target.value)}
-                placeholder="action"
-              />
-              <Button type="button" variant="secondary" onClick={loadSnapshot}>
-                Apply
-              </Button>
+              <Input value={auditPrincipal} onChange={(e) => setAuditPrincipal(e.target.value)} placeholder="principal_id" />
+              <Input value={auditAction} onChange={(e) => setAuditAction(e.target.value)} placeholder="action" />
+              <Button type="button" variant="secondary" onClick={() => void loadSnapshot()}>Apply</Button>
             </div>
 
-            {snapshot.audit?.events.length ? (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Action</TableHead>
-                    <TableHead>Principal</TableHead>
-                    <TableHead>Allowed</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {snapshot.audit.events.slice(0, 12).map((event) => (
-                    <TableRow key={event.event_id}>
-                      <TableCell>{event.action}</TableCell>
-                      <TableCell className="font-mono text-xs">{event.principal_id}</TableCell>
-                      <TableCell>{event.allowed ? "yes" : "no"}</TableCell>
+            {auditEvents.length ? (
+              <>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Timestamp</TableHead>
+                      <TableHead>Action</TableHead>
+                      <TableHead>Principal</TableHead>
+                      <TableHead>Allowed</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {pagedAudit.map((event) => (
+                      <TableRow key={event.event_id}>
+                        <TableCell className="font-mono text-xs text-muted">
+                          {formatTimestamp(event.timestamp)}
+                        </TableCell>
+                        <TableCell>{event.action}</TableCell>
+                        <TableCell className="font-mono text-xs">{event.principal_id}</TableCell>
+                        <TableCell>{event.allowed ? "yes" : "no"}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                <PaginationControls
+                  totalItems={auditEvents.length}
+                  pageSize={AUDIT_PAGE_SIZE}
+                  currentPage={auditPage}
+                  onPageChange={setAuditPage}
+                />
+              </>
             ) : (
-              <EmptyState
-                title="No Audit Events"
-                description="No events found for current filters and namespace."
-              />
+              <EmptyState title="No Audit Events" description="No events found for current filters and namespace." />
             )}
-            <Button type="button" variant="ghost" onClick={() => setShowRaw((prev) => !prev)}>
+            <Button type="button" variant="ghost" onClick={() => setShowRaw(!showRaw)}>
               {showRaw ? "Hide raw payloads" : "Show raw payloads"}
             </Button>
             {showRaw ? <JsonInspector value={snapshot.audit} maxHeight={260} /> : null}
@@ -309,21 +364,36 @@ export default function OpsView() {
           <CardHeader>
             <CardTitle>Prometheus Metrics</CardTitle>
             <CardDescription>
-              Reads from <code>/ui/api/v1/metrics/raw</code>; gracefully falls back when exporter is disabled.
+              Structured metric cards parsed from Prometheus text format.
             </CardDescription>
           </CardHeader>
-          <CardContent>
-            {snapshot.metrics ? (
-              <div className="rounded-md border border-border bg-slate-50">
-                <pre className="max-h-[420px] overflow-auto p-3 font-mono text-xs whitespace-pre-wrap scrollbar-thin">
+          <CardContent className="space-y-3">
+            {parsedMetrics.length > 0 ? (
+              <>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {parsedMetrics.slice(0, 12).map((m) => (
+                    <MetricCard key={m.name} metric={m} />
+                  ))}
+                </div>
+                <Button type="button" variant="ghost" onClick={() => setShowRawMetrics(!showRawMetrics)}>
+                  {showRawMetrics ? "Hide raw text" : "Show raw text"}
+                </Button>
+                {showRawMetrics && (
+                  <div className="rounded-md border border-border bg-surface-subtle">
+                    <pre className="max-h-[420px] overflow-auto p-3 font-mono text-xs whitespace-pre-wrap scrollbar-thin text-foreground/80">
+                      {snapshot.metrics}
+                    </pre>
+                  </div>
+                )}
+              </>
+            ) : snapshot.metrics ? (
+              <div className="rounded-md border border-border bg-surface-subtle">
+                <pre className="max-h-[420px] overflow-auto p-3 font-mono text-xs whitespace-pre-wrap scrollbar-thin text-foreground/80">
                   {snapshot.metrics}
                 </pre>
               </div>
             ) : (
-              <EmptyState
-                title="No Metrics Payload"
-                description="Refresh the operations snapshot to fetch metrics from exporter."
-              />
+              <EmptyState title="No Metrics Payload" description="Refresh the operations snapshot to fetch metrics from exporter." />
             )}
           </CardContent>
         </Card>
