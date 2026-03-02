@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pelago-operator.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "pelago-operator.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "pelago-operator.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "pelago-operator.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ include "pelago-operator.serviceAccountName" . }}
+      containers:
+        - name: pelago-operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: []
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: OPERATOR_NAMESPACE
+              value: {{ .Values.operator.namespaceScope | default "" | quote }}
+            - name: PELAGO_OPERATOR_FIELD_MANAGER
+              value: {{ .Values.operator.fieldManager | quote }}
+            - name: PELAGO_OPERATOR_REQUEUE_SECONDS
+              value: {{ .Values.operator.requeueSeconds | quote }}
+            - name: PELAGO_OPERATOR_LEADER_ELECTION
+              value: {{ .Values.operator.leaderElection.enabled | quote }}
+            - name: PELAGO_OPERATOR_LEASE_NAME
+              value: {{ .Values.operator.leaderElection.leaseName | quote }}
+            - name: PELAGO_OPERATOR_LEASE_NAMESPACE
+              value: {{ .Values.operator.leaderElection.leaseNamespace | default "" | quote }}
+            - name: PELAGO_OPERATOR_LEASE_TTL_SECONDS
+              value: {{ .Values.operator.leaderElection.leaseTtlSeconds | quote }}
+            - name: PELAGO_OPERATOR_WEBHOOK_ENABLED
+              value: {{ .Values.operator.webhook.enabled | quote }}
+            - name: PELAGO_OPERATOR_WEBHOOK_ADDR
+              value: {{ .Values.operator.webhook.addr | quote }}
+            - name: PELAGO_OPERATOR_WEBHOOK_CERT
+              value: {{ .Values.operator.webhook.certPath | quote }}
+            - name: PELAGO_OPERATOR_WEBHOOK_KEY
+              value: {{ .Values.operator.webhook.keyPath | quote }}
+          ports:
+            - name: webhook
+              containerPort: {{ .Values.webhook.service.targetPort }}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: {{ include "pelago-operator.fullname" . }}-webhook-cert
+      nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 8 }}
+      tolerations:
+{{ toYaml .Values.tolerations | indent 8 }}
+      affinity:
+{{ toYaml .Values.affinity | indent 8 }}

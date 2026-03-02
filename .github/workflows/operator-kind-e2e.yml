@@ -1,0 +1,96 @@
+name: Operator Kind E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "**"
+  schedule:
+    - cron: "45 5 * * 0"
+
+jobs:
+  kind-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+
+      - name: Install cert-manager
+        run: |
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          kubectl wait --for=condition=Available deployment/cert-manager -n cert-manager --timeout=180s
+          kubectl wait --for=condition=Available deployment/cert-manager-webhook -n cert-manager --timeout=180s
+          kubectl wait --for=condition=Available deployment/cert-manager-cainjector -n cert-manager --timeout=180s
+
+      - name: Install operator chart
+        run: |
+          helm upgrade --install pelago-operator deploy/operator/chart/pelago-operator \
+            --namespace pelagodb-system \
+            --create-namespace
+
+      - name: Create test namespace and secrets
+        run: |
+          kubectl create namespace pelagodb
+          kubectl -n pelagodb create secret generic pelagodb-secrets \
+            --from-literal=fdb.cluster='docker:docker@127.0.0.1:4500' \
+            --from-literal=api-keys='demo-key:demo' \
+            --from-literal=replication-api-key='replication-key' \
+            --from-literal=replication-ca='---BEGIN CERT---' \
+            --from-literal=replication-client-cert='---BEGIN CERT---' \
+            --from-literal=replication-client-key='---BEGIN KEY---'
+
+      - name: Apply valid PelagoSite
+        run: |
+          kubectl apply -n pelagodb -f deploy/operator/examples/single-site-basic.yaml
+          kubectl get pelagosite pelago-site1 -n pelagodb
+          kubectl get deployment pelago-site1-api -n pelagodb
+          kubectl get deployment pelago-site1-replicator -n pelagodb
+          kubectl get service pelago-site1-api -n pelagodb
+
+      - name: Validate webhook rejection on invalid spec
+        run: |
+          cat <<'YAML' > /tmp/invalid-pelagosite.yaml
+          apiVersion: pelago.pelagodb.io/v1alpha1
+          kind: PelagoSite
+          metadata:
+            name: invalid-site
+          spec:
+            site:
+              id: 1
+              name: invalid
+            fdb:
+              clusterFileSecretRef:
+                name: pelagodb-secrets
+                key: fdb.cluster
+            replicator:
+              peers:
+                - siteId: "2"
+                  endpoint: peer-a:27615
+                - siteId: "2"
+                  endpoint: peer-b:27615
+          YAML
+
+          if kubectl apply -n pelagodb -f /tmp/invalid-pelagosite.yaml; then
+            echo "expected invalid PelagoSite to be rejected by validating webhook"
+            exit 1
+          fi
+
+      - name: Garbage collection check
+        run: |
+          kubectl delete pelagosite pelago-site1 -n pelagodb --wait=true
+          sleep 10
+          if kubectl get deployment pelago-site1-api -n pelagodb >/dev/null 2>&1; then
+            echo "expected api deployment to be garbage collected"
+            exit 1
+          fi
+          if kubectl get deployment pelago-site1-replicator -n pelagodb >/dev/null 2>&1; then
+            echo "expected replicator deployment to be garbage collected"
+            exit 1
+          fi

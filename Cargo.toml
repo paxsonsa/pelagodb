@@ -8,6 +8,7 @@ members = [
     "crates/pelago-api",
     "crates/pelago-server",
     "crates/pelago-cli",
+    "crates/pelago-operator",
 ]
 
 [workspace.package]

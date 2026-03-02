@@ -1,0 +1,52 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/pelagodb/pelago-operator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
+
+operator:
+  namespaceScope: ""
+  fieldManager: pelago-operator
+  requeueSeconds: 30
+  leaderElection:
+    enabled: true
+    leaseName: pelago-operator-lock
+    leaseNamespace: ""
+    leaseTtlSeconds: 15
+  webhook:
+    enabled: true
+    addr: 0.0.0.0:9443
+    certPath: /tls/tls.crt
+    keyPath: /tls/tls.key
+
+webhook:
+  caBundle: ""
+  service:
+    port: 443
+    targetPort: 9443
+  failurePolicy:
+    mutating: Ignore
+    validating: Fail
+
+certManager:
+  enabled: true
+  issuerName: pelago-operator-selfsigned
+  issuerKind: Issuer
+  issuerGroup: cert-manager.io
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
