@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tonic::metadata::MetadataValue;
+use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 use tonic::Request;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -31,12 +32,103 @@ struct ReplicationScope {
     namespace: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplicationTlsMode {
+    Disabled,
+    SystemRoots,
+    CustomCa,
+    MutualTls,
+}
+
+impl ReplicationTlsMode {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "disabled" | "off" | "none" => Ok(Self::Disabled),
+            "system-roots" | "system_roots" | "system" => Ok(Self::SystemRoots),
+            "custom-ca" | "custom_ca" => Ok(Self::CustomCa),
+            "mutual-tls" | "mutual_tls" | "mtls" => Ok(Self::MutualTls),
+            other => Err(format!(
+                "invalid PELAGO_REPLICATION_TLS_MODE '{}'; expected one of: disabled, system-roots, custom-ca, mutual-tls",
+                other
+            )),
+        }
+    }
+
+    fn tls_required(self) -> bool {
+        self != Self::Disabled
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReplicationTlsConfig {
+    mode: ReplicationTlsMode,
+    ca_path: Option<String>,
+    cert_path: Option<String>,
+    key_path: Option<String>,
+    server_name: Option<String>,
+}
+
+impl Default for ReplicationTlsConfig {
+    fn default() -> Self {
+        Self {
+            mode: ReplicationTlsMode::Disabled,
+            ca_path: None,
+            cert_path: None,
+            key_path: None,
+            server_name: None,
+        }
+    }
+}
+
+impl ReplicationTlsConfig {
+    fn from_server_config(config: &ServerConfig) -> Result<Self, String> {
+        let mode = ReplicationTlsMode::parse(&config.replication_tls_mode)?;
+        let ca_path = normalize_opt(config.replication_tls_ca.clone());
+        let cert_path = normalize_opt(config.replication_tls_cert.clone());
+        let key_path = normalize_opt(config.replication_tls_key.clone());
+        let server_name = normalize_opt(config.replication_tls_server_name.clone());
+
+        match mode {
+            ReplicationTlsMode::Disabled | ReplicationTlsMode::SystemRoots => {}
+            ReplicationTlsMode::CustomCa => {
+                if ca_path.is_none() {
+                    return Err(
+                        "PELAGO_REPLICATION_TLS_CA is required when replication TLS mode is custom-ca"
+                            .to_string(),
+                    );
+                }
+            }
+            ReplicationTlsMode::MutualTls => {
+                if ca_path.is_none() || cert_path.is_none() || key_path.is_none() {
+                    return Err(
+                        "PELAGO_REPLICATION_TLS_CA, PELAGO_REPLICATION_TLS_CERT, and PELAGO_REPLICATION_TLS_KEY are required when replication TLS mode is mutual-tls"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        Ok(Self {
+            mode,
+            ca_path,
+            cert_path,
+            key_path,
+            server_name,
+        })
+    }
+
+    fn mode(&self) -> ReplicationTlsMode {
+        self.mode
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplicatorConfig {
     pub enabled: bool,
     pub batch_size: usize,
     pub poll_ms: u64,
     pub api_key: Option<String>,
+    tls: ReplicationTlsConfig,
     pub lease_enabled: bool,
     pub lease_ttl_ms: u64,
     pub lease_heartbeat_ms: u64,
@@ -49,6 +141,13 @@ impl ReplicatorConfig {
         let peers = parse_peers(&config.replication_peers);
         let scopes = parse_replication_scopes(config);
         let enabled = config.replication_enabled.unwrap_or(!peers.is_empty());
+        let tls = match ReplicationTlsConfig::from_server_config(config) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                warn!("{err}; falling back to replication TLS disabled");
+                ReplicationTlsConfig::default()
+            }
+        };
         let lease_heartbeat_ms = config.replication_lease_heartbeat_ms.max(200);
         let lease_ttl_ms = config
             .replication_lease_ttl_ms
@@ -60,6 +159,7 @@ impl ReplicatorConfig {
             batch_size: config.replication_batch_size.max(1),
             poll_ms: config.replication_poll_ms.max(50),
             api_key: config.replication_api_key.clone(),
+            tls,
             lease_enabled: config.replication_lease_enabled,
             lease_ttl_ms,
             lease_heartbeat_ms,
@@ -141,7 +241,7 @@ async fn run_peer_replicator(
     peer: ReplicationPeer,
     shutdown_rx: watch::Receiver<bool>,
 ) {
-    let peer_endpoint = normalize_endpoint(&peer.endpoint);
+    let peer_endpoint = normalize_endpoint(&peer.endpoint, config.tls.mode().tls_required());
     info!(
         "starting replicator for remote site {} at {} for {}/{}",
         peer.remote_site_id, peer_endpoint, scope.database, scope.namespace
@@ -223,7 +323,7 @@ async fn run_peer_replicator(
             continue;
         }
 
-        let mut client = match ReplicationServiceClient::connect(peer_endpoint.clone()).await {
+        let mut client = match connect_replication_client(&config.tls, &peer_endpoint).await {
             Ok(client) => client,
             Err(err) => {
                 warn!(
@@ -749,12 +849,88 @@ fn parse_replication_scopes(config: &ServerConfig) -> Vec<ReplicationScope> {
     }]
 }
 
-fn normalize_endpoint(endpoint: &str) -> String {
+fn normalize_endpoint(endpoint: &str, tls_required: bool) -> String {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
+    } else if tls_required {
+        format!("https://{}", endpoint)
     } else {
         format!("http://{}", endpoint)
     }
+}
+
+fn normalize_opt(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+async fn connect_replication_client(
+    tls: &ReplicationTlsConfig,
+    endpoint: &str,
+) -> Result<ReplicationServiceClient<tonic::transport::Channel>, String> {
+    if endpoint.starts_with("https://") && !tls.mode.tls_required() {
+        return Err(
+            "HTTPS replication endpoint requires replication TLS mode != disabled".to_string(),
+        );
+    }
+    if endpoint.starts_with("http://") && tls.mode.tls_required() {
+        return Err("replication TLS mode requires HTTPS endpoint".to_string());
+    }
+
+    let mut transport = Endpoint::from_shared(endpoint.to_string())
+        .map_err(|e| format!("invalid replication endpoint '{}': {}", endpoint, e))?;
+
+    if tls.mode.tls_required() {
+        let mut tls_config = ClientTlsConfig::new();
+        if let Some(server_name) = tls.server_name.as_deref() {
+            tls_config = tls_config.domain_name(server_name.to_string());
+        }
+
+        match tls.mode {
+            ReplicationTlsMode::Disabled => {}
+            ReplicationTlsMode::SystemRoots => {}
+            ReplicationTlsMode::CustomCa | ReplicationTlsMode::MutualTls => {
+                let ca_path = tls.ca_path.as_deref().ok_or_else(|| {
+                    "replication TLS mode requires PELAGO_REPLICATION_TLS_CA".to_string()
+                })?;
+                let ca_pem = std::fs::read(ca_path).map_err(|e| {
+                    format!("failed to read replication TLS CA '{}': {}", ca_path, e)
+                })?;
+                tls_config = tls_config.ca_certificate(Certificate::from_pem(ca_pem));
+            }
+        }
+
+        if tls.mode == ReplicationTlsMode::MutualTls {
+            let cert_path = tls.cert_path.as_deref().ok_or_else(|| {
+                "replication mutual TLS requires PELAGO_REPLICATION_TLS_CERT".to_string()
+            })?;
+            let key_path = tls.key_path.as_deref().ok_or_else(|| {
+                "replication mutual TLS requires PELAGO_REPLICATION_TLS_KEY".to_string()
+            })?;
+            let cert_pem = std::fs::read(cert_path).map_err(|e| {
+                format!("failed to read replication TLS cert '{}': {}", cert_path, e)
+            })?;
+            let key_pem = std::fs::read(key_path)
+                .map_err(|e| format!("failed to read replication TLS key '{}': {}", key_path, e))?;
+            tls_config = tls_config.identity(Identity::from_pem(cert_pem, key_pem));
+        }
+
+        transport = transport
+            .tls_config(tls_config)
+            .map_err(|e| format!("invalid replication TLS configuration: {}", e))?;
+    }
+
+    let channel = transport
+        .connect()
+        .await
+        .map_err(|e| format!("connection error: {}", e))?;
+    Ok(ReplicationServiceClient::new(channel))
 }
 
 fn build_replicator_holder_id() -> String {
@@ -787,12 +963,16 @@ mod tests {
     #[test]
     fn test_normalize_endpoint() {
         assert_eq!(
-            normalize_endpoint("127.0.0.1:5001"),
+            normalize_endpoint("127.0.0.1:5001", false),
             "http://127.0.0.1:5001"
         );
         assert_eq!(
-            normalize_endpoint("http://127.0.0.1:5001"),
+            normalize_endpoint("http://127.0.0.1:5001", false),
             "http://127.0.0.1:5001"
+        );
+        assert_eq!(
+            normalize_endpoint("127.0.0.1:5001", true),
+            "https://127.0.0.1:5001"
         );
     }
 
@@ -829,5 +1009,42 @@ mod tests {
         assert_eq!(scopes.len(), 1);
         assert_eq!(scopes[0].database, "tenant");
         assert_eq!(scopes[0].namespace, "graph");
+    }
+
+    #[test]
+    fn test_parse_replication_tls_mode() {
+        assert_eq!(
+            ReplicationTlsMode::parse("disabled").expect("disabled"),
+            ReplicationTlsMode::Disabled
+        );
+        assert_eq!(
+            ReplicationTlsMode::parse("system-roots").expect("system-roots"),
+            ReplicationTlsMode::SystemRoots
+        );
+        assert_eq!(
+            ReplicationTlsMode::parse("custom-ca").expect("custom-ca"),
+            ReplicationTlsMode::CustomCa
+        );
+        assert_eq!(
+            ReplicationTlsMode::parse("mutual-tls").expect("mutual-tls"),
+            ReplicationTlsMode::MutualTls
+        );
+        assert!(ReplicationTlsMode::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn test_replication_tls_config_validation() {
+        let mut cfg = ServerConfig::default();
+        cfg.replication_tls_mode = "custom-ca".to_string();
+        assert!(ReplicationTlsConfig::from_server_config(&cfg).is_err());
+
+        cfg.replication_tls_ca = Some("/tmp/ca.pem".to_string());
+        assert!(ReplicationTlsConfig::from_server_config(&cfg).is_ok());
+
+        cfg.replication_tls_mode = "mutual-tls".to_string();
+        assert!(ReplicationTlsConfig::from_server_config(&cfg).is_err());
+        cfg.replication_tls_cert = Some("/tmp/cert.pem".to_string());
+        cfg.replication_tls_key = Some("/tmp/key.pem".to_string());
+        assert!(ReplicationTlsConfig::from_server_config(&cfg).is_ok());
     }
 }

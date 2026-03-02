@@ -240,6 +240,26 @@ pub struct ServerConfig {
     #[arg(long, env = "PELAGO_REPLICATION_API_KEY")]
     pub replication_api_key: Option<String>,
 
+    /// TLS mode for replication pull clients: disabled, system-roots, custom-ca, mutual-tls
+    #[arg(long, env = "PELAGO_REPLICATION_TLS_MODE", default_value = "disabled")]
+    pub replication_tls_mode: String,
+
+    /// CA bundle path for replication TLS verification (custom-ca/mutual-tls)
+    #[arg(long, env = "PELAGO_REPLICATION_TLS_CA")]
+    pub replication_tls_ca: Option<String>,
+
+    /// Client cert path for replication mTLS
+    #[arg(long, env = "PELAGO_REPLICATION_TLS_CERT")]
+    pub replication_tls_cert: Option<String>,
+
+    /// Client key path for replication mTLS
+    #[arg(long, env = "PELAGO_REPLICATION_TLS_KEY")]
+    pub replication_tls_key: Option<String>,
+
+    /// Optional SNI override for replication TLS
+    #[arg(long, env = "PELAGO_REPLICATION_TLS_SERVER_NAME")]
+    pub replication_tls_server_name: Option<String>,
+
     /// Require active lease for replication worker execution
     #[arg(
         long,
@@ -419,6 +439,11 @@ impl Default for ServerConfig {
             replication_batch_size: 512,
             replication_poll_ms: 300,
             replication_api_key: None,
+            replication_tls_mode: "disabled".to_string(),
+            replication_tls_ca: None,
+            replication_tls_cert: None,
+            replication_tls_key: None,
+            replication_tls_server_name: None,
             replication_lease_enabled: true,
             replication_lease_ttl_ms: 10_000,
             replication_lease_heartbeat_ms: 2_000,

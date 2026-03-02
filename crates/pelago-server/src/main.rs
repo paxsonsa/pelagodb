@@ -753,6 +753,14 @@ fn config_key_env_pairs() -> &'static [(&'static str, &'static str)] {
         ("replication_batch_size", "PELAGO_REPLICATION_BATCH_SIZE"),
         ("replication_poll_ms", "PELAGO_REPLICATION_POLL_MS"),
         ("replication_api_key", "PELAGO_REPLICATION_API_KEY"),
+        ("replication_tls_mode", "PELAGO_REPLICATION_TLS_MODE"),
+        ("replication_tls_ca", "PELAGO_REPLICATION_TLS_CA"),
+        ("replication_tls_cert", "PELAGO_REPLICATION_TLS_CERT"),
+        ("replication_tls_key", "PELAGO_REPLICATION_TLS_KEY"),
+        (
+            "replication_tls_server_name",
+            "PELAGO_REPLICATION_TLS_SERVER_NAME",
+        ),
         (
             "replication_lease_enabled",
             "PELAGO_REPLICATION_LEASE_ENABLED",
