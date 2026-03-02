@@ -17,31 +17,47 @@ PelagoDB is organized into four layers inside each site. Cross-site replication 
 ```mermaid
 graph TD
     subgraph Clients["Clients"]
-        CLI["pelago-cli\nCLI · REPL · Admin"]
-        SDKs["SDKs\nPython · Elixir · Rust · Swift"]
-        UI["Web Console\nembedded UI"]
+        CLI["`**pelago-cli**
+CLI · REPL · Admin`"]
+        SDKs["`**SDKs**
+Python · Elixir · Rust · Swift`"]
+        UI["`**Web Console**
+embedded UI`"]
     end
 
     subgraph APILayer["API Layer"]
-        SRV["pelago-server\ngRPC runtime · docs server · UI server"]
-        SVCAPI["pelago-api\nSchemaService · NodeService · EdgeService\nQueryService · WatchService\nAuthService · AdminService · ReplicationService"]
+        SRV["`**pelago-server**
+gRPC runtime · docs server · UI server`"]
+        SVCAPI["`**pelago-api**
+SchemaService · NodeService · EdgeService
+QueryService · WatchService
+AuthService · AdminService · ReplicationService`"]
         SRV --> SVCAPI
     end
 
     subgraph CoreLayer["Core Layer"]
-        CORE["pelago-core\ntypes · schema registry · config · errors"]
-        PROTO["pelago-proto\nprotobuf / gRPC contracts"]
-        QUERY["pelago-query\nCEL evaluator · PQL parser / compiler / executor"]
+        CORE["`**pelago-core**
+types · schema registry · config · errors`"]
+        PROTO["`**pelago-proto**
+protobuf / gRPC contracts`"]
+        QUERY["`**pelago-query**
+CEL evaluator · PQL parser / compiler / executor`"]
     end
 
     subgraph StorageLayer["Storage Layer · pelago-storage"]
-        FDB[("FoundationDB\nsource of truth\nnodes · edges · schema · indexes · IDs")]
-        CDC(["CDC Log\nversionstamp-ordered mutations"])
+        FDB[(`**FoundationDB**
+source of truth
+nodes · edges · schema · indexes · IDs`)]
+        CDC([`**CDC Log**
+versionstamp-ordered mutations`])
 
         subgraph CDCConsumers["CDC consumers"]
-            REP["Replicator\npull CDC from remote peers"]
-            WATCH["Watch Streams\nclient change subscriptions"]
-            CACHE["RocksDB Cache\nCDC projector · optional read acceleration"]
+            REP["`**Replicator**
+pull CDC from remote peers`"]
+            WATCH["`**Watch Streams**
+client change subscriptions`"]
+            CACHE["`**RocksDB Cache**
+CDC projector · optional read acceleration`"]
         end
 
         FDB --> CDC
@@ -50,14 +66,17 @@ graph TD
         CDC --> CACHE
     end
 
-    KOP["pelago-operator\nKubernetes CRD controller\nmanages site lifecycle · outside data path"]
+    KOP["`**pelago-operator**
+Kubernetes CRD controller
+manages site lifecycle · outside data path`"]
 
     CLI -->|gRPC| SRV
     SDKs -->|gRPC| SRV
     UI -->|HTTP| SRV
     SVCAPI --> CORE
     SVCAPI --> FDB
-    REP <-->|"gRPC PullCdcEvents"| REMOTE[("Remote Site\nsame layout")]
+    REP <-->|"gRPC PullCdcEvents"| REMOTE[(`**Remote Site**
+same layout`)]
     KOP -. manages .-> SRV
 ```
 
