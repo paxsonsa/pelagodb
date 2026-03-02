@@ -123,6 +123,7 @@ export PELAGO_UI_ADDR=127.0.0.1:4080
 
 ## Related
 
+- [Kubernetes Operator](kubernetes-operator.md) — operator-managed Kubernetes deployment
 - [Kubernetes](kubernetes.md) — K8s deployment
 - [Configuration Reference](../reference/configuration.md) — all settings
 - [Security Setup](security-setup.md) — auth configuration

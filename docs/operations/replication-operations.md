@@ -31,6 +31,16 @@ If source sites require authentication:
 export PELAGO_REPLICATION_API_KEY=<key>
 ```
 
+Optional TLS for peer links:
+
+```bash
+export PELAGO_REPLICATION_TLS_MODE=mutual-tls
+export PELAGO_REPLICATION_TLS_CA=/etc/pelago/tls/ca.pem
+export PELAGO_REPLICATION_TLS_CERT=/etc/pelago/tls/tls.crt
+export PELAGO_REPLICATION_TLS_KEY=/etc/pelago/tls/tls.key
+export PELAGO_REPLICATION_TLS_SERVER_NAME=site1.internal.example
+```
+
 ## Lease Configuration
 
 Lease gating ensures only one replicator actively pulls per scope:

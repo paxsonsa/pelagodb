@@ -113,7 +113,7 @@ Reset between rehearsals:
 ```
 
 Talking points:
-- Deployment options: local single-site, local multi-site (`docker-compose.multisite.yml`), Kubernetes (`deploy/k8s`)
+- Deployment options: local single-site, local multi-site (`docker-compose.multisite.yml`), Kubernetes operator (`deploy/operator/chart/pelago-operator`), legacy static manifests (`deploy/k8s`)
 - Context routing by server/database/namespace
 
 ### M2: Schema Design (8 min)

@@ -69,6 +69,11 @@ Each env var has a matching CLI flag in kebab-case (e.g., `PELAGO_SITE_ID` → `
 | `PELAGO_REPLICATION_BATCH_SIZE` | `512` | Batch size for CDC pull |
 | `PELAGO_REPLICATION_POLL_MS` | `300` | Poll interval in milliseconds |
 | `PELAGO_REPLICATION_API_KEY` | — | API key for authenticating to source |
+| `PELAGO_REPLICATION_TLS_MODE` | `disabled` | `disabled`, `system-roots`, `custom-ca`, `mutual-tls` |
+| `PELAGO_REPLICATION_TLS_CA` | — | CA bundle path for `custom-ca` / `mutual-tls` |
+| `PELAGO_REPLICATION_TLS_CERT` | — | Client cert path for `mutual-tls` |
+| `PELAGO_REPLICATION_TLS_KEY` | — | Client key path for `mutual-tls` |
+| `PELAGO_REPLICATION_TLS_SERVER_NAME` | — | Optional SNI override for TLS peer verification |
 | `PELAGO_REPLICATION_LEASE_ENABLED` | `true` | Enable lease-gated singleton |
 | `PELAGO_REPLICATION_LEASE_TTL_MS` | `10000` | Lease time-to-live |
 | `PELAGO_REPLICATION_LEASE_HEARTBEAT_MS` | `2000` | Lease heartbeat interval |

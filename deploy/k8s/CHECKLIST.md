@@ -1,4 +1,7 @@
-# Kubernetes Rollout Checklist (Centralized Replicator)
+# Kubernetes Rollout Checklist (Legacy Static Manifests)
+
+For new environments, prefer the operator workflow documented in:
+- `docs/operations/kubernetes-operator.md`
 
 ## Topology Intent
 

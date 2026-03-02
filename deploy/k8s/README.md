@@ -1,4 +1,10 @@
-# PelagoDB Kubernetes Deployment (Centralized Replicator)
+# PelagoDB Kubernetes Deployment (Legacy Static Manifests)
+
+This directory is retained for manual/static Kubernetes deployments.
+
+Preferred path for new installs: use the operator + `PelagoSite` CR:
+- `docs/operations/kubernetes-operator.md`
+- `deploy/operator/chart/pelago-operator`
 
 This folder provides a split deployment model:
 

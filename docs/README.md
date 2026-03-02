@@ -28,7 +28,7 @@ Full deep dive into building applications on PelagoDB.
 Everything needed to deploy and operate PelagoDB in production.
 1. [Installation](getting-started/installation.md) → [Architecture](concepts/architecture.md)
 2. [Replication](concepts/replication.md) → [Caching and Consistency](concepts/caching-and-consistency.md)
-3. [Deployment](operations/deployment.md) → [Kubernetes](operations/kubernetes.md)
+3. [Deployment](operations/deployment.md) → [Kubernetes Operator](operations/kubernetes-operator.md) → [Kubernetes](operations/kubernetes.md)
 4. [Security Setup](operations/security-setup.md) → [Monitoring](operations/monitoring.md)
 5. [Production Checklist](operations/production-checklist.md) → [Backup and Recovery](operations/backup-and-recovery.md)
 
@@ -108,7 +108,8 @@ Prepare for live demos and presentations.
 
 ### [Operations](operations/)
 - [Deployment](operations/deployment.md) — single-site, multi-site, Docker
-- [Kubernetes](operations/kubernetes.md) — K8s manifests and HPA
+- [Kubernetes Operator](operations/kubernetes-operator.md) — operator-managed deployments
+- [Kubernetes](operations/kubernetes.md) — legacy static manifests and migration mapping
 - [Security Setup](operations/security-setup.md) — auth configuration
 - [Replication Operations](operations/replication-operations.md) — peer management
 - [Monitoring](operations/monitoring.md) — metrics and health checks
