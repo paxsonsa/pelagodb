@@ -10,6 +10,115 @@ PelagoDB is a schema-first graph database built on FoundationDB for teams that n
 
 It combines low-level durability/consistency from FoundationDB with high-level graph primitives and developer tooling (gRPC APIs, CLI, SDKs, datasets, and ops scripts).
 
+## Architecture at a Glance
+
+PelagoDB is organized into four layers inside each site. Cross-site replication is pull-based over gRPC — each site's replicator reaches out to peers rather than peers pushing in.
+
+```mermaid
+graph TD
+    subgraph Clients["Clients"]
+        CLI["pelago-cli\nCLI · REPL · Admin"]
+        SDKs["SDKs\nPython · Elixir · Rust · Swift"]
+        UI["Web Console\nembedded UI"]
+    end
+
+    subgraph APILayer["API Layer"]
+        SRV["pelago-server\ngRPC runtime · docs server · UI server"]
+        SVCAPI["pelago-api\nSchemaService · NodeService · EdgeService\nQueryService · WatchService\nAuthService · AdminService · ReplicationService"]
+        SRV --> SVCAPI
+    end
+
+    subgraph CoreLayer["Core Layer"]
+        CORE["pelago-core\ntypes · schema registry · config · errors"]
+        PROTO["pelago-proto\nprotobuf / gRPC contracts"]
+        QUERY["pelago-query\nCEL evaluator · PQL parser / compiler / executor"]
+    end
+
+    subgraph StorageLayer["Storage Layer · pelago-storage"]
+        FDB[("FoundationDB\nsource of truth\nnodes · edges · schema · indexes · IDs")]
+        CDC(["CDC Log\nversionstamp-ordered mutations"])
+
+        subgraph CDCConsumers["CDC consumers"]
+            REP["Replicator\npull CDC from remote peers"]
+            WATCH["Watch Streams\nclient change subscriptions"]
+            CACHE["RocksDB Cache\nCDC projector · optional read acceleration"]
+        end
+
+        FDB --> CDC
+        CDC --> REP
+        CDC --> WATCH
+        CDC --> CACHE
+    end
+
+    KOP["pelago-operator\nKubernetes CRD controller\nmanages site lifecycle · outside data path"]
+
+    CLI -->|gRPC| SRV
+    SDKs -->|gRPC| SRV
+    UI -->|HTTP| SRV
+    SVCAPI --> CORE
+    SVCAPI --> FDB
+    REP <-->|"gRPC PullCdcEvents"| REMOTE[("Remote Site\nsame layout")]
+    KOP -. manages .-> SRV
+```
+
+### Components
+
+#### Clients
+
+**`pelago-cli`** — The official command-line binary. Ships a full interactive REPL for PQL queries, plus subcommands for schema registration, node/edge CRUD, admin operations, and replication status checks.
+
+**Client SDKs** (`clients/python`, `clients/elixir`, `clients/rust`, `clients/swift`) — Language-native wrappers around the gRPC API. Use these to integrate PelagoDB into application code without writing raw protobuf calls.
+
+**Web Console (UI)** — An optional embedded web UI served by `pelago-server`. Includes a graph explorer, multi-tab query studio, schema browser, and ops dashboard. Built assets are served under `/ui/` when `PELAGO_UI_ENABLED=true`.
+
+---
+
+#### API Layer
+
+**`pelago-server`** — The main gRPC server binary. Wires together all service handlers, owns the runtime lifecycle, and optionally starts the embedded docs server and UI server alongside the primary gRPC listener.
+
+**`pelago-api`** — Service handler implementations. Each gRPC service lives here and coordinates between the core and storage layers:
+
+| Service | Responsibility |
+|---|---|
+| `SchemaService` | Schema registration, validation, versioning |
+| `NodeService` / `EdgeService` | CRUD with schema validation and indexing |
+| `QueryService` | CEL `find`, PQL traversal, pagination |
+| `WatchService` | Point / query / namespace change subscriptions |
+| `AuthService` | Authentication tokens and identity |
+| `AdminService` | Namespace lifecycle, retention, admin surfaces |
+| `ReplicationService` | Exposes CDC stream to remote replicators |
+
+---
+
+#### Core Layer
+
+**`pelago-core`** — Shared vocabulary for the whole system: type definitions, schema registry logic, server configuration, and error types. All other crates depend on this.
+
+**`pelago-proto`** — Protobuf definitions and generated gRPC stubs. This is the API contract between all clients and the server. Changes here ripple outward to every SDK.
+
+**`pelago-query`** — The query engine. Implements a CEL expression evaluator for property filtering (`find` queries) and a full PQL parser, compiler, and executor for graph-native traversal queries and the interactive REPL.
+
+---
+
+#### Storage Layer (`pelago-storage`)
+
+**FoundationDB** — The transactional source of truth. Every node, edge, schema definition, index entry, and ID lives here. PelagoDB inherits FDB's strict serializability and multi-key ACID transactions.
+
+**CDC Log** — A versionstamp-ordered log of every mutation, written atomically inside the same FDB transaction that commits the change. Three downstream consumers read from this single stream, which is why replication, watch, and caching all share consistent ordering semantics.
+
+**Replicator** — A pull-based CDC worker. Connects to remote sites via `ReplicationService.PullCdcEvents`, reads events since its last checkpoint, applies them locally with ownership/LWW conflict policy, then mirrors successfully applied events back into the *local* CDC. This mirroring step is what keeps watch streams and the read cache coherent on receiving sites without each API node running its own pull loop.
+
+**Watch Streams** — Pushes filtered CDC events to connected gRPC streams for `WatchPoint`, `WatchQuery`, and `WatchNamespace` subscriptions. Supports `resume_after` versionstamp so clients survive reconnects without missing events.
+
+**RocksDB Cache** — An optional local read-acceleration layer. The CDC projector consumes the local CDC log (including events mirrored in by the replicator) and materializes node/edge state into RocksDB. Always derivative — FoundationDB is the system of record and the cache can be rebuilt at any time.
+
+---
+
+#### Operator
+
+**`pelago-operator`** — A Kubernetes CRD controller that manages PelagoDB site lifecycle: creating deployments, configuring topology, handling rolling upgrades, and managing the split between API nodes and replicator workers. It sits outside the data path and never touches query or replication traffic directly.
+
 ## Why Pelago?
 `Pelago` is a play on *archipelago*: a connected group of islands.
 
@@ -205,12 +314,14 @@ Open `http://127.0.0.1:4080/ui/`
 - Watch API: `docs/reference/watch-api.md`
 - Replication: `docs/concepts/replication.md`
 - Operations: `docs/operations/deployment.md`
+- Kubernetes operator: `docs/operations/kubernetes-operator.md`
 - Simulation/Fuzzing runbook: `docs/operations/simulation-fuzzing.md`
 - Configuration: `docs/reference/configuration.md`
 - Tutorials: `docs/tutorials/build-a-social-graph.md`
 - API protocol: `proto/pelago.proto`
 - CLI crate: `crates/pelago-cli`
 - Server crate: `crates/pelago-server`
+- Operator crate: `crates/pelago-operator`
 - Client SDKs: `clients/README.md`
 - Example datasets: `datasets/README.md`
 
