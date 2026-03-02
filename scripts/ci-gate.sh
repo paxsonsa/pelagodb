@@ -93,23 +93,27 @@ if [[ "$RUN_IGNORED" == "1" && "$PROVISIONED_LANE" != "1" ]]; then
   exit 2
 fi
 
-echo "[1/11] format"
+echo "[1/13] format"
 run cargo fmt --all -- --check
 
-echo "[2/11] compile workspace"
+echo "[2/13] compile workspace"
 run cargo check --workspace
 
-echo "[3/11] unit+component tests"
+echo "[3/13] unit+component tests"
 run cargo test --workspace --all-targets --no-fail-fast
 
-echo "[4/11] optional ignored integration tests"
+echo "[4/13] operator crate checks"
+run cargo check -p pelago-operator
+run cargo test -p pelago-operator --all-targets
+
+echo "[5/13] optional ignored integration tests"
 if [[ "$RUN_IGNORED" == "1" ]]; then
   run cargo test --workspace --all-targets -- --ignored --nocapture --test-threads=1
 else
   echo "skipped (set PELAGO_RUN_IGNORED_TESTS=1 and PELAGO_PROVISIONED_LANE=1 to enable)"
 fi
 
-echo "[5/11] optional S1-S6 performance gates"
+echo "[6/13] optional S1-S6 performance gates"
 if [[ "$ENFORCE_PERF_GATES" == "1" ]]; then
   PERF_NAMESPACE_TO_USE="$PERF_NAMESPACE"
   PERF_SEED_NODE_ID="1_0"
@@ -209,14 +213,14 @@ else
   echo "skipped (set PELAGO_ENFORCE_PERF_GATES=1 to enable)"
 fi
 
-echo "[6/11] optional deterministic simulation smoke"
+echo "[7/13] optional deterministic simulation smoke"
 if [[ "$RUN_SIMULATION_TESTS" == "1" ]]; then
   run cargo test -p pelago-storage --features failpoints --test simulation_tests -- --ignored --nocapture --test-threads=1
 else
   echo "skipped (set PELAGO_RUN_SIMULATION_TESTS=1 to enable)"
 fi
 
-echo "[7/11] optional fuzz smoke"
+echo "[8/13] optional fuzz smoke"
 if [[ "$RUN_FUZZ_SMOKE" == "1" ]]; then
   if ! command -v cargo-fuzz >/dev/null 2>&1; then
     echo "error: cargo-fuzz is required when PELAGO_RUN_FUZZ_SMOKE=1"
@@ -229,20 +233,24 @@ else
   echo "skipped (set PELAGO_RUN_FUZZ_SMOKE=1 to enable)"
 fi
 
-echo "[8/11] sdk scripts lint"
+echo "[9/13] sdk scripts lint"
 run bash -n scripts/*.sh clients/python/scripts/*.sh clients/elixir/scripts/*.sh clients/swift/Scripts/*.sh
 
-echo "[9/11] python syntax checks"
+echo "[10/13] python syntax checks"
 run "$PYTHON_BIN" -m py_compile \
   clients/python/pelagodb/client.py \
   datasets/load_dataset.py \
   scripts/perf-benchmark.py \
   scripts/query-scaleout-check.py
 
-echo "[10/11] python harness unit tests"
+echo "[11/13] python harness unit tests"
 run "$PYTHON_BIN" -m unittest scripts/test_perf_benchmark.py
 
-echo "[11/11] rust client sdk compile"
+echo "[12/13] helm chart checks"
+run helm lint deploy/operator/chart/pelago-operator
+run helm template pelago-operator deploy/operator/chart/pelago-operator >/dev/null
+
+echo "[13/13] rust client sdk compile"
 run cargo check --manifest-path clients/rust/pelagodb-client/Cargo.toml
 
 echo "CI gate checks completed"
