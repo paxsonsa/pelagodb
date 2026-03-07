@@ -246,6 +246,127 @@ class PelagoClient:
         return self.query.ExecutePQL(req, metadata=self._metadata())
 
     # ----------------------
+    # Typed schema layer
+    # ----------------------
+
+    def register(self, namespace_or_model) -> None:
+        """Register a Namespace (all its entities) or a single Entity.
+
+        For Namespace: registers all inner Entity classes in that namespace.
+        For Entity without namespace: registers in the client's default namespace.
+        """
+        from pelagodb.namespace_view import NamespaceView
+        from pelagodb.schema import Entity, Namespace
+
+        if isinstance(namespace_or_model, type) and issubclass(namespace_or_model, Namespace):
+            ns_cls = namespace_or_model
+            ns_name = ns_cls.__pelago_ns_resolved_name__
+            if ns_name is None:
+                raise ValueError(
+                    f"Cannot register templated namespace {ns_cls.__name__}. "
+                    f"Call .bind() first: {ns_cls.__name__}.bind(...)"
+                )
+            view = NamespaceView(self, ns_name)
+            for entity_cls in ns_cls.__pelago_entities__.values():
+                view.register_schema(entity_cls)
+        elif isinstance(namespace_or_model, type) and issubclass(namespace_or_model, Entity):
+            self.register_schema_dict(namespace_or_model.to_schema_dict())
+        else:
+            raise TypeError(f"Expected Namespace or Entity subclass, got {type(namespace_or_model)}")
+
+    def ns(self, namespace) -> "NamespaceView":
+        """Get a namespace-scoped view of this client.
+
+        Args:
+            namespace: Namespace subclass, bound namespace, or string name.
+        """
+        from pelagodb.namespace_view import NamespaceView
+        from pelagodb.schema import Namespace
+
+        if isinstance(namespace, str):
+            return NamespaceView(self, namespace)
+        if isinstance(namespace, type) and issubclass(namespace, Namespace):
+            ns_name = namespace.__pelago_ns_resolved_name__
+            if ns_name is None:
+                raise ValueError(
+                    f"Cannot scope to templated namespace {namespace.__name__}. "
+                    f"Call .bind() first."
+                )
+            return NamespaceView(self, ns_name)
+        raise TypeError(f"Expected Namespace subclass or string, got {type(namespace)}")
+
+    def link(self, source, label: str, target, properties=None):
+        """Create an edge between Entity instances. Infers namespaces from instances.
+
+        Cross-namespace edges are supported: if source and target are in
+        different namespaces, the edge is created with proper cross-namespace NodeRef.
+        """
+        src_ns = source._namespace or self.namespace
+        tgt_ns = target._namespace or self.namespace
+
+        context = pelago_pb2.RequestContext(
+            database=self.database,
+            namespace=src_ns,
+            site_id=self.site_id,
+            request_id=str(uuid.uuid4()),
+        )
+
+        tgt_ref = pelago_pb2.NodeRef(
+            entity_type=type(target).entity_name(),
+            node_id=target.id,
+        )
+        if tgt_ns != src_ns:
+            tgt_ref.database = self.database
+            tgt_ref.namespace = tgt_ns
+
+        req = pelago_pb2.CreateEdgeRequest(
+            context=context,
+            source=pelago_pb2.NodeRef(
+                entity_type=type(source).entity_name(),
+                node_id=source.id,
+            ),
+            target=tgt_ref,
+            label=label,
+            properties={k: _py_to_value(v) for k, v in (properties or {}).items()},
+        )
+        resp = self.edge.CreateEdge(req, metadata=self._metadata())
+        if not resp.edge:
+            raise RuntimeError("CreateEdge returned no edge")
+        return resp.edge
+
+    def unlink(self, source, label: str, target) -> bool:
+        """Delete an edge between Entity instances. Infers namespaces."""
+        src_ns = source._namespace or self.namespace
+        tgt_ns = target._namespace or self.namespace
+
+        context = pelago_pb2.RequestContext(
+            database=self.database,
+            namespace=src_ns,
+            site_id=self.site_id,
+            request_id=str(uuid.uuid4()),
+        )
+
+        tgt_ref = pelago_pb2.NodeRef(
+            entity_type=type(target).entity_name(),
+            node_id=target.id,
+        )
+        if tgt_ns != src_ns:
+            tgt_ref.database = self.database
+            tgt_ref.namespace = tgt_ns
+
+        req = pelago_pb2.DeleteEdgeRequest(
+            context=context,
+            source=pelago_pb2.NodeRef(
+                entity_type=type(source).entity_name(),
+                node_id=source.id,
+            ),
+            target=tgt_ref,
+            label=label,
+        )
+        resp = self.edge.DeleteEdge(req, metadata=self._metadata())
+        return bool(resp.deleted)
+
+    # ----------------------
     # Admin
     # ----------------------
 
