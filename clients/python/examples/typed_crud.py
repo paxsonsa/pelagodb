@@ -1,10 +1,12 @@
-"""End-to-end example: typed schema, namespaces, cross-namespace edges, and query builder.
+"""End-to-end example: typed schema, namespaces, cross-namespace edges, query builder, and watches.
 
 Requires a running PelagoDB server at localhost:27615.
 """
 
+import asyncio
+
 from pelagodb import (
-    PelagoClient, Namespace, Entity, Property, OutEdge, IndexType
+    PelagoClient, Namespace, Entity, Property, OutEdge, IndexType, WatchEventType
 )
 
 
@@ -87,5 +89,28 @@ def main() -> None:
     print("\nDone.")
 
 
+async def watch_example() -> None:
+    """Async watch stream example — watches for people over 30."""
+    client = PelagoClient("localhost:27615")
+    acme = TenantNamespace.bind(tenant_id="acme")
+    acme_ns = client.ns(acme)
+
+    print("\nWatching for Person age > 30 (Ctrl+C to stop)...")
+    async with acme_ns.watch_query(
+        acme.Person,
+        acme.Person.age > 30,
+        include_initial=True,
+    ) as events:
+        async for event in events:
+            if event.type == WatchEventType.HEARTBEAT:
+                continue
+            node_info = f"{event.node.name} (age={event.node.age})" if event.node else "n/a"
+            print(f"  [{event.type.value}] {node_info}")
+
+    client.close()
+
+
 if __name__ == "__main__":
     main()
+    # Uncomment to run the watch example:
+    # asyncio.run(watch_example())
