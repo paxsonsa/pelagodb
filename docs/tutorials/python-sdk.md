@@ -168,9 +168,144 @@ except Exception as e:
     print(f"Error: {e}")
 ```
 
+## Typed Schema API
+
+The Python SDK also provides a typed schema layer with Pydantic-style class
+definitions, operator-overloaded filters, and namespace-scoped operations.
+
+### Define Schemas as Classes
+
+```python
+from pelagodb import (
+    PelagoClient, Namespace, Entity, Property, OutEdge, IndexType
+)
+
+class GlobalNS(Namespace):
+    name = "global"
+
+    class Vendor(Entity):
+        name: str = Property(required=True, index=IndexType.EQUALITY)
+        industry: str = Property()
+
+class TenantNS(Namespace):
+    name = "tenant_{tenant_id}"
+
+    class Person(Entity):
+        name: str = Property(required=True, index=IndexType.EQUALITY)
+        age: int = Property(default=0, index=IndexType.RANGE)
+        active: bool = Property(default=True)
+        follows = OutEdge("Person")
+        supplied_by = OutEdge(GlobalNS.Vendor)  # cross-namespace
+```
+
+Key features:
+- **Type inference** — Python type annotations (`str`, `int`, `float`, `bool`,
+  `datetime`, `bytes`) map to PelagoDB types automatically
+- **Templated namespaces** — `tenant_{tenant_id}` resolves via `.bind(tenant_id="acme")`
+- **Cross-namespace edges** — `OutEdge(GlobalNS.Vendor)` references entities in
+  other namespaces by class
+
+### Register and Create
+
+```python
+client = PelagoClient("127.0.0.1:27615")
+client.register(GlobalNS)
+
+acme = TenantNS.bind(tenant_id="acme")
+client.register(acme)
+
+acme_ns = client.ns(acme)
+alice = acme_ns.create(acme.Person(name="Alice", age=31))
+bob = acme_ns.create(acme.Person(name="Bob", age=29))
+```
+
+### Typed CRUD
+
+```python
+# Read
+fetched = acme_ns.get(acme.Person, alice.id)
+print(fetched.name)  # "Alice"
+
+# Update
+updated = acme_ns.update(alice, age=32)
+print(updated.age)  # 32
+
+# Delete
+acme_ns.delete(bob)
+```
+
+### Filter Expressions and Query Builder
+
+Property descriptors support operator overloading for filter expressions:
+
+```python
+# Simple filter scan
+for p in acme_ns.find(acme.Person, acme.Person.age > 30):
+    print(p.name)
+
+# Compound filters
+seniors = acme_ns.find(
+    acme.Person,
+    (acme.Person.age >= 30) & (acme.Person.active == True),
+    limit=50
+)
+
+# Query builder with traversals
+results = (
+    acme_ns.query(acme.Person)
+    .filter(acme.Person.name == "Alice")
+    .traverse(acme.Person.follows, filter=acme.Person.age > 25)
+    .limit(20)
+    .run()
+)
+```
+
+### Edges
+
+```python
+# Cross-namespace edge
+global_ns = client.ns(GlobalNS)
+vendor = global_ns.create(GlobalNS.Vendor(name="Acme Corp"))
+client.link(alice, "supplied_by", vendor)
+
+# Same-namespace edge
+client.link(alice, "follows", bob)
+
+# Remove edge
+client.unlink(alice, "follows", bob)
+```
+
+### Async Watch Streams
+
+Watch for real-time changes using `async with` / `async for`. The stream and
+server subscription are automatically cancelled when the loop exits:
+
+```python
+import asyncio
+
+async def monitor():
+    acme_ns = client.ns(acme)
+
+    async with acme_ns.watch_query(acme.Person, acme.Person.age > 30) as events:
+        async for event in events:
+            print(f"{event.type}: {event.node.name} age={event.node.age}")
+            if event.type == WatchEventType.DELETE:
+                break  # auto-cancels
+
+asyncio.run(monitor())
+```
+
+Three watch scopes:
+- `watch_node(model, node_id)` — single node changes
+- `watch_query(model, filter_expr)` — query result changes
+- `watch()` — all namespace changes
+
+See `examples/typed_crud.py` for a complete end-to-end example.
+
 ## Related
 
 - [Client SDK Guide](../reference/cli.md) — interface coverage
 - [gRPC API Reference](../reference/grpc-api.md) — underlying API
 - [Build a Social Graph](build-a-social-graph.md) — CLI-based tutorial
 - [Elixir SDK Tutorial](elixir-sdk.md) — Elixir equivalent
+- [Watch Live Changes](watch-live-changes.md) — watch tutorial
