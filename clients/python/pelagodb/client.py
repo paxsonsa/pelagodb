@@ -70,6 +70,9 @@ class PelagoClient:
         self._bearer_token = bearer_token
         self._api_key = api_key
 
+        self._endpoint = endpoint
+        self._insecure = insecure
+
         if insecure:
             self._channel = grpc.insecure_channel(endpoint)
         else:
@@ -85,8 +88,27 @@ class PelagoClient:
         self.replication = pelago_pb2_grpc.ReplicationServiceStub(self._channel)
         self.health = pelago_pb2_grpc.HealthServiceStub(self._channel)
 
+        # Lazy async channel for watch streams
+        self._async_channel: Optional[grpc.aio.Channel] = None
+
+    def _ensure_async_channel(self) -> grpc.aio.Channel:
+        """Lazily create an async gRPC channel for watch streams."""
+        if self._async_channel is None:
+            if self._insecure:
+                self._async_channel = grpc.aio.insecure_channel(self._endpoint)
+            else:
+                raise ValueError("TLS channel wiring is not implemented in this scaffold")
+        return self._async_channel
+
+    def _async_watch_stub(self) -> pelago_pb2_grpc.WatchServiceStub:
+        """Get a WatchServiceStub backed by the async channel."""
+        return pelago_pb2_grpc.WatchServiceStub(self._ensure_async_channel())
+
     def close(self) -> None:
         self._channel.close()
+        if self._async_channel is not None:
+            # grpc.aio channels are closed via .close(); safe to call sync
+            self._async_channel.close()
 
     def _context(self) -> pelago_pb2.RequestContext:
         return pelago_pb2.RequestContext(

@@ -3,6 +3,7 @@ from .namespace_view import NamespaceView
 from .query import CompoundExpr, FilterExpr, QueryBuilder
 from .schema import BiEdge, EdgeDef, Entity, Namespace, OutEdge, Property
 from .types import EdgeDirection, ExtrasPolicy, IndexType, OwnershipMode
+from .watch import TypedWatchEvent, WatchEventType, WatchStream
 
 __all__ = [
     "PelagoClient",
@@ -20,4 +21,7 @@ __all__ = [
     "FilterExpr",
     "CompoundExpr",
     "QueryBuilder",
+    "WatchStream",
+    "WatchEventType",
+    "TypedWatchEvent",
 ]
