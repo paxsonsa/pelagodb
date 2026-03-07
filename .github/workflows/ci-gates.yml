@@ -56,6 +56,12 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install FoundationDB client
+        run: |
+          curl -fsSL https://github.com/apple/foundationdb/releases/download/7.3.27/foundationdb-clients_7.3.27-1_amd64.deb -o fdb.deb
+          sudo dpkg -i fdb.deb
+          rm fdb.deb
+
       - name: Install Helm
         uses: azure/setup-helm@v4
 
