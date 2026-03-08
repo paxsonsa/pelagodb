@@ -18,6 +18,8 @@ fdb.cluster
 data/cache/
 data/cache.bak.*/
 **/__pycache__/
+clients/python/.venv/
+clients/python/*.egg-info/
 clients/python/pelagodb/generated/*
 ui/node_modules/
 ui/dist/
