@@ -174,10 +174,10 @@ jobs:
           path: .tmp/simulation
           if-no-files-found: ignore
 
-  nightly-fuzz-deep:
+  nightly-fuzz-build:
     if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -199,17 +199,58 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
-      - name: Run deep fuzz jobs
-        run: |
-          cd fuzz
-          cargo +nightly fuzz run pql_parser -- -max_total_time=3600 -dict=dictionaries/pql.dict
-          cargo +nightly fuzz run cdc_decode -- -max_total_time=3600
-          cargo +nightly fuzz run mutation_payload -- -max_total_time=3600
+      - name: Build all fuzz targets
+        run: cd fuzz && cargo +nightly fuzz build
 
-      - name: Upload nightly fuzz artifacts
+      - name: Upload fuzz binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-binaries
+          path: |
+            fuzz/target/x86_64-unknown-linux-gnu/release/pql_parser
+            fuzz/target/x86_64-unknown-linux-gnu/release/cdc_decode
+            fuzz/target/x86_64-unknown-linux-gnu/release/mutation_payload
+            fuzz/dictionaries/
+
+  nightly-fuzz-deep:
+    needs: nightly-fuzz-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: pql_parser
+            extra_args: "-dict=dictionaries/pql.dict"
+          - target: cdc_decode
+            extra_args: ""
+          - target: mutation_payload
+            extra_args: ""
+    steps:
+      - name: Install FoundationDB client
+        run: |
+          curl -fsSL https://github.com/apple/foundationdb/releases/download/7.3.27/foundationdb-clients_7.3.27-1_amd64.deb -o fdb.deb
+          sudo dpkg -i fdb.deb
+          rm fdb.deb
+
+      - name: Download fuzz binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-binaries
+
+      - name: Run deep fuzz — ${{ matrix.target }}
+        run: |
+          chmod +x target/x86_64-unknown-linux-gnu/release/${{ matrix.target }}
+          mkdir -p corpus/${{ matrix.target }} artifacts
+          ./target/x86_64-unknown-linux-gnu/release/${{ matrix.target }} \
+            corpus/${{ matrix.target }} \
+            -max_total_time=3600 \
+            ${{ matrix.extra_args }}
+
+      - name: Upload fuzz artifacts — ${{ matrix.target }}
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-fuzz-artifacts
-          path: fuzz/artifacts
+          name: nightly-fuzz-${{ matrix.target }}
+          path: artifacts
           if-no-files-found: ignore
