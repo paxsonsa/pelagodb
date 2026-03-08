@@ -1,9 +1,0 @@
-/Users/apaxson/work/projects/pelagodb/clients/rust/pelagodb-client/target/debug/deps/socket2-bd1c51b8eefee0be.d: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/sockaddr.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/socket.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/sockref.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/sys/unix.rs
-
-/Users/apaxson/work/projects/pelagodb/clients/rust/pelagodb-client/target/debug/deps/libsocket2-bd1c51b8eefee0be.rmeta: /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/lib.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/sockaddr.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/socket.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/sockref.rs /Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/sys/unix.rs
-
-/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/lib.rs:
-/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/sockaddr.rs:
-/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/socket.rs:
-/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/sockref.rs:
-/Users/apaxson/.devtools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.5.10/src/sys/unix.rs:

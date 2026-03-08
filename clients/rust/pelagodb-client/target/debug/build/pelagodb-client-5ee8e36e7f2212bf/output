@@ -1,2 +1,0 @@
-cargo:rerun-if-changed=../../../proto/pelago.proto
-cargo:rerun-if-changed=../../../proto
