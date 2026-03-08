@@ -10,6 +10,218 @@ PelagoDB is a schema-first graph database built on FoundationDB for teams that n
 
 It combines low-level durability/consistency from FoundationDB with high-level graph primitives and developer tooling (gRPC APIs, CLI, SDKs, datasets, and ops scripts).
 
+## Quick Start (Local FDB)
+
+### 1) Prerequisites
+- Rust stable toolchain
+- Python 3.10+ (for the SDK)
+- FoundationDB client tools (`fdbcli`) and either:
+  - a running local FoundationDB cluster, or
+  - Docker (for test cluster via project script)
+
+### 2) Start FoundationDB
+
+Use an existing local cluster:
+```bash
+fdbcli --exec "status minimal"
+```
+
+Or start a local test cluster with Docker:
+```bash
+./scripts/start-fdb.sh
+```
+
+### 3) Start PelagoDB server
+```bash
+export PELAGO_FDB_CLUSTER=/usr/local/etc/foundationdb/fdb.cluster
+# If you used Docker test cluster instead, use:
+# export PELAGO_FDB_CLUSTER=./fdb.cluster
+
+export PELAGO_SITE_ID=1
+export PELAGO_SITE_NAME=local
+export PELAGO_LISTEN_ADDR=127.0.0.1:27615
+export PELAGO_AUTH_REQUIRED=false
+export PELAGO_CACHE_ENABLED=true
+
+cargo run -p pelago-server --bin pelago-server
+```
+
+### 4) Install the Python SDK
+```bash
+cd clients/python
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+pip install -r requirements-dev.txt
+./scripts/generate_proto.sh
+```
+
+### 5) Verify connectivity
+```bash
+cargo run -p pelago-cli -- --server http://127.0.0.1:27615 --database default --namespace default schema list
+```
+
+---
+
+## Using the Python SDK
+
+Once the server is running, the Python SDK is the fastest way to explore PelagoDB. It provides two API levels: a low-level **dict API** and a high-level **typed schema API**.
+
+### Dict API — quick and direct
+
+```python
+from pelagodb import PelagoClient
+
+client = PelagoClient("127.0.0.1:27615", database="default", namespace="demo")
+
+# Register a schema
+client.register_schema_dict({
+    "name": "Person",
+    "properties": {
+        "name": {"type": "string", "required": True},
+        "age":  {"type": "int", "index": "range"},
+    },
+    "edges": {
+        "follows": {"target": "Person", "direction": "outgoing"},
+    },
+})
+
+# Create nodes
+alice = client.create_node("Person", {"name": "Alice", "age": 31})
+bob   = client.create_node("Person", {"name": "Bob",   "age": 29})
+
+# Create an edge
+client.create_edge("Person", alice.id, "follows", "Person", bob.id)
+
+# Query with CEL filter
+for person in client.find_nodes("Person", "age >= 30", limit=20):
+    print(person.id, person.entity_type)
+
+client.close()
+```
+
+### Typed Schema API — define schemas as Python classes
+
+The typed API gives you class-based schema definitions, operator-overloaded filters,
+namespace scoping, and cross-namespace edges.
+
+#### Define your schema
+
+```python
+from pelagodb import (
+    PelagoClient, Namespace, Entity, Property, OutEdge, IndexType
+)
+
+class GlobalNamespace(Namespace):
+    name = "global"
+
+    class Vendor(Entity):
+        name: str = Property(required=True, index=IndexType.EQUALITY)
+        industry: str = Property()
+
+
+class TenantNamespace(Namespace):
+    name = "tenant_{tenant_id}"          # templated — call .bind() to resolve
+
+    class Person(Entity):
+        name: str   = Property(required=True, index=IndexType.EQUALITY)
+        age: int    = Property(default=0, index=IndexType.RANGE)
+        active: bool = Property(default=True)
+        follows     = OutEdge("Person")
+        supplied_by = OutEdge(GlobalNamespace.Vendor)   # cross-namespace edge
+```
+
+#### Register, create, and query
+
+```python
+client = PelagoClient("127.0.0.1:27615")
+
+# Register schemas
+client.register(GlobalNamespace)
+
+acme = TenantNamespace.bind(tenant_id="acme")   # resolves to "tenant_acme"
+client.register(acme)
+
+# Namespace-scoped CRUD
+global_ns = client.ns(GlobalNamespace)
+vendor = global_ns.create(GlobalNamespace.Vendor(name="Acme Corp", industry="Tech"))
+
+acme_ns = client.ns(acme)
+alice   = acme_ns.create(acme.Person(name="Alice", age=31))
+bob     = acme_ns.create(acme.Person(name="Bob",   age=29))
+charlie = acme_ns.create(acme.Person(name="Charlie", age=25))
+
+# Link nodes — same namespace and cross-namespace
+client.link(alice, "follows", bob)
+client.link(alice, "follows", charlie)
+client.link(alice, "supplied_by", vendor)        # cross-namespace edge
+
+# Point lookup
+fetched = acme_ns.get(acme.Person, alice.id)
+print(fetched)  # Person(id='...', ns='tenant_acme', name='Alice', age=31, active=True)
+
+# Update
+updated = acme_ns.update(alice, age=32)
+print(updated.age)  # 32
+
+# Filter with operator overloading
+for p in acme_ns.find(acme.Person, acme.Person.age > 30):
+    print(f"  {p.name} (age={p.age})")
+
+# Query builder — compiles to PQL under the hood
+results = (
+    acme_ns.query(acme.Person)
+    .filter(acme.Person.name == "Alice")
+    .traverse(acme.Person.follows, filter=acme.Person.age > 25)
+    .limit(20)
+    .run()
+)
+for p in results:
+    print(f"  {p.name}")
+
+# Cleanup
+client.unlink(alice, "follows", bob)
+acme_ns.delete(charlie)
+client.close()
+```
+
+#### Async watch streams
+
+Watch for real-time changes. Breaking out of the loop automatically cancels the
+stream and cleans up the server-side subscription:
+
+```python
+import asyncio
+from pelagodb import WatchEventType
+
+async def watch_changes():
+    client = PelagoClient("127.0.0.1:27615")
+    acme = TenantNamespace.bind(tenant_id="acme")
+    acme_ns = client.ns(acme)
+
+    async with acme_ns.watch_query(acme.Person, acme.Person.age > 30) as events:
+        async for event in events:
+            if event.type == WatchEventType.HEARTBEAT:
+                continue
+            print(event.type, event.node.name)
+
+asyncio.run(watch_changes())
+```
+
+Three watch scopes are available:
+- `watch_node(model, node_id)` — watch a specific node
+- `watch_query(model, filter_expr)` — watch a query for result changes
+- `watch()` — watch all changes in the namespace
+
+### More examples
+
+- `clients/python/examples/basic_crud.py` — dict-based CRUD
+- `clients/python/examples/typed_crud.py` — typed schema with namespaces and cross-namespace edges
+- `clients/python/examples/query_and_pql.py` — queries and PQL
+- `clients/python/examples/auth_and_audit.py` — authentication and audit logging
+
+---
+
 ## Architecture at a Glance
 
 PelagoDB is organized into four layers inside each site. Cross-site replication is pull-based over gRPC — each site's replicator reaches out to peers rather than peers pushing in.
@@ -158,16 +370,6 @@ So the name reflects the core idea: connected, clustered systems with explicit l
 - Partition-aware writes: preserve availability and writability, with explicit LWW handling for conflicting new-data creation paths.
 - Operational controls: authn/authz/audit APIs plus retention and admin surfaces.
 
-## Feature Highlights
-- Node and edge CRUD with schema validation and indexing
-- CEL `find` queries and traversal queries
-- PQL parser/compiler/execution + REPL
-- Watch subscriptions with resume semantics
-- Pull-based CDC replication service
-- Authentication, authorization, and audit logging
-- CLI for admin + query workflows
-- Client SDKs/scaffolds for Python, Elixir, Rust, and Swift
-
 ## Schema Registration Breaking Change
 - `SchemaService.RegisterSchema` now requires:
   - `index_default_mode = INDEX_DEFAULT_MODE_AUTO_BY_TYPE_V1`
@@ -197,28 +399,17 @@ So the name reflects the core idea: connected, clustered systems with explicit l
 - Model cross-tenant relationships intentionally, and review fanout/latency costs.
 - Assume partition scenarios will happen and design create flows for deterministic conflict handling and reconciliation.
 
-## Quick Start (ASAP, Local FDB)
+## Advanced Quick Start Options
 
-### 1) Prerequisites
-- Rust stable toolchain
-- FoundationDB client tools (`fdbcli`) and either:
-  - a running local FoundationDB cluster, or
-  - Docker (for test cluster via project script)
-
-### 2) FoundationDB: choose one path
-
-Path A: use existing local cluster (recommended if already running)
+### Config file
 ```bash
-fdbcli --exec "status minimal"
+cp pelago-server.example.toml pelago-server.toml
+cargo run -p pelago-server --bin pelago-server
+# override from CLI when needed:
+# cargo run -p pelago-server --bin pelago-server -- --site-id 2 --listen-addr 127.0.0.1:27616
 ```
 
-Path B: start local test cluster with Docker
-```bash
-./scripts/start-fdb.sh
-```
-This creates `./fdb.cluster` for the containerized test cluster.
-
-Path C: run full local multi-site topology (2 sites + centralized replicators)
+### Multi-site topology (Docker Compose)
 ```bash
 docker compose -f docker-compose.multisite.yml up --build -d
 ```
@@ -227,73 +418,13 @@ This boots:
 - `site2-api` on `127.0.0.1:27616`
 - dedicated replicator workers for each site
 
-### 3) Start PelagoDB server
-Open terminal A:
+### Load example datasets
 ```bash
-export PELAGO_FDB_CLUSTER=/usr/local/etc/foundationdb/fdb.cluster
-# If you used Docker test cluster instead, use:
-# export PELAGO_FDB_CLUSTER=./fdb.cluster
-
-export PELAGO_SITE_ID=1
-export PELAGO_SITE_NAME=local
-export PELAGO_LISTEN_ADDR=127.0.0.1:27615
-export PELAGO_AUTH_REQUIRED=false
-export PELAGO_CACHE_ENABLED=true
-
-cargo run -p pelago-server --bin pelago-server
-```
-
-Optional config-file path (precedence is `file < env < CLI`):
-```bash
-cp pelago-server.example.toml pelago-server.toml
-cargo run -p pelago-server --bin pelago-server
-# override from CLI when needed:
-# cargo run -p pelago-server --bin pelago-server -- --site-id 2 --listen-addr 127.0.0.1:27616
-```
-
-### 4) Validate connectivity from CLI
-Open terminal B:
-```bash
-cargo run -p pelago-cli -- --server http://127.0.0.1:27615 --database default --namespace default schema list
-```
-
-### 5) Create a tiny graph and query it
-Register schema:
-```bash
-cargo run -p pelago-cli -- --server http://127.0.0.1:27615 schema register --inline '{
-  "name":"Person",
-  "properties":{
-    "name":{"type":"string","required":true},
-    "age":{"type":"int","index":"range"}
-  }
-}'
-```
-
-SQL-like schema definition is also supported:
-```bash
-cargo run -p pelago-cli -- --server http://127.0.0.1:27615 schema register --input-format sql --inline 'CREATE TYPE Person (name STRING REQUIRED, age INT INDEX RANGE);'
-```
-
-Create nodes:
-```bash
-cargo run -p pelago-cli -- --server http://127.0.0.1:27615 node create Person name=Alice age=31
-cargo run -p pelago-cli -- --server http://127.0.0.1:27615 node create Person name=Bob age=29
-```
-
-Query:
-```bash
-cargo run -p pelago-cli -- --server http://127.0.0.1:27615 query find Person --filter 'age >= 30' --limit 10
-```
-
-### 6) Load example datasets
-```bash
-pip install -r clients/python/requirements-dev.txt
-./clients/python/scripts/generate_proto.sh
 python datasets/load_dataset.py social_graph --endpoint 127.0.0.1:27615 --database default --namespace demo
 ```
 More: `datasets/README.md`
 
-### 7) Optional: serve docs from running server
+### Serve docs from running server
 ```bash
 export PELAGO_DOCS_ENABLED=true
 export PELAGO_DOCS_ADDR=127.0.0.1:4070
@@ -301,13 +432,10 @@ cargo run -p pelago-server --bin pelago-server
 ```
 Open `http://127.0.0.1:4070/docs/`
 
-### 8) Optional: run the embedded UI console
+### Embedded UI console
 Build frontend assets once:
 ```bash
-cd ui
-npm install
-npm run build
-cd ..
+cd ui && npm install && npm run build && cd ..
 ```
 
 Then start server with UI enabled:
@@ -318,6 +446,11 @@ export PELAGO_UI_ASSETS_DIR=ui/dist
 cargo run -p pelago-server --bin pelago-server
 ```
 Open `http://127.0.0.1:4080/ui/`
+
+### Stop local test FDB (if started via Docker)
+```bash
+./scripts/stop-fdb.sh
+```
 
 ## Quick Links
 - Documentation hub: `docs/README.md`
@@ -365,120 +498,3 @@ The perf gate is split by transport to separate service-path latency from CLI pr
 Provisioned S1-S6 CI runs both gates and emits:
 - `.tmp/perf/<SCENARIO>-grpc.json`
 - `.tmp/perf/<SCENARIO>-cli.json`
-
-## Stop Local Test FDB (if started via Docker)
-```bash
-./scripts/stop-fdb.sh
-```
-
-## Latest Performance Snapshot
-Local benchmark snapshot from **February 19, 2026** using:
-- single API node (`127.0.0.1:27615`)
-- local FDB test container
-- Context benchmark profile (`scripts/perf-benchmark.py`)
-- dataset: `benchmark` namespace with `Context` records (`show_001`, `scheme=main`)
-
-Command:
-```bash
-python3 scripts/perf-benchmark.py \
-  --pelago-bin target/debug/pelago \
-  --server http://127.0.0.1:27615 \
-  --database default \
-  --namespace benchmark \
-  --profile context \
-  --entity-type Context \
-  --seed-node-id 1_0 \
-  --context-show show_001 \
-  --context-scheme main \
-  --context-shot shot_001 \
-  --context-shot-alt shot_002 \
-  --context-sequence seq_001 \
-  --context-task fx \
-  --context-label default \
-  --context-page-size 20 \
-  --context-deep-pages 5 \
-  --runs 10 \
-  --warmup 2 \
-  --output-json .tmp/bench/context-latest.json
-```
-
-Results (ms):
-
-| Case | p50 | p95 | p99 |
-|---|---:|---:|---:|
-| `context_point_lookup` | 36.026 | 36.843 | 36.847 |
-| `context_show_shot` | 96.259 | 101.597 | 102.504 |
-| `context_show_shot_task_label` | 64.957 | 68.897 | 69.156 |
-| `context_or_shots` | 93.845 | 102.122 | 102.768 |
-| `context_deep_page` | 88.450 | 95.417 | 95.456 |
-
-Artifact:
-- `.tmp/bench/context-latest.json`
-
-## Single-Node VFX Baseline Snapshot
-Local baseline snapshot from **February 19, 2026** using:
-- single API node (`127.0.0.1:27615`)
-- single local FoundationDB test node/container
-- dataset: `vfx_pipeline_50k/show_001` loaded into namespace `vfx.show.001.full`
-
-Dataset load command:
-```bash
-PYTHONPATH=clients/python/pelagodb/generated:clients/python \
-python3 datasets/load_dataset.py vfx_pipeline_50k/show_001 \
-  --endpoint 127.0.0.1:27615 \
-  --database default \
-  --namespace vfx.show.001.full
-```
-
-### CLI Harness Results (`scripts/perf-benchmark.py`)
-Notes:
-- these include per-request CLI process startup cost
-- warmup/runs varied by case as shown in artifact files
-
-| Case | p50 (ms) | p95 (ms) | p99 (ms) |
-|---|---:|---:|---:|
-| `node_get` (`Task:1_0`, unique-filter run) | 32.128 | 35.402 | 37.048 |
-| `query_find` (`task_code == 'S001-TSK-001-001-01'`) | 39.508 | 43.471 | 46.529 |
-| `query_find` (`stage == 'comp'`) | 743.499 | 925.431 | 1182.810 |
-| `query_find` (`stage == 'comp' || stage == 'fx'`) | 1072.159 | 1155.109 | 1198.310 |
-| `query_traverse` (`Shot:1_0`, `has_task`, depth 2) | 54.667 | 61.533 | 62.124 |
-
-Artifacts:
-- `.tmp/bench/vfx-show001-unique.json`
-- `.tmp/bench/vfx-show001-stage-comp.json`
-- `.tmp/bench/vfx-show001-stage-or.json`
-- `.tmp/bench/vfx-show001-shot-traverse.json`
-
-### Direct gRPC Results (Persistent Client)
-Notes:
-- persistent gRPC channel, no CLI spawn overhead
-- includes p90 and tighter estimate of server/query path latency
-
-| Case | p50 (ms) | p90 (ms) | p95 (ms) | p99 (ms) |
-|---|---:|---:|---:|---:|
-| `grpc_node_get_task_1_0` | 3.268 | 5.170 | 5.642 | 6.668 |
-| `grpc_find_task_unique_code` | 9.592 | 12.744 | 14.223 | 17.275 |
-| `grpc_find_task_stage_comp` | 828.053 | 903.877 | 943.520 | 997.301 |
-| `grpc_find_task_stage_or` | 1141.298 | 1218.957 | 1254.694 | 1316.191 |
-
-Artifact:
-- `.tmp/bench/vfx-show001-direct-grpc.json`
-
-### Parallel Operation Checks (Single Query Node)
-Mixed-operation parallel checks using direct gRPC against `vfx.show.001.full`.
-
-1) Selective mix (point + unique-equality find):
-- 32 workers, 800 total ops (400 point + 400 find)
-- throughput: ~3961 ops/sec
-- point p50/p95/p99: 5.492 / 9.954 / 11.551 ms
-- find p50/p95/p99: 9.606 / 11.631 / 13.590 ms
-
-2) Broad-filter mix (point + `stage == 'comp'` find):
-- 16 workers, 240 total ops (120 point + 120 find)
-- throughput: ~29.45 ops/sec
-- point p50/p95/p99: 4.919 / 9.125 / 9.753 ms
-- find p50/p95/p99: 1011.736 / 1169.336 / 1173.376 ms
-
-Artifacts:
-- `.tmp/bench/vfx-show001-parallel-ops.json`
-- `.tmp/bench/vfx-show001-parallel-ops-broad.json`
